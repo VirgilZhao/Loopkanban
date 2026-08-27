@@ -4,3 +4,5 @@ dist/
 .DS_Store
 .openkanban/
 packages/web/dist/
+dist/
+*.tgz

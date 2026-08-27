@@ -1,11 +1,11 @@
 {
-  "name": "openkanban-root",
-  "version": "0.0.0",
-  "private": true,
+  "name": "openkanban",
+  "version": "0.1.0",
+  "private": false,
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.5.0"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @openkanban/web exec tsc -p tsconfig.json --noEmit",
@@ -13,11 +13,22 @@
     "test:watch": "vitest",
     "m0": "node --experimental-strip-types packages/host/src/bin/m0.ts",
     "build:web": "pnpm --filter @openkanban/web run build",
-    "dev": "node --experimental-strip-types packages/host/src/bin/openkanban.ts"
+    "dev": "node --experimental-strip-types packages/host/src/bin/openkanban.ts",
+    "build": "pnpm run build:web && node --experimental-strip-types scripts/build.ts",
+    "prepack": "pnpm run build"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "description": "一个看板：任务可以被本机的 Claude Code / Codex CLI 认领并自动完成",
+  "license": "MIT",
+  "bin": {
+    "openkanban": "./dist/openkanban.js"
+  },
+  "files": [
+    "dist"
+  ]
 }

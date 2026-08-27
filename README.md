@@ -4,10 +4,20 @@
 人类只做定义和验收。
 
 ```bash
-node --experimental-strip-types packages/host/src/bin/openkanban.ts
+npx openkanban
 ```
 
 启动后自动打开浏览器。规划文档见 [docs/PRD.md](docs/PRD.md)。
+
+需要 Node ≥ 22.5（用到内置的 `node:sqlite`），以及本机已装 `claude` 或 `codex`
+其中之一。发布包 148 KB、**零运行时依赖**。
+
+想让它一直活着（自动认领的意义就在于你不用盯着）：
+
+```bash
+openkanban service print     # 先看它要写什么，不做任何改动
+openkanban service install   # 确认无误再装
+```
 
 ## 它是什么
 
@@ -34,16 +44,20 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 205 个测试
+pnpm test            # 211 个测试
 pnpm run typecheck
-pnpm run build:web   # 前端产物，host 从 packages/web/dist 托管
+pnpm run build       # 打出 dist/openkanban.js 与 dist/web/
+
+# 从源码直接跑，不必构建
+node --experimental-strip-types packages/host/src/bin/openkanban.ts
 ```
 
 ### 两条容易踩的约束
 
-**`core` 与 `host` 直接跑在 `node --experimental-strip-types` 上，没有构建
-步骤。** strip-only 模式不支持参数属性（`constructor(private x)`）、`enum`、
-`namespace` 和装饰器 —— vitest 用 esbuild 能编过，但真正运行时会报
+**开发时 `core` 与 `host` 直接跑在 `node --experimental-strip-types` 上，
+没有构建步骤**（发布版另行用 esbuild 打成单文件 —— shebang 里塞不进这个 flag）。
+strip-only 模式不支持参数属性（`constructor(private x)`）、`enum`、`namespace`
+和装饰器 —— vitest 用 esbuild 能编过，但真正运行时会报
 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`。`web` 走 Vite，不受此限制。
 
 **探测能力，不要假设。** 参数面要按**每条命令**分别探测：实测

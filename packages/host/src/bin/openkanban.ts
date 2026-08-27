@@ -8,6 +8,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -20,11 +21,23 @@ import { startServer } from '../server/index.ts'
 import { Review } from '../review/index.ts'
 import { Runner } from '../runner/index.ts'
 import { Scheduler } from '../scheduler/index.ts'
+import { installService, planService, uninstallService, type ServicePlan } from '../service/index.ts'
 import { Storage } from '../storage/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-/** 前端产物目录：packages/host/src/bin → packages/web/dist */
-const STATIC_DIR = resolve(HERE, '../../../web/dist')
+
+/**
+ * 前端产物目录。两种布局都要认：
+ *   - 开发时  packages/host/src/bin/openkanban.ts → packages/web/dist
+ *   - 发布后  dist/openkanban.js                  → dist/web
+ */
+function staticDir(): string | undefined {
+  for (const candidate of [resolve(HERE, 'web'), resolve(HERE, '../../../web/dist')]) {
+    if (existsSync(join(candidate, 'index.html'))) return candidate
+  }
+  // 找不到就只提供 API —— 比起装作正常然后给用户一个 404 白页，说清楚更好。
+  return undefined
+}
 
 const C = {
   dim: (s: string) => `\x1b[90m${s}\x1b[0m`,
@@ -126,7 +139,82 @@ function openBrowser(url: string): void {
   }
 }
 
+const USAGE = `
+用法：
+  openkanban [选项]                     起服务并打开浏览器
+  openkanban service <子命令>           开机自启
+
+选项：
+  --port <n>        监听端口，默认随机
+  --data <dir>      数据目录，默认按平台惯例
+  --no-open         不自动打开浏览器
+  --new-token       轮换访问 token
+  --help            显示本帮助
+
+service 子命令：
+  print             打印将要写入的服务单元与命令，不做任何改动
+  install           安装并启用
+  uninstall         停用并删除
+`
+
+/** 处理 `openkanban service …`；返回 true 表示这次调用已经处理完了。 */
+async function handleService(): Promise<boolean> {
+  const at = process.argv.indexOf('service')
+  if (at < 0) return false
+  const sub = process.argv[at + 1] ?? 'print'
+
+  let plan: ServicePlan
+  try {
+    const portArg = flag('port')
+    plan = planService({
+      bin: process.argv[1] ?? '',
+      nodePath: process.execPath,
+      ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
+      ...(flag('data') === undefined ? {} : { dataDir: flag('data') as string }),
+    })
+  } catch (error) {
+    console.error(C.red(`  ${error instanceof Error ? error.message : String(error)}`))
+    process.exitCode = 1
+    return true
+  }
+
+  // 无论装还是卸，都先把要做的事原样打印出来。改动用户机器上的常驻配置,
+  // 不该在他看不见的地方发生。
+  console.log(`\n  ${C.bold('单元文件')} ${plan.unitPath}\n`)
+  console.log(C.dim(plan.unitContent.split('\n').map((l) => `    ${l}`).join('\n')))
+  const commands = sub === 'uninstall' ? plan.disableCommands : plan.enableCommands
+  console.log(`  ${C.bold('将要执行')}`)
+  for (const command of commands) console.log(C.dim(`    ${command.join(' ')}`))
+
+  if (sub === 'print') {
+    console.log(C.dim('\n  以上只是预览。`openkanban service install` 才会真正写入。\n'))
+    return true
+  }
+  if (sub !== 'install' && sub !== 'uninstall') {
+    console.error(C.red(`\n  未知子命令 "${sub}"。可用：print / install / uninstall\n`))
+    process.exitCode = 1
+    return true
+  }
+
+  const outcome = sub === 'install' ? await installService(plan) : await uninstallService(plan)
+  console.log('')
+  for (const step of outcome.ran) {
+    const ok = step.code === 0
+    console.log(`  ${ok ? C.green('✓') : C.red('✗')} ${step.argv.join(' ')}${ok ? '' : C.dim(` (code=${String(step.code)})`)}`)
+  }
+  console.log(sub === 'install'
+    ? C.dim('\n  已安装。开机自动启动，崩溃自动重启。\n')
+    : C.dim('\n  已卸载。\n'))
+  return true
+}
+
 async function main(): Promise<void> {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(USAGE)
+    return
+  }
+  if (await handleService()) return
+
   // --data 让多个看板/临时试验各用各的库，不污染日常数据。
   const dir = flag('data') ?? dataDir()
   await mkdir(dir, { recursive: true })
@@ -177,6 +265,11 @@ async function main(): Promise<void> {
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
   const token = await resolveToken(dir, process.argv.includes('--new-token'))
+  const assets = staticDir()
+  if (assets === undefined) {
+    console.log(C.red('  ✗ 找不到前端产物，本次只提供 API。'))
+    console.log(C.dim('    从源码运行时先跑 `pnpm run build:web`。\n'))
+  }
   const server = await startServer({
     storage,
     agents,
@@ -185,7 +278,7 @@ async function main(): Promise<void> {
     scheduler,
     bus,
     token,
-    staticDir: STATIC_DIR,
+    ...(assets === undefined ? {} : { staticDir: assets }),
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })
 

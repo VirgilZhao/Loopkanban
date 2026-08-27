@@ -284,7 +284,7 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 | **M2 验收闭环** ✅ **已完成** | Diff 查看、合并 / 打回 / 废弃；**打回走真续跑**；权限档位定稿 | 完整走完 Ready→Done，打回能接着上次改 |
 | **M3 自动驾驶**（核心卖点）✅ **已完成** | 调度器、租约与超时回收、并发上限、依赖阻塞、孤儿进程与 worktree 对账、崩溃恢复、浏览器通知 | 扔 5 张卡进 Ready，关掉浏览器去睡觉，回来全在 Review |
 | **M4 体验** ✅ **已完成** | 拖拽排序、任务模板、`writeScopes` 冲突预警、Runs 统计与成本 | 日常可用 |
-| **M5 分发** | `npx openkanban` 一行启动；`service install` 装 launchd/systemd 常驻；文档 | 别人能装上用 |
+| **M5 分发** ✅ **已完成** | `npx openkanban` 一行启动；`service install` 装 launchd/systemd 常驻；文档 | 别人能装上用 |
 
 ---
 
@@ -452,6 +452,30 @@ CAS 冲突面也最小。
 `total_cost_usd`，codex 不报。标成「成本」会让人以为那是全部开销。
 同理，中位耗时用中位数而非平均值 —— 一次超时会把平均值拉得没法看；
 没有已结束的 Run 时返回 `null` 而不是 0，「没数据」和「耗时为 0」不是一回事。
+
+---
+
+## 5.5 M5 实测结论
+
+`npm pack` → 装进干净目录 → 跑通完整任务链路：**148 KB、8 个文件、零运行时依赖**。
+
+### 发布版必须编译，开发版不必
+
+`bin` 的 shebang 里没法可靠地塞进 `--experimental-strip-types`，要求每个用户
+自己带这个 flag 也不现实。所以发布版用 esbuild 打成单文件 JS（102 KB，
+`node:*` 内置模块外置，其余全部内联），而开发时仍然直接跑 TS、没有构建步骤。
+
+由此前端产物目录要认两种布局：开发时在 `packages/web/dist`，发布后在
+`dist/web`。找不到时**明说"本次只提供 API"**，而不是装作正常然后甩给用户
+一个 404 白页。
+
+### 改用户机器上的常驻配置，不该在他看不见的地方发生
+
+`openkanban service install` 会写 launchd plist（macOS）或 systemd user unit
+（Linux）——都是**用户级**，不碰系统目录，不需要 sudo。
+
+装和卸都会先把单元文件内容与将要执行的命令原样打印出来，另有
+`service print` 只预览不改动。
 
 ---
 

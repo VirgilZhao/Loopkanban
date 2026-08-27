@@ -7,7 +7,8 @@
  */
 
 import type {
-  Agent, Board, DiffView, Run, SchedulerSettings, SchedulerState, StreamEvent, Task,
+  Agent, Board, DiffView, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task,
+  TaskEdit,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -50,6 +51,18 @@ export const api = {
   /** 取消执行，会连同整棵进程树一起收掉。 */
   cancel: (runId: string) =>
     call<{ stopped: boolean }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
+
+  /** 编辑任务内容。执行中的卡片会被拒绝。 */
+  edit: (taskId: string, expectedRevision: number, edit: TaskEdit) =>
+    call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'PATCH', body: JSON.stringify({ expectedRevision, ...edit }),
+    }),
+
+  /** 与该任务写入范围重叠、且正在运行的任务。 */
+  overlaps: (taskId: string) =>
+    call<{ overlaps: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}/overlaps`),
+
+  stats: () => call<RunStats>('/api/stats'),
 
   scheduler: () => call<SchedulerState>('/api/scheduler'),
 

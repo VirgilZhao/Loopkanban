@@ -223,3 +223,54 @@ describe('迁移', () => {
     expect(() => { store.createRun(run({ taskId: asTaskId('ghost') })) }).toThrow()
   })
 })
+
+describe('stats', () => {
+  beforeEach(() => { store.createTask(task({ id: 't1' })) })
+
+  const addRun = (id: string, patch: Partial<Run>): Run => {
+    const created = run({ id: asRunId(id), ...patch })
+    store.createRun(created)
+    return created
+  }
+
+  it('空库时全是零，中位耗时为 null 而不是 0', () => {
+    const s = store.stats()
+    expect(s).toMatchObject({ totalRuns: 0, completed: 0, failed: 0, costUsd: 0 })
+    expect(s.providers).toEqual([])
+  })
+
+  it('按状态与 provider 汇总', () => {
+    addRun('a', { provider: 'claude', status: 'completed', endedAt: T0 + 10_000 })
+    addRun('b', { provider: 'claude', status: 'failed', endedAt: T0 + 30_000 })
+    addRun('c', { provider: 'codex', status: 'completed', endedAt: T0 + 20_000 })
+    addRun('d', { provider: 'codex', status: 'running' })
+
+    const s = store.stats()
+    expect(s).toMatchObject({ totalRuns: 4, completed: 2, failed: 1, running: 1 })
+    expect(s.providers[0]).toMatchObject({ provider: 'claude', total: 2, completed: 1, failed: 1 })
+    // 中位数抗离群值：10s 与 30s 的中位是 20s。
+    expect(s.providers[0]?.medianMs).toBe(20_000)
+  })
+
+  it('没有已结束的 Run 时中位耗时是 null —— 「没数据」不等于「耗时 0」', () => {
+    addRun('a', { provider: 'claude', status: 'running' })
+    expect(store.stats().providers[0]?.medianMs).toBeNull()
+  })
+
+  it('用量与成本从事件日志现算', () => {
+    addRun('a', { provider: 'claude', status: 'completed', endedAt: T0 + 1 })
+    store.appendEvent(asRunId('a'), 'usage', { inputTokens: 100, outputTokens: 20, costUsd: 0.5 }, T0)
+    store.appendEvent(asRunId('a'), 'usage', { inputTokens: 50, outputTokens: 10, costUsd: 0.25 }, T0)
+    store.appendEvent(asRunId('a'), 'text', { text: '不该被计入' }, T0)
+
+    expect(store.stats()).toMatchObject({ inputTokens: 150, outputTokens: 30, costUsd: 0.75 })
+  })
+
+  it('单条坏事件不该让整个统计报错', () => {
+    addRun('a', { provider: 'claude', status: 'completed', endedAt: T0 + 1 })
+    store.appendEvent(asRunId('a'), 'usage', { costUsd: 1 }, T0)
+    store.appendEvent(asRunId('a'), 'usage', 'not-an-object', T0)
+    expect(() => store.stats()).not.toThrow()
+    expect(store.stats().costUsd).toBe(1)
+  })
+})

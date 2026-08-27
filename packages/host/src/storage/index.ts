@@ -40,6 +40,26 @@ export interface Run {
   readonly endedAt?: number | undefined
 }
 
+export interface ProviderStats {
+  readonly provider: string
+  readonly total: number
+  readonly completed: number
+  readonly failed: number
+  /** 中位耗时（毫秒）；没有已结束的 Run 时为 null。 */
+  readonly medianMs: number | null
+}
+
+export interface RunStats {
+  readonly totalRuns: number
+  readonly completed: number
+  readonly failed: number
+  readonly running: number
+  readonly costUsd: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly providers: readonly ProviderStats[]
+}
+
 export interface RunEvent {
   readonly runId: RunId
   readonly seq: number
@@ -269,6 +289,68 @@ export class Storage {
     return (rows as unknown as RunRow[]).map(toRun)
   }
 
+  // ── 统计 ───────────────────────────────────────────────────────
+
+  /**
+   * 汇总执行数据。
+   *
+   * 用量与成本从 `run_events` 里的 `usage` 事件现算，而不是在 runs 表上加列：
+   * 事件日志本来就是真相，多一份冗余就多一处会不一致的地方。本地工具的数据量
+   * 也撑得住。
+   */
+  stats(): RunStats {
+    const runs = this.db.prepare(
+      "SELECT provider, status, started_at, ended_at FROM runs",
+    ).all() as unknown as { provider: string; status: string; started_at: number; ended_at: number | null }[]
+
+    const usage = this.db.prepare(
+      "SELECT run_id, payload_json FROM run_events WHERE kind = 'usage'",
+    ).all() as unknown as { run_id: string; payload_json: string }[]
+
+    let costUsd = 0
+    let inputTokens = 0
+    let outputTokens = 0
+    for (const row of usage) {
+      try {
+        const payload = JSON.parse(row.payload_json) as Record<string, unknown>
+        if (typeof payload['costUsd'] === 'number') costUsd += payload['costUsd']
+        if (typeof payload['inputTokens'] === 'number') inputTokens += payload['inputTokens']
+        if (typeof payload['outputTokens'] === 'number') outputTokens += payload['outputTokens']
+      } catch {
+        // 单条坏事件不该让整个统计报错。
+      }
+    }
+
+    const byProvider = new Map<string, { total: number; completed: number; failed: number; durations: number[] }>()
+    for (const run of runs) {
+      const bucket = byProvider.get(run.provider)
+        ?? { total: 0, completed: 0, failed: 0, durations: [] }
+      bucket.total += 1
+      if (run.status === 'completed') bucket.completed += 1
+      if (run.status === 'failed') bucket.failed += 1
+      if (run.ended_at !== null) bucket.durations.push(run.ended_at - run.started_at)
+      byProvider.set(run.provider, bucket)
+    }
+
+    return {
+      totalRuns: runs.length,
+      completed: runs.filter((r) => r.status === 'completed').length,
+      failed: runs.filter((r) => r.status === 'failed').length,
+      running: runs.filter((r) => r.status === 'running').length,
+      costUsd,
+      inputTokens,
+      outputTokens,
+      providers: [...byProvider].map(([provider, b]) => ({
+        provider,
+        total: b.total,
+        completed: b.completed,
+        failed: b.failed,
+        // 中位数比平均值抗离群值：一次超时会把平均耗时拉得没法看。
+        medianMs: median(b.durations),
+      })).sort((a, b) => b.total - a.total),
+    }
+  }
+
   // ── 设置 ───────────────────────────────────────────────────────
 
   /**
@@ -349,4 +431,14 @@ export class Storage {
       at: row.at,
     }))
   }
+}
+
+/** 中位数。空数组返回 null 而不是 0 —— 「没有数据」和「耗时为 0」不是一回事。 */
+function median(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+    : sorted[mid] ?? null
 }

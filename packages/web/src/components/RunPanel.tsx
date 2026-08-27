@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
-import { Check, GitMerge, Play, RotateCcw, Square, Trash2 } from 'lucide-react'
+import { Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert } from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
+import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, DiffView as Diff, Run, StreamEvent, Task } from '@/types.ts'
+import type { Agent, DiffView as Diff, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
 const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
@@ -58,6 +59,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
   const [busy, setBusy] = useState(false)
   const [diff, setDiff] = useState<Diff | null>(null)
   const [feedback, setFeedback] = useState('')
+  const [overlaps, setOverlaps] = useState<string[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
@@ -85,6 +87,16 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
       if (event.kind === 'finished') onLiveTool(task.id, undefined)
     })
   }, [latest, task.id, onLiveTool])
+
+  // 写入范围重叠预警：同仓库、正在跑、路径前缀相撞的任务。
+  useEffect(() => {
+    if (task.writeScopes.length === 0) { setOverlaps([]); return undefined }
+    let cancelled = false
+    void api.overlaps(task.id)
+      .then(({ overlaps: ids }) => { if (!cancelled) setOverlaps(ids) })
+      .catch(() => { if (!cancelled) setOverlaps([]) })
+    return () => { cancelled = true }
+  }, [task.id, task.revision])
 
   // 只在有执行记录时拉 diff；卡片状态变了要重拉（打回后又跑了一轮）。
   useEffect(() => {
@@ -196,6 +208,17 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
         </div>
       ) : null}
 
+      {/* 写入范围撞车预警。建议性的 —— Bash 和代码生成器都能绕过它。 */}
+      {overlaps.length === 0 ? null : (
+        <div className="flex items-start gap-2 border-b border-lamp-fail/30 bg-lamp-fail/[0.06] px-3 py-2">
+          <TriangleAlert className="mt-[2px] size-3 flex-none text-lamp-fail" />
+          <p className="text-[11px] leading-snug text-lamp-fail">
+            写入范围与正在执行的 <span className="mono">{overlaps.join('、')}</span> 重叠，
+            可能撞车。这只是提示，不是锁。
+          </p>
+        </div>
+      )}
+
       {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
       {task.column === 'review' ? (
         <div className="border-b border-hairline px-3 py-2">
@@ -304,39 +327,19 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
           {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
         </TabsContent>
 
-        <TabsContent value="spec" className="mt-0 min-h-0 flex-1 overflow-y-auto px-3 py-3">
-          <Field label="描述">
-            <p className="whitespace-pre-wrap text-ink-dim">{task.description || '（空）'}</p>
-          </Field>
-          <Field label="验收标准">
-            {task.acceptance.length === 0 ? (
-              <p className="text-lamp-fail">未填写 —— 该任务无法进入 Ready</p>
-            ) : (
-              <ul className="space-y-1">
-                {task.acceptance.map((item) => (
-                  <li key={item} className="flex gap-2 text-ink-dim">
-                    <span className="mono text-ink-faint">□</span>{item}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Field>
+        <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
           {task.feedback === undefined ? null : (
-            <Field label="待处理的评审意见">
-              <p className="whitespace-pre-wrap text-sodium">{task.feedback}</p>
-            </Field>
+            <div className="border-b border-sodium-deep/40 bg-sodium/[0.06] px-3 py-2">
+              <p className="cjk-label mb-1 !text-[10px] !text-sodium">待处理的评审意见</p>
+              <p className="whitespace-pre-wrap text-[12px] text-sodium">{task.feedback}</p>
+            </div>
           )}
-          <Field label="仓库">
-            <p className="mono text-[11px] text-ink-dim">{task.repoPath}</p>
-            <p className="mono text-[11px] text-ink-faint">基线 {task.baseBranch}</p>
-          </Field>
-          {task.writeScopes.length > 0 ? (
-            <Field label="写入范围（建议性）">
-              {task.writeScopes.map((scope) => (
-                <p key={scope} className="mono text-[11px] text-ink-dim">{scope}</p>
-              ))}
-            </Field>
-          ) : null}
+          <TaskEditor
+            task={task}
+            agents={agents}
+            busy={busy}
+            onSave={(edit: TaskEdit) => { void act(() => api.edit(task.id, task.revision, edit)) }}
+          />
         </TabsContent>
 
         <TabsContent value="runs" className="mt-0 min-h-0 flex-1 overflow-y-auto">

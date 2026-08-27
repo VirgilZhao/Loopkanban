@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  acquireLease, asBoardId, asRunId, asTaskId, canTransition, isLeaseExpired,
+  acquireLease, asBoardId, asRunId, asTaskId, canTransition, editTask, isLeaseExpired,
   moveTask, reclaimIfExpired, renewLease, type Task,
 } from '../src/index.ts'
 
@@ -203,5 +203,58 @@ describe('reclaimIfExpired', () => {
 
   it('没有租约也算过期', () => {
     expect(isLeaseExpired(task(), T0)).toBe(true)
+  })
+})
+
+
+describe('editTask', () => {
+  const edit = (t: Task, patch: Parameters<typeof editTask>[1]['edit'], rev = t.revision) =>
+    editTask(t, { expectedRevision: rev, edit: patch, now: T0 + 9 })
+
+  it('改标题与验收标准并自增 revision', () => {
+    const result = edit(task({ column: 'backlog' }), { subject: '  新标题  ', acceptance: ['A', ' ', 'B'] })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.subject).toBe('新标题')
+    // 空白项被剔除，免得验收清单里出现空条目。
+    expect(result.value.acceptance).toEqual(['A', 'B'])
+    expect(result.value.revision).toBe(2)
+  })
+
+  it('正在执行的卡片不能改需求 —— 否则人和 Agent 对着两份规格', () => {
+    expect(edit(task({ column: 'running' }), { subject: '改一下' }))
+      .toMatchObject({ ok: false, reason: 'task-running' })
+  })
+
+  it('空标题被拒', () => {
+    expect(edit(task({ column: 'backlog' }), { subject: '   ' }))
+      .toMatchObject({ ok: false, reason: 'subject-required' })
+  })
+
+  it('队列中的卡不能清空验收标准，否则会变成一张无法验收的活卡', () => {
+    expect(edit(task({ column: 'ready' }), { acceptance: [] }))
+      .toMatchObject({ ok: false, reason: 'acceptance-required' })
+    // 但在 backlog 里随便清。
+    expect(edit(task({ column: 'backlog' }), { acceptance: [] }).ok).toBe(true)
+  })
+
+  it('可以显式清除指定的 provider', () => {
+    const withProvider = task({ column: 'backlog', preferredProvider: 'codex' })
+    const result = edit(withProvider, { preferredProvider: undefined })
+    expect(result.ok && result.value.preferredProvider).toBeUndefined()
+  })
+
+  it('没提到的字段原样保留', () => {
+    const original = task({ column: 'backlog', description: '原描述', writeScopes: ['src/'] })
+    const result = edit(original, { subject: '只改标题' })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.description).toBe('原描述')
+    expect(result.value.writeScopes).toEqual(['src/'])
+  })
+
+  it('revision 不匹配时拒绝', () => {
+    expect(edit(task({ column: 'backlog', revision: 5 }), { subject: 'x' }, 4))
+      .toMatchObject({ ok: false, reason: 'revision-conflict' })
   })
 })

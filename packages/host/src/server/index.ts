@@ -11,7 +11,10 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import type { AddressInfo } from 'node:net'
 import { extname, join, normalize, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { asBoardId, asRunId, asTaskId, moveTask, type Column, type Task } from '@openkanban/core'
+import {
+  asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
+  type Column, type Task, type TaskEdit,
+} from '@openkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
@@ -168,6 +171,12 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    // ── 统计 ────────────────────────────────────────────────
+    if (method === 'GET' && pathname === '/api/stats') {
+      sendJson(res, 200, storage.stats(), extraHeaders)
+      return
+    }
+
     // ── 自动驾驶：状态与设置 ─────────────────────────────────
     if (pathname === '/api/scheduler') {
       if (scheduler === undefined) { sendJson(res, 503, { error: 'no-scheduler' }); return }
@@ -228,6 +237,43 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     const runsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/runs$/)
     if (method === 'GET' && runsOf !== null) {
       sendJson(res, 200, { runs: storage.listRuns(asTaskId(decodeURIComponent(runsOf))) }, extraHeaders)
+      return
+    }
+
+    // ── 编辑任务（CAS）──────────────────────────────────────
+    const editId = /^\/api\/tasks\/([^/]+)$/.exec(pathname)?.[1]
+    if (method === 'PATCH' && editId !== undefined) {
+      const task = storage.getTask(asTaskId(decodeURIComponent(editId)))
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const body = await readJsonBody(req) as
+        ({ expectedRevision?: number } & TaskEdit) | undefined
+      if (body?.expectedRevision === undefined) {
+        sendJson(res, 400, { error: 'bad-request', detail: '需要 expectedRevision' })
+        return
+      }
+      const { expectedRevision, ...edit } = body
+      const edited = editTask(task, { expectedRevision, edit, now: Date.now() })
+      if (!edited.ok) {
+        sendJson(res, edited.reason === 'revision-conflict' ? 409 : 422, {
+          error: edited.reason, detail: edited.detail,
+        })
+        return
+      }
+      if (!storage.commitTask(edited.value)) {
+        sendJson(res, 409, { error: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' })
+        return
+      }
+      sendJson(res, 200, { task: edited.value }, extraHeaders)
+      return
+    }
+
+    // ── 写入范围冲突预警 ────────────────────────────────────
+    const overlapOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/overlaps$/)
+    if (method === 'GET' && overlapOf !== null) {
+      const task = storage.getTask(asTaskId(decodeURIComponent(overlapOf)))
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const ids = overlappingWriteScopes(task, storage.listTasks(task.boardId))
+      sendJson(res, 200, { overlaps: ids }, extraHeaders)
       return
     }
 

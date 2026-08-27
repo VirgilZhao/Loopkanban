@@ -95,12 +95,16 @@ export type DomainError =
   | 'lease-missing'
   | 'lease-mismatch'
   | 'feedback-required'
+  | 'task-running'
+  | 'subject-required'
 
 const fail = <T>(reason: DomainError, detail: string): DomainResult<T> => ({ ok: false, reason, detail })
 const succeed = <T>(value: T): DomainResult<T> => ({ ok: true, value })
 
 /** 每次变更都走这里，保证 revision 与 updatedAt 不会被漏掉。 */
-function bump(task: Task, patch: Partial<Task>, now: number): Task {
+type TaskPatch = Partial<Omit<Task, 'preferredProvider'>> & { readonly preferredProvider?: string | undefined }
+
+function bump(task: Task, patch: TaskPatch, now: number): Task {
   return { ...task, ...patch, revision: task.revision + 1, updatedAt: now }
 }
 
@@ -148,6 +152,63 @@ export function moveTask(task: Task, request: MoveRequest): DomainResult<Task> {
     ...patch,
     column: request.to,
     ...(request.position === undefined ? {} : { position: request.position }),
+  }, request.now))
+}
+
+/** 允许人工编辑的字段。执行相关的状态（列、租约、revision）不在此列。 */
+export interface TaskEdit {
+  readonly subject?: string
+  readonly description?: string
+  readonly acceptance?: readonly string[]
+  readonly repoPath?: string
+  readonly baseBranch?: string
+  readonly preferredProvider?: string | undefined
+  readonly blockedBy?: readonly TaskId[]
+  readonly writeScopes?: readonly string[]
+}
+
+export interface EditRequest {
+  readonly expectedRevision: number
+  readonly edit: TaskEdit
+  readonly now: number
+}
+
+/**
+ * 编辑任务内容。
+ *
+ * **正在执行的卡片不可编辑**：Agent 已经拿着 TASK.md 在干活了，此刻改需求
+ * 只会让人和机器对着两份不同的规格，产出无从验收。要改就先终止。
+ *
+ * @param task - 当前任务。
+ * @param request - CAS 凭据、要改的字段与时间。
+ */
+export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
+  const guard = checkRevision(task, request.expectedRevision)
+  if (!guard.ok) return guard
+  if (task.column === 'running') {
+    return fail('task-running', '正在执行的卡片不能改需求，先终止执行')
+  }
+
+  const { edit } = request
+  const subject = edit.subject?.trim()
+  if (subject !== undefined && subject.length === 0) {
+    return fail('subject-required', '标题不能为空')
+  }
+  const acceptance = edit.acceptance?.map((item) => item.trim()).filter((item) => item.length > 0)
+  // 已经在队列里的卡不能把验收标准清空 —— 那会让它变成一张无法验收的活卡。
+  if (task.column === 'ready' && acceptance !== undefined && acceptance.length === 0) {
+    return fail('acceptance-required', '队列中的任务不能清空验收标准，先移回 Backlog')
+  }
+
+  return succeed(bump(task, {
+    ...(subject === undefined ? {} : { subject }),
+    ...(edit.description === undefined ? {} : { description: edit.description }),
+    ...(acceptance === undefined ? {} : { acceptance }),
+    ...(edit.repoPath === undefined ? {} : { repoPath: edit.repoPath }),
+    ...(edit.baseBranch === undefined ? {} : { baseBranch: edit.baseBranch }),
+    ...('preferredProvider' in edit ? { preferredProvider: edit.preferredProvider } : {}),
+    ...(edit.blockedBy === undefined ? {} : { blockedBy: [...edit.blockedBy] }),
+    ...(edit.writeScopes === undefined ? {} : { writeScopes: edit.writeScopes.map((s) => s.trim()).filter(Boolean) }),
   }, request.now))
 }
 

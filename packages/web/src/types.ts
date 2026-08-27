@@ -39,6 +39,17 @@ export interface Task {
   updatedAt: number
 }
 
+/** 允许人工编辑的字段。 */
+export interface TaskEdit {
+  subject?: string
+  description?: string
+  acceptance?: string[]
+  repoPath?: string
+  baseBranch?: string
+  preferredProvider?: string | undefined
+  writeScopes?: string[]
+}
+
 export interface Board {
   id: string
   name: string
@@ -77,6 +88,25 @@ export interface StreamEvent {
   seq: number
   kind: string
   payload: Record<string, unknown>
+}
+
+export interface ProviderStats {
+  provider: string
+  total: number
+  completed: number
+  failed: number
+  medianMs: number | null
+}
+
+export interface RunStats {
+  totalRuns: number
+  completed: number
+  failed: number
+  running: number
+  costUsd: number
+  inputTokens: number
+  outputTokens: number
+  providers: ProviderStats[]
 }
 
 export interface SchedulerSettings {

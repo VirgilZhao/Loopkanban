@@ -1,4 +1,5 @@
-import { useDraggable } from '@dnd-kit/core'
+import { useSortable } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { CircleAlert, GitBranch, ListChecks, Lock, PauseCircle } from 'lucide-react'
 import { cn } from '@/lib/utils.ts'
 import type { Skip, Task } from '@/types.ts'
@@ -23,7 +24,7 @@ interface Props {
 }
 
 export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Props): React.JSX.Element {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id })
   const running = task.column === 'running'
   const leaseExpired = task.lease !== undefined && task.lease.expiresAt <= now
 
@@ -33,9 +34,7 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
       {...listeners}
       {...attributes}
       onClick={() => { onSelect(task) }}
-      style={transform === null ? undefined : {
-        transform: `translate3d(${String(transform.x)}px, ${String(transform.y)}px, 0)`,
-      }}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
       className={cn(
         'group relative cursor-grab overflow-hidden border bg-panel px-2.5 py-2 text-left',
         'transition-colors duration-150',

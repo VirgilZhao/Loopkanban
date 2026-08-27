@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DndContext, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import {
+  DndContext, DragOverlay, PointerSensor, useSensor, useSensors,
+  type DragEndEvent, type DragStartEvent,
+} from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import { Column } from '@/components/Column.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
+import { StatsBar } from '@/components/StatsBar.tsx'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type SchedulerState, type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type RunStats, type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
@@ -33,6 +37,34 @@ const ERROR_HINT: Record<string, string> = {
   'no-run': '这张卡还没有执行记录。',
 }
 
+/**
+ * 算出拖放后的新 position。
+ *
+ * position 是浮点数，插入两张卡之间取中点，因此不必重排整列 ——
+ * 一次拖动只写一条记录，CAS 冲突的面也最小。
+ *
+ * @param tasks - 全部任务。
+ * @param moving - 被拖动的卡。
+ * @param column - 目标列。
+ * @param overTask - 落在哪张卡上；落在空白处则为 null（放到列尾）。
+ */
+function insertPosition(
+  tasks: Task[], moving: Task, column: ColumnKey, overTask: Task | null,
+): number {
+  const siblings = tasks
+    .filter((t) => t.column === column && t.id !== moving.id)
+    .sort((a, b) => a.position - b.position)
+
+  if (siblings.length === 0) return 1
+  const index = overTask === null ? siblings.length : siblings.findIndex((t) => t.id === overTask.id)
+  if (index <= 0) return (siblings[0]?.position ?? 1) - 1
+  if (index >= siblings.length) return (siblings.at(-1)?.position ?? 0) + 1
+
+  const before = siblings[index - 1]?.position ?? 0
+  const after = siblings[index]?.position ?? before + 2
+  return (before + after) / 2
+}
+
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
 function notify(title: string, body: string): void {
   if (!('Notification' in window) || Notification.permission !== 'granted') return
@@ -50,18 +82,22 @@ export default function App(): React.JSX.Element {
   const [liveTools, setLiveTools] = useState<Record<string, string>>({})
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [draggingId, setDraggingId] = useState<string | null>(null)
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null)
+  const [stats, setStats] = useState<RunStats | null>(null)
   const [schedulerBusy, setSchedulerBusy] = useState(false)
   // 上一次看到的列，用来判断"刚刚有卡进了 Review/Failed"，据此发通知。
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded }, state] = await Promise.all([
+    const [{ tasks: loaded }, state, summary] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
+      api.stats().catch(() => null),
     ])
     setTasks(loaded)
     if (state !== null) setScheduler(state)
+    if (summary !== null) setStats(summary)
   }, [])
 
   useEffect(() => {
@@ -123,6 +159,7 @@ export default function App(): React.JSX.Element {
   }, [tasks])
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null
+  const dragged = tasks.find((t) => t.id === draggingId) ?? null
 
   // 「我的卡为什么不动」——调度器每一轮的跳过原因都摊到卡片上。
   const skipsByTask = useMemo(() => {
@@ -130,6 +167,19 @@ export default function App(): React.JSX.Element {
     for (const skip of scheduler?.lastTick?.skipped ?? []) map.set(skip.taskId, skip)
     return map
   }, [scheduler])
+
+  /** 建一张空白卡并立刻选中它，用户接着在右侧面板里填内容。 */
+  const createTask = useCallback(() => {
+    void (async () => {
+      try {
+        const { task } = await api.createTask({ subject: '新任务' })
+        await refresh()
+        setSelectedId(task.id)
+      } catch (error) {
+        if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+      }
+    })()
+  }, [refresh])
 
   const changeScheduler = useCallback(async (patch: Parameters<typeof api.setScheduler>[0]) => {
     setSchedulerBusy(true)
@@ -148,15 +198,24 @@ export default function App(): React.JSX.Element {
   }, [refresh])
 
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
-    const target = event.over?.id
-    if (typeof target !== 'string') return
+    setDraggingId(null)
+    const overId = event.over?.id
+    if (typeof overId !== 'string') return
     const task = tasks.find((t) => t.id === event.active.id)
-    if (task === undefined || task.column === target) return
+    if (task === undefined) return
+
+    // 落点可能是一张卡（列内插到它前面）或一整列（放到列尾）。
+    const overTask = tasks.find((t) => t.id === overId)
+    const targetColumn = overTask?.column ?? (overId as ColumnKey)
+    if (!COLUMNS.includes(targetColumn)) return
+
+    const position = insertPosition(tasks, task, targetColumn, overTask ?? null)
+    if (targetColumn === task.column && position === task.position) return
 
     // 乐观更新，失败时用服务端的真相覆盖回来。
-    setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, column: target as ColumnKey } : t)))
+    setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, column: targetColumn, position } : t)))
     try {
-      const { task: updated } = await api.move(task.id, task.revision, target)
+      const { task: updated } = await api.move(task.id, task.revision, targetColumn, position)
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)))
     } catch (error) {
       if (error instanceof ApiError) {
@@ -250,7 +309,12 @@ export default function App(): React.JSX.Element {
 
       {/* ── 看板 + 详情面板 ────────────────────────────────────── */}
       <div className="flex min-h-0 flex-1">
-        <DndContext sensors={sensors} onDragEnd={(e) => { void handleDragEnd(e) }}>
+        <DndContext
+          sensors={sensors}
+          onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
+          onDragCancel={() => { setDraggingId(null) }}
+          onDragEnd={(e) => { void handleDragEnd(e) }}
+        >
           <div className="flex min-w-0 flex-1 overflow-x-auto">
             {COLUMNS.map((column, index) => (
               <Column
@@ -263,9 +327,20 @@ export default function App(): React.JSX.Element {
                 liveTools={liveTools}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
+                onCreate={column === 'backlog' ? createTask : undefined}
               />
             ))}
           </div>
+
+          {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
+          <DragOverlay dropAnimation={null}>
+            {dragged === null ? null : (
+              <div className="rounded-[3px] border border-sodium bg-raised px-2.5 py-2 shadow-[0_10px_30px_oklch(0_0_0/0.7)]">
+                <span className="tag">{dragged.id}</span>
+                <p className="mt-1.5 line-clamp-2 text-ink">{dragged.subject}</p>
+              </div>
+            )}
+          </DragOverlay>
         </DndContext>
 
         {selected === null ? null : (
@@ -281,6 +356,8 @@ export default function App(): React.JSX.Element {
           />
         )}
       </div>
+
+      {stats === null ? null : <StatsBar stats={stats} />}
     </div>
   )
 }

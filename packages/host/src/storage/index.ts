@@ -1,0 +1,313 @@
+/**
+ * 存储层：任务与 Run 的持久化，以及 append-only 的事件日志。
+ *
+ * 两条不可动摇的规则：
+ *
+ * 1. **任务的每次写入都是 compare-and-set**。`commitTask` 只在数据库里的
+ *    revision 等于「新值 revision - 1」时才落库，否则返回 false。领域层算出
+ *    的新值 + 这一层的 CAS，合起来才真正挡住「两个调度器同时认领同一张卡」。
+ * 2. **`run_events` 只插不改不删**。UI 从它投影，SSE 断线用 seq 续传，
+ *    进程重启后回放即可完整重建界面。
+ */
+
+import { DatabaseSync } from 'node:sqlite'
+import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@openkanban/core'
+import { asBoardId, asRunId, asTaskId } from '@openkanban/core'
+import { migrate } from './schema.ts'
+
+export interface Board {
+  readonly id: BoardId
+  readonly name: string
+  readonly repoPath: string
+  readonly baseBranch: string
+  readonly createdAt: number
+}
+
+export type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
+
+export interface Run {
+  readonly id: RunId
+  readonly taskId: TaskId
+  readonly provider: string
+  readonly cliVersion: string
+  readonly agentSessionId?: string | undefined
+  readonly worktreePath: string
+  readonly branch: string
+  readonly status: RunStatus
+  readonly exitCode?: number | undefined
+  readonly diagnostic?: string | undefined
+  readonly startedAt: number
+  readonly endedAt?: number | undefined
+}
+
+export interface RunEvent {
+  readonly runId: RunId
+  readonly seq: number
+  readonly kind: string
+  readonly payload: unknown
+  readonly at: number
+}
+
+interface TaskRow {
+  id: string
+  board_id: string
+  revision: number
+  column_name: string
+  position: number
+  subject: string
+  description: string
+  acceptance_json: string
+  repo_path: string
+  base_branch: string
+  preferred_provider: string | null
+  blocked_by_json: string
+  write_scopes_json: string
+  lease_json: string | null
+  created_at: number
+  updated_at: number
+}
+
+interface RunRow {
+  id: string
+  task_id: string
+  provider: string
+  cli_version: string
+  agent_session_id: string | null
+  worktree_path: string
+  branch: string
+  status: string
+  exit_code: number | null
+  diagnostic: string | null
+  started_at: number
+  ended_at: number | null
+}
+
+function toTask(row: TaskRow): Task {
+  const preferred = row.preferred_provider
+  const lease = row.lease_json === null ? undefined : (JSON.parse(row.lease_json) as Lease)
+  return {
+    id: asTaskId(row.id),
+    boardId: asBoardId(row.board_id),
+    revision: row.revision,
+    column: row.column_name as Column,
+    position: row.position,
+    subject: row.subject,
+    description: row.description,
+    acceptance: JSON.parse(row.acceptance_json) as string[],
+    repoPath: row.repo_path,
+    baseBranch: row.base_branch,
+    ...(preferred === null ? {} : { preferredProvider: preferred }),
+    blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
+    writeScopes: JSON.parse(row.write_scopes_json) as string[],
+    ...(lease === undefined ? {} : { lease }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function toRun(row: RunRow): Run {
+  return {
+    id: asRunId(row.id),
+    taskId: asTaskId(row.task_id),
+    provider: row.provider,
+    cliVersion: row.cli_version,
+    agentSessionId: row.agent_session_id ?? undefined,
+    worktreePath: row.worktree_path,
+    branch: row.branch,
+    status: row.status as RunStatus,
+    exitCode: row.exit_code ?? undefined,
+    diagnostic: row.diagnostic ?? undefined,
+    startedAt: row.started_at,
+    endedAt: row.ended_at ?? undefined,
+  }
+}
+
+export class Storage {
+  private readonly db: DatabaseSync
+
+  private constructor(db: DatabaseSync) {
+    this.db = db
+  }
+
+  /**
+   * 打开（必要时创建）数据库并补齐迁移。
+   * @param path - 数据库文件路径；`':memory:'` 用于测试。
+   */
+  static open(path: string): Storage {
+    const db = new DatabaseSync(path)
+    migrate(db)
+    return new Storage(db)
+  }
+
+  close(): void {
+    this.db.close()
+  }
+
+  // ── Board ──────────────────────────────────────────────────────
+
+  createBoard(board: Board): void {
+    this.db.prepare(
+      'INSERT INTO boards (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(board.id, board.name, board.repoPath, board.baseBranch, board.createdAt)
+  }
+
+  listBoards(): Board[] {
+    const rows = this.db.prepare('SELECT * FROM boards ORDER BY created_at').all() as unknown as {
+      id: string; name: string; repo_path: string; base_branch: string; created_at: number
+    }[]
+    return rows.map((row) => ({
+      id: asBoardId(row.id),
+      name: row.name,
+      repoPath: row.repo_path,
+      baseBranch: row.base_branch,
+      createdAt: row.created_at,
+    }))
+  }
+
+  // ── Task ───────────────────────────────────────────────────────
+
+  createTask(task: Task): void {
+    this.db.prepare(`
+      INSERT INTO tasks (
+        id, board_id, revision, column_name, position, subject, description,
+        acceptance_json, repo_path, base_branch, preferred_provider,
+        blocked_by_json, write_scopes_json, lease_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      task.id, task.boardId, task.revision, task.column, task.position,
+      task.subject, task.description, JSON.stringify(task.acceptance),
+      task.repoPath, task.baseBranch, task.preferredProvider ?? null,
+      JSON.stringify(task.blockedBy), JSON.stringify(task.writeScopes),
+      task.lease === undefined ? null : JSON.stringify(task.lease),
+      task.createdAt, task.updatedAt,
+    )
+  }
+
+  getTask(id: TaskId): Task | null {
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as unknown as TaskRow | undefined
+    return row === undefined ? null : toTask(row)
+  }
+
+  listTasks(boardId?: BoardId): Task[] {
+    const rows = boardId === undefined
+      ? this.db.prepare('SELECT * FROM tasks ORDER BY position').all()
+      : this.db.prepare('SELECT * FROM tasks WHERE board_id = ? ORDER BY position').all(boardId)
+    return (rows as unknown as TaskRow[]).map(toTask)
+  }
+
+  /**
+   * compare-and-set 写入任务。
+   *
+   * 领域函数产出的 `next` 已经把 revision 加过一，所以这里比对的是
+   * `next.revision - 1`。**并发下的正确性最终落在这一条 SQL 上**：
+   * 两个调度器同时提交，只有一个能命中。
+   *
+   * @param next - 领域函数算出的新任务值。
+   * @returns 是否写入成功；false 表示期间已被他人改动，调用方应重读后重试。
+   */
+  commitTask(next: Task): boolean {
+    const result = this.db.prepare(`
+      UPDATE tasks SET
+        revision = ?, column_name = ?, position = ?, subject = ?, description = ?,
+        acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?,
+        blocked_by_json = ?, write_scopes_json = ?, lease_json = ?, updated_at = ?
+      WHERE id = ? AND revision = ?
+    `).run(
+      next.revision, next.column, next.position, next.subject, next.description,
+      JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
+      next.preferredProvider ?? null,
+      JSON.stringify(next.blockedBy), JSON.stringify(next.writeScopes),
+      next.lease === undefined ? null : JSON.stringify(next.lease),
+      next.updatedAt,
+      next.id, next.revision - 1,
+    )
+    return result.changes === 1
+  }
+
+  // ── Run ────────────────────────────────────────────────────────
+
+  createRun(run: Run): void {
+    this.db.prepare(`
+      INSERT INTO runs (
+        id, task_id, provider, cli_version, agent_session_id,
+        worktree_path, branch, status, exit_code, diagnostic, started_at, ended_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      run.id, run.taskId, run.provider, run.cliVersion, run.agentSessionId ?? null,
+      run.worktreePath, run.branch, run.status, run.exitCode ?? null,
+      run.diagnostic ?? null, run.startedAt, run.endedAt ?? null,
+    )
+  }
+
+  updateRun(run: Run): void {
+    this.db.prepare(`
+      UPDATE runs SET agent_session_id = ?, status = ?, exit_code = ?, diagnostic = ?, ended_at = ?
+      WHERE id = ?
+    `).run(
+      run.agentSessionId ?? null, run.status, run.exitCode ?? null,
+      run.diagnostic ?? null, run.endedAt ?? null, run.id,
+    )
+  }
+
+  getRun(id: RunId): Run | null {
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as unknown as RunRow | undefined
+    return row === undefined ? null : toRun(row)
+  }
+
+  listRuns(taskId: TaskId): Run[] {
+    const rows = this.db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC').all(taskId)
+    return (rows as unknown as RunRow[]).map(toRun)
+  }
+
+  /** 启动时对账用：上次进程崩溃时留下的、状态仍是 running 的 Run。 */
+  listOrphanRuns(): Run[] {
+    const rows = this.db.prepare("SELECT * FROM runs WHERE status = 'running'").all()
+    return (rows as unknown as RunRow[]).map(toRun)
+  }
+
+  // ── 事件日志（append-only）──────────────────────────────────────
+
+  /**
+   * 追加一条事件。seq 由存储分配，同一事务内取当前最大值加一。
+   * @param runId - 所属 Run。
+   * @param kind - 事件类型。
+   * @param payload - 任意可序列化负载。
+   * @param at - 发生时间（毫秒）。
+   * @returns 分配到的 seq，可直接用作 SSE 的 `id:`。
+   */
+  appendEvent(runId: RunId, kind: string, payload: unknown, at: number): number {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT MAX(seq) AS max_seq FROM run_events WHERE run_id = ?')
+        .get(runId) as unknown as { max_seq: number | null }
+      const seq = (row.max_seq ?? 0) + 1
+      this.db.prepare('INSERT INTO run_events (run_id, seq, kind, payload_json, at) VALUES (?, ?, ?, ?, ?)')
+        .run(runId, seq, kind, JSON.stringify(payload ?? null), at)
+      this.db.exec('COMMIT')
+      return seq
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /**
+   * 读取事件，用于首次渲染与 SSE 断线续传。
+   * @param runId - 所属 Run。
+   * @param afterSeq - 只返回 seq 大于它的事件；对应 SSE 的 `Last-Event-ID`。
+   */
+  readEvents(runId: RunId, afterSeq = 0): RunEvent[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq',
+    ).all(runId, afterSeq) as unknown as {
+      run_id: string; seq: number; kind: string; payload_json: string; at: number
+    }[]
+    return rows.map((row) => ({
+      runId: asRunId(row.run_id),
+      seq: row.seq,
+      kind: row.kind,
+      payload: JSON.parse(row.payload_json) as unknown,
+      at: row.at,
+    }))
+  }
+}

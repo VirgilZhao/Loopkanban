@@ -1,0 +1,157 @@
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { parseHelp } from '../src/agents/help-parser.ts'
+import { claudeCliProvider, claudeUsage } from '../src/agents/providers/claude-cli.ts'
+import type { AgentCaps, RunContext } from '../src/agents/types.ts'
+
+const fixture = (name: string): string =>
+  readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8')
+
+const CAPS: AgentCaps = {
+  id: 'claude',
+  bin: '/fake/claude',
+  version: '2.1.241 (Claude Code)',
+  streaming: true,
+  canPinSessionId: true,
+  canResume: true,
+  permissionTiers: ['strict', 'standard', 'yolo'],
+  help: parseHelp(fixture('claude-help.txt')),
+}
+
+const RUN: RunContext = {
+  runId: 'run-1',
+  worktreePath: '/tmp/wt',
+  artifactsDir: '/tmp/artifacts',
+  prompt: '做点事',
+  permission: 'standard',
+  sessionId: '83b274e6-48b9-4d77-ab6f-d53cc3d19d0e',
+}
+
+const streamLines = (): string[] =>
+  fixture('claude-stream-json-auth-failure.jsonl').split('\n').filter((l) => l.trim().length > 0)
+
+describe('claudeCliProvider.buildStart', () => {
+  it('拼出 print + stream-json + verbose + 权限档位 + 会话 id', () => {
+    const spec = claudeCliProvider.buildStart(RUN, CAPS)
+    expect(spec.argv).toEqual([
+      '/fake/claude', '-p',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--permission-mode', 'auto',
+      '--session-id', RUN.sessionId,
+      '做点事',
+    ])
+    expect(spec.cwd).toBe('/tmp/wt')
+  })
+
+  it('三档权限各自映射到 claude 自己的说法', () => {
+    const mode = (tier: RunContext['permission']): string | undefined => {
+      const argv = claudeCliProvider.buildStart({ ...RUN, permission: tier }, CAPS).argv
+      const at = argv.indexOf('--permission-mode')
+      return at < 0 ? undefined : argv[at + 1]
+    }
+    expect(mode('strict')).toBe('dontAsk')
+    // 实测：acceptEdits 只放行文件编辑，Bash 一律拒绝，Agent 跑不了测试。
+    expect(mode('standard')).toBe('auto')
+    expect(mode('yolo')).toBe('bypassPermissions')
+  })
+
+  it('该版本没有 auto 时，standard 回落到 acceptEdits', () => {
+    const help = parseHelp('  --print  x\n  --permission-mode <m>  y (choices: "acceptEdits", "dontAsk")\n')
+    const argv = claudeCliProvider.buildStart(RUN, { ...CAPS, help }).argv
+    expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('acceptEdits')
+  })
+
+  it('该版本一个档位都不支持时不硬塞参数', () => {
+    const argv = claudeCliProvider.buildStart(RUN, { ...CAPS, help: parseHelp('  --print  x\n') }).argv
+    expect(argv).not.toContain('--permission-mode')
+  })
+
+  it('不支持指定会话 id 时不会硬塞 --session-id', () => {
+    const argv = claudeCliProvider.buildStart(RUN, { ...CAPS, canPinSessionId: false }).argv
+    expect(argv).not.toContain('--session-id')
+  })
+
+  it('绝不加 --no-session-persistence —— 会话要落盘才能续跑', () => {
+    expect(claudeCliProvider.buildStart(RUN, CAPS).argv).not.toContain('--no-session-persistence')
+  })
+})
+
+describe('claudeCliProvider.buildResume', () => {
+  it('支持续跑时带上 --resume', () => {
+    const spec = claudeCliProvider.buildResume(RUN, CAPS, 'sess-9')
+    expect(spec?.argv).toContain('--resume')
+    expect(spec?.argv.at(-2)).toBe('sess-9')
+  })
+
+  it('不支持续跑时返回 null，让调用方降级而不是瞎拼参数', () => {
+    expect(claudeCliProvider.buildResume(RUN, { ...CAPS, canResume: false }, 'sess-9')).toBeNull()
+  })
+})
+
+describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
+  it('只把 system/init 当作会话建立，不重复上报', () => {
+    const sessions = streamLines()
+      .map((l) => claudeCliProvider.parseLine(l, CAPS))
+      .filter((e) => e.kind === 'session')
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]).toMatchObject({
+      sessionId: '83b274e6-48b9-4d77-ab6f-d53cc3d19d0e',
+      permissionMode: 'acceptEdits',
+      // 零 API Key 的硬证据：CLI 用的是自己的登录态。
+      apiKeySource: 'none',
+    })
+  })
+
+  it('把 API 重试上报为 notice', () => {
+    const notices = streamLines()
+      .map((l) => claudeCliProvider.parseLine(l, CAPS))
+      .filter((e) => e.kind === 'notice')
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({ level: 'warn' })
+    expect((notices[0] as { text: string }).text).toContain('401')
+  })
+
+  it('subtype 仍是 success 但 is_error 为真时，判为失败并给出结构化诊断', () => {
+    const finished = streamLines()
+      .map((l) => claudeCliProvider.parseLine(l, CAPS))
+      .find((e) => e.kind === 'finished')
+    expect(finished).toBeDefined()
+    expect(finished).toMatchObject({ ok: false })
+    const diagnostic = (finished as { diagnostic?: string }).diagnostic ?? ''
+    expect(diagnostic).toContain('terminal=api_error')
+    expect(diagnostic).toContain('api_status=401')
+    expect(diagnostic.length).toBeLessThanOrEqual(512)
+  })
+
+  it('把权限拒绝上报为 notice —— 这是「Agent 为什么没干完」的关键线索', () => {
+    const event = claudeCliProvider.parseLine(JSON.stringify({
+      type: 'system', subtype: 'permission_denied',
+      tool_name: 'Bash', decision_reason_type: 'other',
+    }), CAPS)
+    expect(event).toMatchObject({ kind: 'notice', level: 'warn' })
+    expect((event as { text: string }).text).toContain('Bash')
+  })
+
+  it('额度事件上报为 notice，allowed 不当成警告', () => {
+    const event = claudeCliProvider.parseLine(JSON.stringify({
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', resetsAt: 1787849400 },
+    }), CAPS)
+    expect(event).toMatchObject({ kind: 'notice', level: 'info' })
+    expect((event as { text: string }).text).toContain('five_hour')
+  })
+
+  it('认不出的行降级为 raw，绝不抛异常', () => {
+    for (const line of ['{"type":"未知"}', '不是 JSON', '', '{"broken":']) {
+      expect(() => claudeCliProvider.parseLine(line, CAPS)).not.toThrow()
+    }
+    expect(claudeCliProvider.parseLine('不是 JSON', CAPS).kind).toBe('raw')
+  })
+
+  it('从 result 行取出用量', () => {
+    const usage = streamLines().map(claudeUsage).find((u) => u !== null)
+    expect(usage).toMatchObject({ kind: 'usage', inputTokens: 0, outputTokens: 0, costUsd: 0 })
+  })
+})

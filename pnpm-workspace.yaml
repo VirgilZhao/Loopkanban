@@ -1,0 +1,6 @@
+packages:
+  - packages/*
+
+# pnpm 默认阻止依赖执行安装脚本，需显式放行。esbuild 是 vitest 的原生二进制依赖。
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,380 @@
+# OpenKanban 需求规划
+
+> 一个看板：任务可以被**本机已安装的** Claude Code / Codex CLI 「认领」并自动完成，人类只做定义和验收。
+> `npx openkanban` 启动本地 server + 浏览器 Web UI。**自主实现，借鉴 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的架构思想，不依赖其代码。**
+
+---
+
+## 0. 已确认的决策
+
+| 决策 | 选择 |
+|---|---|
+| 运行形态 | `npx openkanban` 启动本地 server + 浏览器 Web UI |
+| Agent 隔离 | git worktree，每任务一分支 |
+| 自动认领调度器 | 核心卖点，优先做 |
+| Agent 执行方式 | 起本机已装的 `claude` / `codex` CLI 子进程 |
+| CLI 版本 | **不绑定**。启动探测本机有哪些、支持哪些能力，有哪个用哪个 |
+| API Key | **全程零 API Key**。所有模型访问都在 CLI 子进程内部，用本机登录态 |
+| **框架** | **自己实现，借鉴 dsh 架构，不依赖 dsh** |
+| 实现语言 | **TypeScript / Node ≥22**（理由见 §2.1） |
+| 存储 | SQLite（`node:sqlite` 内置） |
+
+---
+
+## 1. 从 dsh 借什么、不借什么
+
+### 1.1 借（六个具体模式，不是框架）
+
+| # | 借的东西 | 用在哪 |
+|---|---|---|
+| 1 | **Capability seam**：一个能力拆成「服务定义 / 提供方 / 消费方」三个角色，提供方可换 | `AgentProvider`（claude-cli / codex-cli / 将来别的）、`Subprocess`、`Storage` 三条缝。这是「有哪个用哪个」能干净落地的根本原因 |
+| 2 | **提供方能力描述符 + 派发前检查** | CLI 探测出的能力矩阵在派发前校验；不支持就明确拒绝 |
+| 3 | **Fail loud, no silent degradation**：需要某能力而提供方没有 → 直接报错，绝不「接受了但静默忽略」 | 不支持的权限档位在 UI 上就是灰的，不能等运行时才失败 |
+| 4 | **Append-only 事件日志 + 投影**：日志是唯一真相，UI 从投影渲染，重启靠回放恢复 | `run_event` 表；SSE 用 `seq` 做 `Last-Event-ID` 续传；崩溃后 UI 能完整重建 |
+| 5 | **单调 `revision` 做 compare-and-set**（来自 `agentTeams` 的 task board） | 看板任务的每次变更；租约的原子取得与释放 |
+| 6 | **结构化安全失败诊断**：阶段名（`spawn`/`run`/`teardown`）+ 退出码 + 信号，长度有界，原始错误只留内部 | Failed 卡片上显示人能看懂的失败原因，而不是一坨 stack trace |
+
+另外**技术手法**上照抄一处：**进程树持有 + 分级终止升级**（见 §3.4）—— 这是 dsh 写得最扎实、也最容易自己写错的地方。
+
+### 1.2 不借（对我们是过度设计）
+
+- Cordis 完整插件树、profile / bundle 分层、patch 文件叠加
+- 类型级 slot 插槽注册表与 props 四路合成
+- 客户端 module graph、懒加载 CJS 模块表
+- i18n 管线、文档生成闸门、60+ 个 verify 脚本
+
+我们是**单一用途的应用**，不是通用 agent 框架。上面这些是「让任何人替换任何部件」的成本，我们不需要。
+
+### 1.3 这个决定消掉的三个风险
+
+上一版方案里最大的三个不确定性，直接没了：
+
+- ~~dsh 是 developer preview，README 明确警告破坏性变更~~
+- ~~能否 patch 掉 `ui-layout` 接管 `root` 插槽（看板没地方放）~~
+- ~~不配 DeepSeek key 能否启动~~
+
+代价：`dsh-subprocess` 的进程树管理、web 外壳、Landlock 沙箱要自己写。前者照抄手法（约 150 行），后者本来就要自己写，沙箱推迟到后期。
+
+---
+
+## 2. 架构
+
+```
+npx openkanban
+   └─ Node 进程
+       ├─ HTTP server（127.0.0.1 + 随机端口 + token 鉴权）
+       │    ├─ REST      看板 / 任务 / Run
+       │    └─ SSE       /api/runs/:id/stream
+       ├─ 内嵌前端静态资源
+       ├─ dispatcher     常驻调度器：从 Ready 派活
+       ├─ agents         AgentProvider seam：探测 + claude-cli / codex-cli
+       ├─ worktree       git worktree 生命周期
+       ├─ subprocess     进程组 spawn + 分级终止
+       └─ storage        SQLite
+   └─ 自动打开浏览器 http://127.0.0.1:<port>/?token=<token>
+```
+
+```
+packages/
+├── core/      纯领域逻辑，无 IO：状态机、CAS、租约、调度决策 —— 可单测
+├── host/      Node 侧：server / storage / subprocess / agents / worktree / dispatcher
+└── web/       React + Vite + dnd-kit + Tailwind，构建产物内嵌进 host
+```
+
+### 2.1 为什么是 TypeScript / Node
+
+上一版我推荐过 Rust + axum，理由是进程树 kill 的可靠性。现在改推 TS，因为约束变了：
+
+- 我们现在**连整个 Web UI 也要自己写**，单人项目用一门语言的收益压过了 Rust 在进程管理上的边际优势
+- 进程树终止可以收进一个约 150 行、有针对性测试的模块（§3.4），不值得让它决定整个技术栈
+- `npx` 分发原生，无需 npm 预编译二进制那套
+- 目标 CLI 本身就是 Node 生态
+
+Rust 仍然可行，只是对这个项目不再是更优解。
+
+### 2.2 三条 seam
+
+```ts
+// 1. Agent 执行器
+interface AgentProvider {
+  readonly id: string
+  probe(): Promise<AgentCaps | null>              // null = 本机没装
+  buildStart(run: RunContext, caps: AgentCaps): SpawnSpec
+  buildResume(run: RunContext, caps: AgentCaps, sessionId: string): SpawnSpec | null
+  parseLine(line: string, caps: AgentCaps): AgentEvent | null
+}
+
+// 2. 子进程（将来可换远程 / 容器执行）
+interface Subprocess {
+  spawn(spec: SpawnSpec): Promise<ProcessHandle>  // 进程组隔离
+}
+
+// 3. 存储
+interface Storage { /* 域 KV + 事件日志追加 */ }
+```
+
+### 2.3 数据模型
+
+```ts
+interface Task {
+  id: TaskId
+  revision: number                 // CAS，每次变更 +1
+  boardId: BoardId
+  column: 'backlog' | 'ready' | 'running' | 'review' | 'done' | 'failed'
+  position: number
+  subject: string
+  description: string              // Markdown
+  acceptance: string[]             // 验收标准 checklist
+  repoPath: string
+  baseBranch: string
+  preferredProvider?: string       // 只能选已探测到的
+  blockedBy: TaskId[]
+  writeScopes: string[]            // 建议性路径前缀，用于并发冲突预警
+  lease?: { runId: RunId; provider: string; acquiredAt: string; expiresAt: string }
+}
+
+interface Run {
+  id: RunId
+  taskId: TaskId
+  provider: string
+  cliVersion: string               // 记录当次实际用的 CLI 版本
+  agentSessionId?: string          // CLI 侧会话 id，用于续跑
+  worktreePath: string
+  branch: string
+  status: 'running' | 'completed' | 'failed' | 'aborted'
+  diagnostic?: FailureDiagnostic   // 结构化，见 §1.1 第 6 条
+  startedAt: string
+  endedAt?: string
+}
+
+// append-only，UI 从它投影，SSE 从它续传
+interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; at: string }
+```
+
+### 2.4 看板流转
+
+```
+Backlog ──▶ Ready ──▶ Running ──▶ Review ──▶ Done
+   │        (可认领)   (CLI执行中)  (人工验收)
+   │                       │            │
+   └───────────────────────┴── Failed ◀─┘
+```
+
+- **Ready** 是队列，进入要求验收标准非空
+- **Ready → Running** 必须 CAS 取得租约（`runId` + `expiresAt`），防重复认领；崩溃后租约超时自动回退
+
+---
+
+## 3. CLI Provider（核心）
+
+### 3.1 不绑定版本：探测 + 能力降级
+
+**原则：有哪个用哪个，有什么能力用什么能力。** 不钉死版本，也因此不能硬假设参数存在。
+
+#### 发现可执行文件
+
+按序尝试，第一个命中即用：
+
+1. 设置页填的显式绝对路径
+2. `PATH` 上的 `claude` / `codex`
+3. 常见安装位置兜底：`~/.local/bin`、`~/.claude/local`、Homebrew 前缀、`~/.codex/bin`
+
+> 兜底不是多余：本机的 `claude` 就在 `~/.local/bin/claude`，而 macOS 上从桌面启动器（非终端）拉起的进程往往拿不到这个 `PATH`。
+
+#### 探测能力矩阵
+
+对命中的可执行文件跑 `--version` 和 `--help`，解析出能力，**不做版本号判断**。`--help` 是可解析的：`claude` 打印 `--permission-mode ... (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")`，`codex` 打印 `-s, --sandbox ... [possible values: read-only, workspace-write, danger-full-access]`。
+
+| 能力 | 探测方式 | 有 | 无 → 降级 |
+|---|---|---|---|
+| 流式日志 | `--output-format` 是否列出 `stream-json` | 逐事件推 SSE，实时看 Agent 干活 | 退 `--output-format json`（结束时一条）；再退纯 `text` |
+| 会话身份 | 是否有 `--session-id` | 预生成 UUID，身份由我们掌握 | 从输出里捞 `session_id`；捞不到则本 Run 标记「不可续跑」 |
+| 续跑 | `--resume` / `codex exec resume` | 打回重做走真续跑 | 打回时把上轮 diff + 意见拼成新任务，UI 明确标注「非续跑」 |
+| 结构化完成 | codex `-o` / `--output-schema` | 读文件判定完成 | 退回「退出码 + 最后一条 assistant 消息」 |
+| 权限档位 | 解析候选值列表 | 精确映射到 §4 三档 | **只暴露该版本真支持的档位，UI 上灰掉其余** |
+
+**探测结果决定 UI 里能选什么。** 不支持的能力界面上就是灰的，绝不运行时才失败（借鉴 §1.1 第 3 条）。设置页展示每个 CLI 的路径 / 版本 / 能力清单 + 「重新探测」按钮；探测结果带可执行文件的 mtime + size 指纹，变了自动重探。
+
+一个 CLI 没装 → 不注册该 provider，任务选不到它。两个都没装 → 启动时明确报错并指引安装，而不是让任务卡在 Running。
+
+### 3.2 参数基线
+
+> 已在本机实测核实（`claude 2.1.241` / `codex-cli 0.149.1`）。实际 argv 由能力矩阵拼装，不写死。
+
+`claude-cli` 首次执行：
+
+```
+claude -p
+  --output-format stream-json
+  --verbose                              # -p + stream-json 时必需
+  --session-id <我们生成的 UUID>
+  --permission-mode <见 §4>
+  [--model <可选>] [--include-partial-messages]
+  <prompt>
+```
+
+续跑：`claude -p --output-format stream-json --verbose --resume <id> [--fork-session] "<评审意见>"`
+
+`codex-cli` 首次执行：
+
+```
+codex exec
+  --json                                 # 事件以 JSONL 打到 stdout
+  -C <worktree>
+  -s <read-only|workspace-write|danger-full-access>
+  [--approve-for-me]
+  -o <run目录>/last-message.txt          # 最终回答落文件，完成判定不用猜
+  [--output-schema <schema.json>]
+  <prompt>
+```
+
+续跑：`codex exec resume <session-id> --json -C <worktree> "<评审意见>"`（另有 `codex exec fork <id>`）
+
+**两个都不要加 `--no-session-persistence` / `--ephemeral`** —— 会话必须落盘才能续跑。
+
+### 3.3 续跑是个真收益
+
+`claude --session-id` 让我们**预先掌握会话 UUID**，不用解析输出去捞；`codex exec resume/fork` 直接按 id 续。Review 里的「打回重做」是真正的会话延续，不是重新拼 prompt。
+
+### 3.4 进程树持有与分级终止（照抄 dsh 手法）
+
+自己写最容易错的地方，规格写死：
+
+- **Unix**：`spawn(..., { detached: true })` 让子进程自成进程组；终止时 `process.kill(-pid, 'SIGTERM')` 打整组 → 等 grace（默认 3s）→ `SIGKILL` → **等待整棵树退出后才宣告终止完成**
+- **Windows**：Job Object，或退而用 `taskkill /pid <pid> /T /F`
+- `dispose()` 必须幂等
+- 取消信号在「进程已起但 Run 未发布」这个窗口内到达时，先清理再拒绝 —— 这个竞态是 bug 高发区
+- 应用启动时对账：扫描记录的 pid，清理上次崩溃留下的孤儿进程与 worktree
+
+### 3.5 事件解析
+
+stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `Finished`）。**解析失败降级为纯文本日志，绝不影响执行** —— CLI 输出格式会变，解析器不能是单点故障。原始输出同时落盘 `runs/<run_id>.log`。
+
+---
+
+## 4. 安全
+
+### 权限档位映射
+
+| OpenKanban 档位 | `claude` | `codex` |
+|---|---|---|
+| `strict` | `--permission-mode dontAsk` | `-s read-only` |
+| `standard`（默认） | `--permission-mode auto` | `--approve-for-me`（隐含 workspace-write，**不可同时传 `-s`**） |
+| `yolo`（二次确认 + 常驻警告横幅） | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+
+> **已实测定稿**：`standard` 必须用 `auto` 而不是 `acceptEdits` —— 后者只放行文件编辑，Bash 一律 `permission_denied`，Agent 写完代码跑不了测试也跑不了构建，等于交出一份没验证过的活。`auto` 走 CLI 原生分类器，语义上才对得上 codex 的 `--approve-for-me`。`manual` 会挂起等人，不适合无人值守。
+> 每档按偏好列表取该版本支持的第一个（`standard` = `auto` → `acceptEdits`），**只显示探测到确实支持的档位**。
+
+### 其他
+
+1. **worktree 隔离**，Agent 不在主工作区跑，跑飞了删分支即可
+2. **零 API Key**：OpenKanban 不接受、不存储、不传递任何 key；认证全靠 CLI 自身登录态。`claude` 默认加载 user/project/local 设置，所以你的 `CLAUDE.md`、MCP server、权限配置都生效
+3. **禁止自动 push / 开 PR**（v1）
+4. **本地 server 加固（P0）**：只 bind `127.0.0.1`，**绝不 `0.0.0.0`**（远程走 SSH 端口转发）；启动生成一次性随机 token，URL 携带后转 httpOnly cookie，REST 与 SSE 都校验；**校验 `Origin`/`Host` 防 DNS rebinding**（否则任意网页都能打你的 localhost 去起 Agent）；随机端口。这是相对桌面应用多出来的攻击面 —— **一个能执行任意代码的 HTTP 接口**，M1 就要做对
+5. **注入防护**：任务描述、附件、Agent 输出都是数据不是指令
+
+---
+
+## 5. 里程碑
+
+| 阶段 | 内容 | 产出判据 |
+|---|---|---|
+| **M0 编排穿刺**（纯脚本，无 UI）✅ **已完成** | `subprocess` 进程组模块 + 终止测试；`claude-cli` 探测与启动；解析 stream-json；worktree 创建；跑通一个任务 | **命令行能让本机 `claude` 在独立分支上做完一张卡，并能随时 kill 干净**。项目最大技术风险在此关掉 |
+| **M1 单任务闭环** | SQLite + 事件日志；board CAS；HTTP server + token 鉴权 + Origin 校验；SSE 日志流；最简看板视图；`codex-cli` provider | 浏览器里点一下，实时看着 Agent 干完 |
+| **M2 验收闭环** | Diff 查看、合并 / 打回 / 废弃；**打回走真续跑**；权限档位定稿 | 完整走完 Ready→Done，打回能接着上次改 |
+| **M3 自动驾驶**（核心卖点） | 调度器、租约与超时回收、并发上限、依赖阻塞、孤儿进程与 worktree 对账、崩溃恢复、浏览器通知 | 扔 5 张卡进 Ready，关掉浏览器去睡觉，回来全在 Review |
+| **M4 体验** | 拖拽排序、任务模板、`writeScopes` 冲突预警、Runs 统计与成本 | 日常可用 |
+| **M5 分发** | `npx openkanban` 一行启动；`service install` 装 launchd/systemd 常驻；文档 | 别人能装上用 |
+
+---
+
+## 5.1 M0 实测结论（已完成）
+
+穿刺脚本 `packages/host/src/bin/m0.ts`，40 个测试全绿。判据全部通过：探测 CLI → 建 worktree → 起子进程 → 解析事件流 → 进程树静默 → Agent 真的改了文件。
+
+### 本机探测结果
+
+| | claude | codex |
+|---|---|---|
+| 路径 | `~/.local/bin/claude` | `~/.local/bin/codex` |
+| 版本 | 2.1.241 | 0.149.1 |
+| 流式输出 | ✅ `stream-json` | ✅ `--json` JSONL |
+| 指定会话 id | ✅ `--session-id` | ❌ 只能从 `thread.started` 捞 |
+| 续跑 | ✅ `--resume` | ✅ `exec resume` 子命令 |
+| 权限档位 | strict/standard/yolo | strict/standard/yolo |
+
+两个 CLI 都装在 `~/.local/bin` —— **验证了兜底查找路径的必要性**，只靠桌面启动器的 `PATH` 会找不到。
+
+穿刺期间两个 CLI 都被升级过（claude 2.1.241→2.1.247，codex 0.149.1→0.150.1），**不绑版本 + 探测能力**的设计原地照常工作，没有任何改动 —— 这条设计决策当场得到了验证。
+
+### 零 API Key 得到硬证据
+
+claude 在 `init` 事件里自报 **`apiKeySource: "none"`**，全靠 OAuth 登录态。已做成 `session` 事件字段，不是 `none` 就告警。
+
+### 实测踩出来的四个坑（文档里都没有）
+
+1. **进程树终止只等组长是不够的**。组长可能秒退却留下孙进程（Agent 跑完但 dev server 还在）。算法改为 SIGTERM → 等**整棵树**(grace) → SIGKILL → 再等树。
+2. **claude 的 `subtype: "success"` 可以伴随 `is_error: true`**（鉴权失败时实测到）。完成判定只能看 `is_error`，信 subtype 会把失败误判成成功。
+3. **claude 的 `type: system` 有多种 subtype**（`init` / `api_retry` / `hook_started` / `hook_response`），只有 `init` 是会话建立。按 `session_id` 存在与否判断会把同一会话重复上报四次。
+4. **codex 的 `--sandbox` 与 `--approve-for-me` 互斥** —— 后者自己就隐含 workspace-write，同时传会被 clap 直接拒绝（exit 2）。
+
+第 4 条还暴露出一个工程教训：**stderr 必须有人读**。当时 stderr 设了 `pipe` 却没人消费，一个 exit=2 的硬失败在界面上完全看不见，只看到"10ms 就结束了"。
+
+5. **`claude auth status` 的 `loggedIn: true` 不代表凭证还新鲜**。它只说明磁盘上存在凭证。用桌面版 Claude Code 的用户，宿主在内存里持有并刷新 token，而 CLI 独立跑时用的磁盘凭证可能早已过期且自己刷新不了 —— 表现为 401 `OAuth access token has expired`。**OpenKanban 必须在探测阶段做一次真实的轻量调用来验活，不能只信 `auth status`**，否则用户会看着"已登录"却每张卡都失败。
+
+### 环境清洗（`agents/env.ts`，P0）
+
+排查上一条时发现宿主环境里带着 20 个父会话变量（`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_MESSAGING_TOKEN`、`CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` …）和 `ANTHROPIC_BASE_URL`。两个后果：
+
+- **凭证泄漏破坏「零 API Key」**：环境里若有 `ANTHROPIC_API_KEY`，子 CLI 会直接拿去用，绕过用户自己的登录态。
+- **父会话身份污染**：OpenKanban 很可能本身就跑在某个 Agent 会话里（开发时就是），子 CLI 会误以为自己是那个会话的子代、鉴权由宿主代管。
+
+因此起子进程前一律清洗：凭证形变量（`API_KEY`/`AUTH_TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`）与父会话前缀（`CLAUDE_CODE_`/`CLAUDE_AGENT_`/`CLAUDECODE`…）全部剔除；端点类变量（`BASE_URL`/`PROXY`）保留但如实上报变量名。**确实要传给子进程的东西只能走显式配置这一条通道。** 上报只报名字，绝不报值。
+
+### 权限档位实测：两个 CLI 的「standard」曾经不对等
+
+第一次跑 claude 用 `acceptEdits`，Agent 写完 `greet.js` 后想跑 `node --test` 验证，被 `permission_denied` 拒了，最后自己说「测试尚未实际执行过」。同样的任务 codex 用 `--approve-for-me` 则真的跑了测试并确认通过。
+
+改成 `auto` 后 claude 也能跑测试了，两边行为对齐。**教训：权限档位的语义必须实测，不能照字面映射** —— 一个不能执行命令的编码 Agent 交出的是没验证过的代码。
+
+顺带补上了两个原先当噪音丢掉的事件：
+
+- `system/permission_denied` → `notice(warn)`。这是解释「Agent 为什么没干完」的**唯一线索**，丢了就只能看着一份半成品发懵。
+- `rate_limit_event` → `notice`。带 `rateLimitType`（如 `five_hour`）和 `resetsAt`，对自动驾驶下的额度预算很有用。
+
+### 真实事件 schema（已存为测试固件）
+
+```
+claude stream-json          codex --json
+─────────────────────       ─────────────────────
+system/init    → session    thread.started  → session（thread_id）
+system/api_retry → notice   turn.started
+assistant      → text/tool  item.completed/agent_message → text
+result         → finished   item.completed/file_change   → tool
+                            item.completed/command_execution → tool
+                            turn.completed  → usage
+```
+
+---
+
+## 6. 风险
+
+| 风险 | 影响 | 对策 |
+|---|---|---|
+| **不绑定版本 → 参数在某版本上不存在** | 起不来或行为不对 | §3.1 探测 + 能力降级；不支持的档位 UI 灰掉，绝不运行时才失败 |
+| **CLI 输出格式变化**（codex 的 `--json` 仍是 experimental 别名） | 解析失败 | 解析失败降级纯文本，不影响执行；完成判定优先用 `-o` 文件和退出码这类稳定信号 |
+| **进程树 kill 写错** | 孤儿进程、烧钱、资源泄漏 | §3.4 规格写死；针对性测试（起会 fork 子进程的任务再 kill）；启动时对账清理 |
+| **本地 HTTP 接口能执行任意代码** | 安全事故 | §4 第 4 条，M1 就做对 |
+| 并行 Agent 冲突 | 合并地狱 | worktree 隔离 + 同仓库并发上限 + `blockedBy` + `writeScopes` 预警 |
+| Agent 跑飞 / 死循环 | 烧钱、占资源 | 超时终止、可随时 kill |
+| 自己实现 = 工作量比借 dsh 大 | 周期变长 | 只借六个模式不借框架，砍掉 Cordis / slot / i18n 那套；沙箱推迟 |
+
+---
+
+## 7. 后续方向
+
+- 内置 MCP server，让 Agent 主动 `claim_task` / `complete_task` / `ask_human`（`claude` 和 `codex` 都支持 MCP，天然可接）
+- 沙箱加固（Linux Landlock 限制 Agent 只能写自己的 worktree）
+- GitHub Issues 双向同步
+- **多 Agent 竞赛**：同一任务同时派给 `claude` 和 `codex`，人类挑更好的实现 —— seam 设计让这个几乎免费
+- 更多 CLI provider（gemini-cli 等），加一个描述符即可

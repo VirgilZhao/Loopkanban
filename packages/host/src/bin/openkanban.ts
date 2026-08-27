@@ -19,6 +19,7 @@ import { RunBus } from '../server/bus.ts'
 import { startServer } from '../server/index.ts'
 import { Review } from '../review/index.ts'
 import { Runner } from '../runner/index.ts'
+import { Scheduler } from '../scheduler/index.ts'
 import { Storage } from '../storage/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -69,7 +70,13 @@ async function resolveToken(dir: string, rotate: boolean): Promise<string> {
   return token
 }
 
-/** 首次启动时放几张示例卡，免得看板空着无从下手。 */
+/**
+ * 首次启动时放几张示例卡，免得看板空着无从下手。
+ *
+ * **全部落 Backlog**：示例卡的需求跟用户的仓库毫无关系，如果放在 Ready，
+ * 用户第一次打开自动驾驶时它们会被立刻派出去，让 Agent 对着一个陌生仓库
+ * 做一堆牛头不对马嘴的活。默认值不该有这种惊吓。
+ */
 function seed(storage: Storage, repoPath: string): void {
   if (storage.listBoards().length > 0) return
   const now = Date.now()
@@ -79,18 +86,18 @@ function seed(storage: Storage, repoPath: string): void {
   const samples: { id: string; column: Task['column']; subject: string; acceptance: string[] }[] = [
     {
       id: 't-welcome', column: 'backlog',
-      subject: '把这张卡补上验收标准，它就能进 Ready 了',
+      subject: '把这张卡补上验收标准，它就能拖进 Ready 了',
       acceptance: [],
     },
     {
-      id: 't-sample-1', column: 'ready',
-      subject: '给 utils 补上边界情况的单测',
+      id: 't-sample-1', column: 'backlog',
+      subject: '示例：给某个模块补上边界情况的单测',
       acceptance: ['新增测试覆盖空输入与超长输入', '现有测试全部通过'],
     },
     {
-      id: 't-sample-2', column: 'ready',
-      subject: '修掉列表页在空数据时的崩溃',
-      acceptance: ['空数据时渲染占位而不是抛错', '有回归测试'],
+      id: 't-sample-2', column: 'backlog',
+      subject: '示例：改掉这两张卡的内容，换成你自己的任务',
+      acceptance: ['需求写清楚', '验收标准可判定'],
     },
   ]
   for (const [index, sample] of samples.entries()) {
@@ -155,6 +162,7 @@ async function main(): Promise<void> {
     artifactsRoot: join(dir, 'runs'),
   })
   const review = new Review({ storage, worktreeRoot })
+  const scheduler = new Scheduler({ storage, runner, agents })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
   const aborted = runner.reconcile()
@@ -162,9 +170,9 @@ async function main(): Promise<void> {
   if (aborted > 0 || reclaimed.length > 0) {
     console.log(C.dim(`\n  对账：${String(aborted)} 个中断的 Run，${String(reclaimed.length)} 张卡放回 Ready`))
   }
-  // 定期回收租约过期的卡片 —— 没有它，一次崩溃就会让任务永远卡在 Running。
-  const sweeper = setInterval(() => { runner.reclaimExpired() }, 30_000)
-  sweeper.unref()
+  // 调度器的每一轮都会回收租约过期的卡片，即使自动认领是关着的 ——
+  // 没有它，一次崩溃就会让任务永远卡在 Running。
+  scheduler.start()
 
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
@@ -174,6 +182,7 @@ async function main(): Promise<void> {
     agents,
     runner,
     review,
+    scheduler,
     bus,
     token,
     staticDir: STATIC_DIR,
@@ -183,12 +192,16 @@ async function main(): Promise<void> {
   console.log(`\n  ${C.amber('▸')} ${server.url}`)
   console.log(C.dim('    只监听 127.0.0.1。远程访问请用 SSH 端口转发，不要改成 0.0.0.0。'))
   console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
-  console.log(C.dim(`    数据 ${join(dir, 'openkanban.db')}\n`))
+  console.log(C.dim(`    数据 ${join(dir, 'openkanban.db')}`))
+  console.log(scheduler.settings.autopilot
+    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 并发 ${String(scheduler.settings.maxConcurrent)}`)}\n`
+    : C.dim('    自动认领当前关闭，可在界面右上角打开。\n'))
 
   if (!process.argv.includes('--no-open')) openBrowser(server.url)
 
   const shutdown = (): void => {
     console.log(C.dim('\n  正在关闭 …'))
+    scheduler.stop()
     void server.close().then(() => {
       storage.close()
       process.exit(0)

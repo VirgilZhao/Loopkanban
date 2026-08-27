@@ -15,6 +15,7 @@ import { asBoardId, asRunId, asTaskId, moveTask, type Column, type Task } from '
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
+import type { Scheduler } from '../scheduler/index.ts'
 import type { Storage } from '../storage/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { RunBus } from './bus.ts'
@@ -37,6 +38,8 @@ export interface ServerOptions {
   readonly runner?: Runner
   /** 验收器。不给则不能通过/打回/废弃。 */
   readonly review?: Review
+  /** 自动认领调度器。不给则界面上没有自动驾驶开关。 */
+  readonly scheduler?: Scheduler
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -109,6 +112,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const agents = options.agents ?? []
   const runner = options.runner
   const review = options.review
+  const scheduler = options.scheduler
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
 
   const server: Server = createHttpServer((req, res) => {
@@ -162,6 +166,24 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         })),
       }, extraHeaders)
       return
+    }
+
+    // ── 自动驾驶：状态与设置 ─────────────────────────────────
+    if (pathname === '/api/scheduler') {
+      if (scheduler === undefined) { sendJson(res, 503, { error: 'no-scheduler' }); return }
+      if (method === 'GET') {
+        sendJson(res, 200, scheduler.state(), extraHeaders)
+        return
+      }
+      if (method === 'PATCH') {
+        const body = await readJsonBody(req) as
+          { autopilot?: boolean; maxConcurrent?: number; maxPerRepo?: number } | undefined
+        const settings = scheduler.updateSettings(body ?? {})
+        // 立刻跑一轮，让开关点下去马上有反应，而不是等下一个节拍。
+        const lastTick = await scheduler.tick()
+        sendJson(res, 200, { settings, lastTick }, extraHeaders)
+        return
+      }
     }
 
     // ── 新建任务 ────────────────────────────────────────────

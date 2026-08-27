@@ -79,6 +79,31 @@ export interface StreamEvent {
   payload: Record<string, unknown>
 }
 
+export interface SchedulerSettings {
+  autopilot: boolean
+  maxConcurrent: number
+  maxPerRepo: number
+}
+
+export interface Skip {
+  taskId: string
+  reason: 'blocked-by-dependency' | 'global-limit-reached' | 'repo-limit-reached' | 'provider-unavailable'
+  detail: string
+}
+
+export interface TickReport {
+  at: number
+  enabled: boolean
+  dispatched: { taskId: string; provider: string; runId?: string; error?: string }[]
+  skipped: Skip[]
+  reclaimed: string[]
+}
+
+export interface SchedulerState {
+  settings: SchedulerSettings
+  lastTick: TickReport | null
+}
+
 /** 列的展示信息。顺序即流转顺序。 */
 export const COLUMN_META: Record<Column, { label: string; hint: string; lamp: string }> = {
   backlog: { label: 'Backlog', hint: '想法池 · Agent 不可领', lamp: 'idle' },

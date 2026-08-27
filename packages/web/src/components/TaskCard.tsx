@@ -1,7 +1,7 @@
 import { useDraggable } from '@dnd-kit/core'
-import { CircleAlert, GitBranch, ListChecks, Lock } from 'lucide-react'
+import { CircleAlert, GitBranch, ListChecks, Lock, PauseCircle } from 'lucide-react'
 import { cn } from '@/lib/utils.ts'
-import type { Task } from '@/types.ts'
+import type { Skip, Task } from '@/types.ts'
 
 /** 把毫秒时长压成人能扫一眼的形式。 */
 function since(from: number, now: number): string {
@@ -17,10 +17,12 @@ interface Props {
   selected: boolean
   /** 该任务当前正在跑的工具名，用于卡片上的实时票据。 */
   liveTool?: string | undefined
+  /** 调度器这一轮为什么没派它。 */
+  skip?: Skip | undefined
   onSelect: (task: Task) => void
 }
 
-export function TaskCard({ task, now, selected, liveTool, onSelect }: Props): React.JSX.Element {
+export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Props): React.JSX.Element {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id })
   const running = task.column === 'running'
   const leaseExpired = task.lease !== undefined && task.lease.expiresAt <= now
@@ -70,6 +72,14 @@ export function TaskCard({ task, now, selected, liveTool, onSelect }: Props): Re
           <CircleAlert className="size-3" /> 租约已过期 · 待回收
         </p>
       ) : null}
+
+      {/* 「我的卡为什么不动」——调度器跳过它的原因直接写在卡上。 */}
+      {skip === undefined ? null : (
+        <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-ink-faint">
+          <PauseCircle className="mt-[2px] size-3 flex-none" />
+          <span className="min-w-0">{skip.detail}</span>
+        </p>
+      )}
 
       <div className={cn(
         'mt-2 flex items-center gap-3 border-t border-hairline/60 pt-1.5 text-ink-faint',

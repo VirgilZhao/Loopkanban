@@ -269,6 +269,41 @@ export class Storage {
     return (rows as unknown as RunRow[]).map(toRun)
   }
 
+  // ── 设置 ───────────────────────────────────────────────────────
+
+  /**
+   * 读一个设置项。放在 `meta` 表里而不是单独建表：设置总共就几个键，
+   * 为它加一张表和一次迁移不划算。
+   * @param key - 键名。
+   * @param fallback - 没存过时的默认值。
+   */
+  getSetting<T>(key: string, fallback: T): T {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(`setting:${key}`) as
+      | { value: string } | undefined
+    if (row === undefined) return fallback
+    try {
+      const parsed = JSON.parse(row.value) as T | null
+      // 存坏了、或者存进去的是 null/undefined，都当没存过。
+      // 一个坏值不该卡住整个启动。
+      return parsed === null ? fallback : parsed
+    } catch {
+      return fallback
+    }
+  }
+
+  /**
+   * 写一个设置项。
+   * @param key - 键名。
+   * @param value - 任意可序列化的值；`undefined` 存成 null，等同于清除。
+   */
+  setSetting(key: string, value: unknown): void {
+    // `JSON.stringify(undefined)` 返回的是 undefined 而不是字符串，
+    // 直接绑给 SQLite 会抛。补一个 null 兜底。
+    this.db.prepare(
+      'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    ).run(`setting:${key}`, JSON.stringify(value ?? null))
+  }
+
   // ── 事件日志（append-only）──────────────────────────────────────
 
   /**

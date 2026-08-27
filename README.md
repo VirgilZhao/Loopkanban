@@ -34,7 +34,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 178 个测试
+pnpm test            # 193 个测试
 pnpm run typecheck
 pnpm run build:web   # 前端产物，host 从 packages/web/dist 托管
 ```

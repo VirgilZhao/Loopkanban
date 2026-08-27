@@ -1,6 +1,6 @@
 import { useDroppable } from '@dnd-kit/core'
 import { cn } from '@/lib/utils.ts'
-import { COLUMN_META, type Column as ColumnKey, type Task } from '@/types.ts'
+import { COLUMN_META, type Column as ColumnKey, type Skip, type Task } from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
 
 interface Props {
@@ -10,10 +10,11 @@ interface Props {
   index: number
   selectedId: string | null
   liveTools: Record<string, string>
+  skips: Map<string, Skip>
   onSelect: (task: Task) => void
 }
 
-export function Column({ column, tasks, now, index, selectedId, liveTools, onSelect }: Props): React.JSX.Element {
+export function Column({ column, tasks, now, index, selectedId, liveTools, skips, onSelect }: Props): React.JSX.Element {
   const { setNodeRef, isOver } = useDroppable({ id: column })
   const meta = COLUMN_META[column]
 
@@ -47,6 +48,7 @@ export function Column({ column, tasks, now, index, selectedId, liveTools, onSel
             now={now}
             selected={selectedId === task.id}
             liveTool={liveTools[task.id]}
+            skip={skips.get(task.id)}
             onSelect={onSelect}
           />
         ))}

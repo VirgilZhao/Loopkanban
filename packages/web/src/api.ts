@@ -6,7 +6,9 @@
  * token 拼进 URL（避免它出现在浏览器历史与日志里）。
  */
 
-import type { Agent, Board, DiffView, Run, StreamEvent, Task } from './types.ts'
+import type {
+  Agent, Board, DiffView, Run, SchedulerSettings, SchedulerState, StreamEvent, Task,
+} from './types.ts'
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, detail: string) {
@@ -48,6 +50,12 @@ export const api = {
   /** 取消执行，会连同整棵进程树一起收掉。 */
   cancel: (runId: string) =>
     call<{ stopped: boolean }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
+
+  scheduler: () => call<SchedulerState>('/api/scheduler'),
+
+  /** 改自动驾驶设置。服务端会立刻跑一轮，所以返回的 lastTick 是新的。 */
+  setScheduler: (patch: Partial<SchedulerSettings>) =>
+    call<SchedulerState>('/api/scheduler', { method: 'PATCH', body: JSON.stringify(patch) }),
 
   diff: (taskId: string) => call<{ diff: DiffView }>(`/api/tasks/${encodeURIComponent(taskId)}/diff`),
 

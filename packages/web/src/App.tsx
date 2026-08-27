@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { DndContext, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
+import { Autopilot } from '@/components/Autopilot.tsx'
 import { Column } from '@/components/Column.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { cn } from '@/lib/utils.ts'
-import { COLUMNS, type Agent, type Column as ColumnKey, type Task } from '@/types.ts'
+import {
+  COLUMNS, type Agent, type Column as ColumnKey, type SchedulerState, type Skip, type Task,
+} from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
 const CLOCK_MS = 5_000
@@ -30,6 +33,16 @@ const ERROR_HINT: Record<string, string> = {
   'no-run': '这张卡还没有执行记录。',
 }
 
+/** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
+function notify(title: string, body: string): void {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return
+  try {
+    new Notification(`OpenKanban · ${title}`, { body, tag: body })
+  } catch {
+    // 某些浏览器在非安全上下文下会直接抛，忽略即可。
+  }
+}
+
 export default function App(): React.JSX.Element {
   const [tasks, setTasks] = useState<Task[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
@@ -37,10 +50,18 @@ export default function App(): React.JSX.Element {
   const [liveTools, setLiveTools] = useState<Record<string, string>>({})
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [scheduler, setScheduler] = useState<SchedulerState | null>(null)
+  const [schedulerBusy, setSchedulerBusy] = useState(false)
+  // 上一次看到的列，用来判断"刚刚有卡进了 Review/Failed"，据此发通知。
+  const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
   const refresh = useCallback(async () => {
-    const { tasks: loaded } = await api.state()
+    const [{ tasks: loaded }, state] = await Promise.all([
+      api.state(),
+      api.scheduler().catch(() => null),
+    ])
     setTasks(loaded)
+    if (state !== null) setScheduler(state)
   }, [])
 
   useEffect(() => {
@@ -69,6 +90,23 @@ export default function App(): React.JSX.Element {
     return () => { clearTimeout(timer) }
   }, [notice])
 
+  // 无人值守的意义就在于你不用盯着。卡片进 Review 或 Failed 时推一条桌面通知,
+  // 否则"关掉浏览器去睡觉"这件事就落不了地。
+  useEffect(() => {
+    const previous = seenColumns.current
+    const first = previous.size === 0
+    for (const task of tasks) {
+      const before = previous.get(task.id)
+      previous.set(task.id, task.column)
+      if (first || before === undefined || before === task.column) continue
+      if (task.column !== 'review' && task.column !== 'failed') continue
+      notify(
+        task.column === 'review' ? '待验收' : '执行失败',
+        task.subject,
+      )
+    }
+  }, [tasks])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setSelectedId(null)
@@ -85,6 +123,29 @@ export default function App(): React.JSX.Element {
   }, [tasks])
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null
+
+  // 「我的卡为什么不动」——调度器每一轮的跳过原因都摊到卡片上。
+  const skipsByTask = useMemo(() => {
+    const map = new Map<string, Skip>()
+    for (const skip of scheduler?.lastTick?.skipped ?? []) map.set(skip.taskId, skip)
+    return map
+  }, [scheduler])
+
+  const changeScheduler = useCallback(async (patch: Parameters<typeof api.setScheduler>[0]) => {
+    setSchedulerBusy(true)
+    try {
+      // 打开自动驾驶时顺手要一次通知权限：这正是用户希望"不用盯着"的时刻。
+      if (patch.autopilot === true && 'Notification' in window && Notification.permission === 'default') {
+        void Notification.requestPermission()
+      }
+      setScheduler(await api.setScheduler(patch))
+      await refresh()
+    } catch (error) {
+      if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+    } finally {
+      setSchedulerBusy(false)
+    }
+  }, [refresh])
 
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
     const target = event.over?.id
@@ -157,11 +218,14 @@ export default function App(): React.JSX.Element {
 
         <span className="flex-1" />
 
-        <div className="flex items-center gap-1.5">
-          <span className={cn('lamp', runningCount > 0 && '')} data-state={runningCount > 0 ? 'running' : 'idle'} />
-          <span className="chrome-label">running</span>
-          <span className="mono text-[11px] text-ink">{runningCount}</span>
-        </div>
+        {scheduler === null ? null : (
+          <Autopilot
+            settings={scheduler.settings}
+            running={runningCount}
+            busy={schedulerBusy}
+            onChange={(patch) => { void changeScheduler(patch) }}
+          />
+        )}
       </header>
 
       {notice === null ? null : (
@@ -197,6 +261,7 @@ export default function App(): React.JSX.Element {
                 now={now}
                 selectedId={selectedId}
                 liveTools={liveTools}
+                skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
               />
             ))}

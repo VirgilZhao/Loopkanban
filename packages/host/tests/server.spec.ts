@@ -325,3 +325,51 @@ describe('静态资源托管', () => {
     expect((await get('/api/state')).status).toBe(200)
   })
 })
+
+describe('错误处理（回归）', () => {
+  it('请求体不是合法 JSON 时返回 400 而不是 500', async () => {
+    const res = await api('/api/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"subject": ',
+    })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ error: 'bad-request' })
+  })
+
+  it('内部异常不把原始信息回给调用方', async () => {
+    // 让 listBoards 抛一个带敏感路径的异常。
+    const real = store.listBoards.bind(store)
+    store.listBoards = (() => { throw new Error('ENOENT /Users/someone/.ssh/id_rsa') }) as typeof store.listBoards
+    const res = await api('/api/state')
+    store.listBoards = real
+
+    expect(res.status).toBe(500)
+    const body = await res.text()
+    expect(body).not.toContain('id_rsa')
+    expect(body).toContain('internal-error')
+  })
+})
+
+describe('静态资源路径（回归）', () => {
+  it('嵌套资源按原路径返回，而不是回落到 index.html', async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), 'openkanban-nested-'))
+    const root = join(sandbox, 'dist')
+    await mkdir(join(root, 'assets', 'deep'), { recursive: true })
+    await writeFile(join(root, 'index.html'), '<!doctype html><title>app</title>', 'utf8')
+    await writeFile(join(root, 'assets', 'deep', 'app.js'), 'export const x = 1', 'utf8')
+
+    const nested = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50, staticDir: root })
+    try {
+      const res = await fetch(`http://127.0.0.1:${String(nested.port)}/assets/deep/app.js`, {
+        headers: { cookie: `openkanban_token=${TOKEN}` },
+      })
+      // 越界判断若写死分隔符（Windows 上是反斜杠），这里会拿到 index.html。
+      expect(res.headers.get('content-type')).toContain('javascript')
+      expect(await res.text()).toContain('export const x')
+    } finally {
+      await nested.close()
+      await rm(sandbox, { recursive: true, force: true })
+    }
+  })
+})

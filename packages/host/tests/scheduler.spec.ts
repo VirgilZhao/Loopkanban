@@ -237,3 +237,30 @@ describe('start / stop', () => {
     expect(store.listTasks().map((t) => t.column)).toEqual(['review', 'review'])
   })
 })
+
+describe('轮次串行（回归）', () => {
+  it('tick 排在进行中的轮次之后，拿到的是自己这次的结果而非上一轮的陈旧报告', async () => {
+    scheduler.updateSettings({ autopilot: true, maxConcurrent: 9, maxPerRepo: 9 })
+    store.createTask(task({ id: 'a' }))
+
+    const first = scheduler.tick()
+    // 第一轮还在派发时改设置并再跑一轮 —— 这正是 PATCH /api/scheduler 的路径。
+    scheduler.updateSettings({ autopilot: false })
+    const second = await scheduler.tick()
+
+    await first
+    // 第二轮必须反映**新设置**，而不是复用第一轮的报告。
+    expect(second.enabled).toBe(false)
+    await quiet()
+  })
+
+  it('节拍忙时跳过而不是排队 —— 排队会在慢轮结束后连着放炮', async () => {
+    scheduler.updateSettings({ autopilot: true })
+    store.createTask(task({ id: 'a' }))
+
+    const running = scheduler.tick()
+    expect(await scheduler.tickIfIdle()).toBeNull()
+    await running
+    await quiet()
+  })
+})

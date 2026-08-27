@@ -38,6 +38,14 @@ const RENEW_DIVISOR = 3
 /** 单次执行的默认超时。 */
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000
 
+/**
+ * stderr 保留上限，按**字节**而不是块数。
+ *
+ * 单个 chunk 可达 64KB，按块数设限等于给了上百 MB 的额度；而最终只有前 512
+ * 字节会被用作 diagnostic。一个疯狂往 stderr 打日志的构建不该把 host 撑爆。
+ */
+const STDERR_KEEP_BYTES = 64 * 1024
+
 export interface RunnerOptions {
   readonly storage: Storage
   readonly bus: RunBus
@@ -65,6 +73,8 @@ interface Active {
   readonly renew: NodeJS.Timeout
   readonly timeout: NodeJS.Timeout
   readonly taskId: TaskId
+  /** 是否是被人主动取消的。用来把它和"真的跑失败了"区分开。 */
+  cancelled: boolean
 }
 
 export class Runner {
@@ -133,9 +143,16 @@ export class Runner {
       const prior = await this.resumableRun(claimed.value, agent)
       return { ok: true, run: await this.launch(claimed.value, runId, agent, prior) }
     } catch (error) {
+      const detail = describeError(error)
+      // launch 可能已经写了 Run 记录才失败（例如 spawn 时 CLI 二进制刚被替换）。
+      // 不打到终态的话，它会永远算作 running，把统计和孤儿对账都带偏。
+      const created = storage.getRun(runId)
+      if (created !== null && created.status === 'running') {
+        storage.updateRun({ ...created, status: 'failed', diagnostic: detail, endedAt: this.now })
+      }
       // 副作用建到一半失败，必须把卡放回去，否则它会一直卡在 running。
       this.release(taskId, 'failed')
-      return { ok: false, reason: 'launch-failed', detail: describeError(error) }
+      return { ok: false, reason: 'launch-failed', detail }
     }
   }
 
@@ -218,7 +235,7 @@ export class Runner {
     }, this.options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS)
     renew.unref()
     timeout.unref()
-    this.active.set(runId, { handle, renew, timeout, taskId: task.id })
+    this.active.set(runId, { handle, renew, timeout, taskId: task.id, cancelled: false })
 
     void this.consume(run, agent, handle, worktree, task).catch((error: unknown) => {
       this.emit(runId, 'notice', { level: 'warn', text: `事件流中断: ${describeError(error)}` })
@@ -238,25 +255,47 @@ export class Runner {
     let diagnostic: string | undefined
 
     const stderrChunks: Buffer[] = []
+    let stderrBytes = 0
     handle.stderr?.on('data', (chunk: Buffer) => {
       // stderr 必须有人读：CLI 的参数错误、鉴权提示都在这里，
       // 只 pipe 不读会让硬失败在界面上完全看不见。
-      if (stderrChunks.length < 2_000) stderrChunks.push(chunk)
+      // 但**必须持续读**（哪怕丢弃），否则管道写满后子进程会阻塞。
+      if (stderrBytes >= STDERR_KEEP_BYTES) return
+      stderrBytes += chunk.length
+      stderrChunks.push(chunk)
     })
 
-    for await (const line of createInterface({ input: handle.stdout })) {
-      rawLines.push(line)
-      const event = agent.provider.parseLine(line, agent.caps)
-      if (event.kind === 'session') sessionId = event.sessionId
-      if (event.kind === 'finished') {
-        finishedOk = event.ok
-        diagnostic = event.diagnostic
+    // 在 finally 里读取并保存，保证正常与异常两条路径都拿得到，
+    // 也保证 active 条目一定被彻底移除。
+    let cancelled = false
+    try {
+      for await (const line of createInterface({ input: handle.stdout })) {
+        rawLines.push(line)
+        const event = agent.provider.parseLine(line, agent.caps)
+        if (event.kind === 'session') sessionId = event.sessionId
+        if (event.kind === 'finished') {
+          finishedOk = event.ok
+          diagnostic = event.diagnostic
+        }
+        this.emit(run.id, event.kind, event as unknown as Record<string, unknown>)
       }
-      this.emit(run.id, event.kind, event as unknown as Record<string, unknown>)
+    } catch (error) {
+      // 事件流中断（stdout EPIPE、落库失败…）时进程很可能还活着。
+      // 不收拾的话：定时器不停、active 条目不删，而 reclaimExpired 恰好会
+      // 跳过 active 里的任务 —— 这张卡就永远停在 Running 了。
+      await handle.terminate().catch(() => undefined)
+      this.finish(run, task, {
+        status: 'failed',
+        exitCode: handle.outcome()?.code ?? undefined,
+        diagnostic: `事件流中断: ${describeError(error)}`,
+      })
+      throw error
+    } finally {
+      cancelled = this.active.get(run.id)?.cancelled === true
+      this.clearActive(run.id)
     }
 
     const outcome = await handle.exited
-    this.clearActive(run.id)
 
     const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim()
     await writeFile(join(this.options.artifactsRoot, run.id, 'raw.log'), rawLines.join('\n'), 'utf8')
@@ -279,12 +318,14 @@ export class Runner {
       ?? (stderrText.length > 0 ? stderrText.slice(0, 512) : undefined)
       ?? `exit=${String(outcome.code)}`
 
+    // 主动取消不是失败：`aborted` 与 `failed` 在执行历史和成功率里必须分开，
+    // 否则"我自己按的停止"会被算进失败率。
     storage.updateRun({
       ...run,
       ...(sessionId === undefined ? {} : { agentSessionId: sessionId }),
-      status: ok ? 'completed' : 'failed',
+      status: ok ? 'completed' : cancelled ? 'aborted' : 'failed',
       exitCode: outcome.code ?? undefined,
-      ...(ok ? {} : { diagnostic: failureDetail }),
+      ...(ok ? {} : { diagnostic: cancelled ? '已被用户取消' : failureDetail }),
       endedAt: this.now,
     })
 
@@ -304,6 +345,7 @@ export class Runner {
   async cancel(runId: RunId): Promise<boolean> {
     const entry = this.active.get(runId)
     if (entry === undefined) return false
+    entry.cancelled = true
     this.emit(runId, 'notice', { level: 'warn', text: '收到取消请求，正在终止整棵进程树' })
     await entry.handle.terminate()
     return true
@@ -366,6 +408,12 @@ export class Runner {
     return moved.ok && storage.commitTask(moved.value)
   }
 
+  /**
+   * 停掉定时器并彻底移除条目。
+   *
+   * **两条路径都必须走到这里**：`active` 里的残留会让 reclaimExpired 永远跳过
+   * 这张卡（它刻意不回收本进程仍在跑的任务），于是卡片永远停在 Running。
+   */
   private clearActive(runId: RunId): void {
     const entry = this.active.get(runId)
     if (entry === undefined) return
@@ -374,11 +422,47 @@ export class Runner {
     this.active.delete(runId)
   }
 
-  /** 先落库再广播 —— 反过来会推出还没落盘的 seq，断线重连就漏了。 */
+  /**
+   * 异常路径下的统一收尾：把 Run 打到终态、把卡片放回去。
+   * 每一步都各自兜住异常 —— 收尾流程本身再抛就真的没人管了。
+   */
+  private finish(
+    run: Run, task: Task,
+    outcome: { status: 'failed' | 'aborted'; exitCode?: number | undefined; diagnostic: string },
+  ): void {
+    try {
+      this.options.storage.updateRun({
+        ...run,
+        status: outcome.status,
+        ...(outcome.exitCode === undefined ? {} : { exitCode: outcome.exitCode }),
+        diagnostic: outcome.diagnostic,
+        endedAt: this.now,
+      })
+    } catch {
+      // 落库都失败了就只能靠下次启动的 reconcile 兜底。
+    }
+    try {
+      this.release(task.id, 'failed')
+    } catch {
+      // 同上。
+    }
+  }
+
+  /**
+   * 先落库再广播 —— 反过来会推出还没落盘的 seq，断线重连就漏了。
+   *
+   * **尽力而为，绝不抛出。** 一条事件写不进去（磁盘满、库被锁）是要记下来的
+   * 麻烦，但不该因此杀掉正在进行的执行 —— Agent 真正干的活比一行日志值钱。
+   * 而且异常处理路径本身也要 emit，让它可抛会引发二次故障。
+   */
   private emit(runId: RunId, kind: string, payload: unknown): void {
     const at = this.now
-    const seq = this.options.storage.appendEvent(runId, kind, payload, at)
-    this.options.bus.publish({ runId, seq, kind, payload, at })
+    try {
+      const seq = this.options.storage.appendEvent(runId, kind, payload, at)
+      this.options.bus.publish({ runId, seq, kind, payload, at })
+    } catch (error) {
+      console.error(`[openkanban] 事件落库失败 run=${runId} kind=${kind}:`, error)
+    }
   }
 }
 

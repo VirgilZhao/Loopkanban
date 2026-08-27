@@ -18,7 +18,16 @@
  */
 
 /** 名字里带这些片段的一律视为凭证。 */
-const CREDENTIAL_MARKERS = ['API_KEY', 'AUTH_TOKEN', 'ACCESS_TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL']
+const CREDENTIAL_MARKERS = ['API_KEY', 'ACCESS_KEY', 'PRIVATE_KEY', 'SECRET', 'PASSWORD', 'CREDENTIAL']
+
+/**
+ * 以下划线分段后，只要有一段是这些词就视为凭证。
+ *
+ * 按**段**匹配而不是子串：`GITHUB_TOKEN` / `NPM_TOKEN` / `AWS_SESSION_TOKEN`
+ * 都该被清掉（此前只匹配 `AUTH_TOKEN`/`ACCESS_TOKEN` 这类复合词，裸的 `_TOKEN`
+ * 全漏了），但 `TOKENIZERS_PARALLELISM` 这种不该误伤。
+ */
+const CREDENTIAL_SEGMENTS = new Set(['TOKEN', 'TOKENS', 'SECRET', 'SECRETS', 'PASSWORD', 'PASSWD', 'CREDENTIAL', 'CREDENTIALS'])
 
 /** 这些前缀属于「父 Agent 会话的身份」，必须切断。 */
 const SESSION_PREFIXES = ['CLAUDE_CODE_', 'CLAUDE_AGENT_', 'CODEX_SESSION_']
@@ -39,7 +48,8 @@ export interface ScrubbedEnv {
 
 function isCredential(name: string): boolean {
   const upper = name.toUpperCase()
-  return CREDENTIAL_MARKERS.some((marker) => upper.includes(marker))
+  if (CREDENTIAL_MARKERS.some((marker) => upper.includes(marker))) return true
+  return upper.split('_').some((segment) => CREDENTIAL_SEGMENTS.has(segment))
 }
 
 function isParentSession(name: string): boolean {

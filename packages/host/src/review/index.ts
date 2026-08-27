@@ -111,14 +111,18 @@ export class Review {
       merged = true
     }
 
-    // 分支保留：worktree 只是工作场地，删掉它不影响成果。
-    await removeWorktree(task.repoPath, worktree, true)
-
+    // **CAS 必须在删 worktree 之前**。反过来的话，一旦这里冲突失败，
+    // worktree 已经没了、卡还停在 Review，而用户按提示重试会在不存在的目录上
+    // 跑 git、直接 500 —— 这张卡就再也走不出 Review 了。
     const moved = moveTask(task, { expectedRevision: task.revision, to: 'done', now: this.now })
     if (!moved.ok) return { ok: false, reason: moved.reason, detail: moved.detail }
     if (!storage.commitTask(moved.value)) {
       return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
     }
+
+    // 状态已经落定，删 worktree 只是收拾场地。这一步失败不该让验收作废，
+    // 残留目录由下次启动的对账清理。
+    await removeWorktree(task.repoPath, worktree, true).catch(() => undefined)
     return { ok: true, commit, merged }
   }
 
@@ -154,17 +158,19 @@ export class Review {
     const task = storage.getTask(taskId)
     if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
 
-    const run = this.latestRun(taskId)
-    if (run !== null) {
-      // 连分支一起删：用户明确表示这次成果不要了。
-      await removeWorktree(task.repoPath, this.worktreeOf(run), false)
-      await rm(join(this.options.worktreeRoot, taskId), { recursive: true, force: true })
-    }
-
+    // 同 accept：先把状态落定，再做不可逆的删除。CAS 冲突时至少东西还在，
+    // 用户重试一次就能继续；顺序反过来则是"删完了却没记上"。
     const moved = moveTask(task, { expectedRevision: task.revision, to, now: this.now })
     if (!moved.ok) return { ok: false, reason: moved.reason, detail: moved.detail }
     if (!storage.commitTask(moved.value)) {
       return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
+    }
+
+    const run = this.latestRun(taskId)
+    if (run !== null) {
+      // 连分支一起删：用户明确表示这次成果不要了。
+      await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
+      await rm(join(this.options.worktreeRoot, taskId), { recursive: true, force: true })
     }
     return { ok: true }
   }

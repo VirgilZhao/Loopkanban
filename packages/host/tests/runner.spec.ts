@@ -25,11 +25,11 @@ let bus: RunBus
  * 刻意不 mock 掉子进程 —— 这样测到的是完整链路（进程组、逐行读取、
  * 解析、落库、广播、退出码），而不只是一个内存里的假对象。
  */
-function scriptedProvider(lines: string[], exitCode = 0): AgentProvider {
+function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvider {
   const script = `
     const lines = ${JSON.stringify(lines)}
     for (const line of lines) console.log(line)
-    process.exit(${String(exitCode)})
+    ${tail || `process.exit(${String(exitCode)})`}
   `
   return {
     id: 'scripted',
@@ -320,5 +320,101 @@ describe('崩溃恢复', () => {
 
     expect(r.reclaimExpired()).toEqual([])
     await settle(started.run.id)
+  })
+})
+
+describe('异常路径的收尾（回归）', () => {
+  it('解析器中途抛异常时，卡片不会永远卡在 Running', async () => {
+    store.createTask(task({ id: 't1' }))
+    const provider = scriptedProvider([
+      JSON.stringify({ kind: 'text', text: 'a' }),
+      JSON.stringify({ kind: 'text', text: '炸' }),
+      JSON.stringify({ kind: 'finished', ok: true }),
+    ])
+    // 模拟 provider 自己出 bug（或 stdout 中途出错）导致事件流中断。
+    const broken: AgentProvider = {
+      ...provider,
+      parseLine: (line, caps) => {
+        if (line.includes('炸')) throw new Error('parser blew up')
+        return provider.parseLine(line, caps)
+      },
+    }
+    const r = runner(broken, { leaseTtlMs: 500 })
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline && store.getTask(asTaskId('t1'))?.column === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getRun(started.run.id)?.status).toBe('failed')
+    expect(store.getRun(started.run.id)?.diagnostic).toContain('事件流中断')
+
+    // 关键：条目已从 active 移除，定时器也停了 —— 否则回收器会永远跳过它。
+    expect(r.activeRunIds()).toEqual([])
+  })
+
+  it('事件落库失败不该杀掉执行 —— 一行日志没有 Agent 干的活值钱', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'text', text: 'a' }),
+      JSON.stringify({ kind: 'finished', ok: true }),
+    ]))
+
+    const real = store.appendEvent.bind(store)
+    let calls = 0
+    store.appendEvent = ((...args: Parameters<Storage['appendEvent']>) => {
+      calls += 1
+      if (calls === 2) throw new Error('disk full')
+      return real(...args)
+    }) as Storage['appendEvent']
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+    store.appendEvent = real
+
+    // 丢了一条事件，但这一轮照常跑完并进了 Review。
+    expect(store.getRun(started.run.id)?.status).toBe('completed')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+  })
+
+  it('起进程失败时不会留下一条永远 running 的 Run 记录', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([]), {
+      spawn: () => Promise.reject(new Error('spawn ENOENT: CLI 刚被替换')),
+    })
+
+    const result = await r.start(asTaskId('t1'))
+    expect(result).toMatchObject({ ok: false, reason: 'launch-failed' })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+
+    const runs = store.listRuns(asTaskId('t1'))
+    // 记录可以存在，但绝不能停在 running —— 否则统计与孤儿对账都被带偏。
+    expect(runs.every((run) => run.status !== 'running')).toBe(true)
+    expect(store.listOrphanRuns()).toEqual([])
+  })
+
+  it('主动取消记为 aborted，不混进失败率', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'text', text: 'ready' }),
+      // 之后长时间不退出，给取消留出窗口。
+    ], 0, 'setInterval(() => {}, 1000)'), { leaseTtlMs: 60_000 })
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    expect(await r.cancel(started.run.id)).toBe(true)
+    await settle(started.run.id)
+
+    const run = store.getRun(started.run.id)
+    expect(run?.status).toBe('aborted')
+    expect(run?.diagnostic).toContain('取消')
+    // 成功率只看 completed / failed，aborted 不参与。
+    expect(store.stats().failed).toBe(0)
   })
 })

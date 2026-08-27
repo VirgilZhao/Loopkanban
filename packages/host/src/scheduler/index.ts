@@ -59,7 +59,8 @@ export interface SchedulerOptions {
 export class Scheduler {
   private readonly options: SchedulerOptions
   private timer: NodeJS.Timeout | undefined
-  private running = false
+  /** 进行中的那一轮。新的 tick() 排在它后面，保证不会两轮并行。 */
+  private inFlight: Promise<TickReport> | undefined
   private lastTick: TickReport | null = null
 
   constructor(options: SchedulerOptions) {
@@ -98,7 +99,7 @@ export class Scheduler {
   /** 起节拍。重复调用无副作用。 */
   start(): void {
     if (this.timer !== undefined) return
-    const timer = setInterval(() => { void this.tick() }, this.options.tickMs ?? DEFAULT_TICK_MS)
+    const timer = setInterval(() => { void this.tickIfIdle() }, this.options.tickMs ?? DEFAULT_TICK_MS)
     // 调度器不该拖住进程退出。
     timer.unref()
     this.timer = timer
@@ -111,51 +112,72 @@ export class Scheduler {
   }
 
   /**
-   * 跑一轮。
+   * 跑一轮，并保证拿到的是**这次调用**的结果。
+   *
+   * 有轮次在跑时排队等它结束再跑自己的，而不是返回上一轮的报告 ——
+   * 调用方（改完设置的那个 PATCH）要的正是新设置下的结果，给它一份陈旧报告
+   * 会让界面显示"没有任何跳过原因"，而那恰恰是用户最想立刻看到反馈的时刻。
    *
    * 即使自动认领关着也会执行**回收** —— 崩溃留下的卡片必须回到 Ready，
-   * 否则它会永远卡在 Running，而这跟用不用自动驾驶无关。
+   * 这跟用不用自动驾驶无关。
    *
    * @returns 这一轮做了什么，供界面解释"为什么我的卡还没动"。
    */
   async tick(): Promise<TickReport> {
-    // 上一轮还没跑完就跳过这一轮：派发是异步的，重入会导致同一张卡被算两次。
-    if (this.running) return this.lastTick ?? emptyTick(this.now, this.settings.autopilot)
-    this.running = true
+    const previous = this.inFlight
+    // 无论上一轮成功还是失败，都接着往下跑。
+    const mine = (previous === undefined ? Promise.resolve() : previous.then(noop, noop))
+      .then(() => this.runTick())
+    this.inFlight = mine
     try {
-      const { storage, runner, agents } = this.options
-      const settings = this.settings
+      return await mine
+    } finally {
+      if (this.inFlight === mine) this.inFlight = undefined
+    }
+  }
 
-      const reclaimed = runner.reclaimExpired()
+  /**
+   * 节拍专用：有轮次在跑就跳过这一拍。
+   *
+   * 定时器不该排队 —— 一轮跑得慢的话，排起来的拍子会在它结束后连着放炮。
+   * @returns 这一轮的报告；被跳过时返回 null。
+   */
+  async tickIfIdle(): Promise<TickReport | null> {
+    if (this.inFlight !== undefined) return null
+    return this.tick()
+  }
 
-      if (!settings.autopilot) {
-        const report: TickReport = {
-          at: this.now, enabled: false, dispatched: [], skipped: [], reclaimed,
-        }
-        this.lastTick = report
-        return report
-      }
+  private async runTick(): Promise<TickReport> {
+    const { storage, runner, agents } = this.options
+    const settings = this.settings
 
-      const plan = planDispatch({
-        tasks: storage.listTasks(),
-        availableProviders: agents.map((a) => a.provider.id),
-        limits: { maxConcurrent: settings.maxConcurrent, maxPerRepo: settings.maxPerRepo },
-        now: this.now,
-      })
+    const reclaimed = runner.reclaimExpired()
 
-      const dispatched = await this.launchAll(plan.dispatches)
+    if (!settings.autopilot) {
       const report: TickReport = {
-        at: this.now,
-        enabled: true,
-        dispatched,
-        skipped: plan.skipped,
-        reclaimed: [...reclaimed, ...plan.reclaimable],
+        at: this.now, enabled: false, dispatched: [], skipped: [], reclaimed,
       }
       this.lastTick = report
       return report
-    } finally {
-      this.running = false
     }
+
+    const plan = planDispatch({
+      tasks: storage.listTasks(),
+      availableProviders: agents.map((a) => a.provider.id),
+      limits: { maxConcurrent: settings.maxConcurrent, maxPerRepo: settings.maxPerRepo },
+      now: this.now,
+    })
+
+    const dispatched = await this.launchAll(plan.dispatches)
+    const report: TickReport = {
+      at: this.now,
+      enabled: true,
+      dispatched,
+      skipped: plan.skipped,
+      reclaimed: [...reclaimed, ...plan.reclaimable],
+    }
+    this.lastTick = report
+    return report
   }
 
   /** 逐个派发。一个失败不影响其余 —— 半张看板卡住比全卡住更难查。 */
@@ -171,11 +193,9 @@ export class Scheduler {
   }
 }
 
+function noop(): void { /* 上一轮的成败不影响这一轮是否要跑 */ }
+
 /** 并发上限至少为 1：0 或负数会让调度器静悄悄地什么都不做。 */
 function clampLimit(value: number): number {
   return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 1
-}
-
-function emptyTick(at: number, enabled: boolean): TickReport {
-  return { at, enabled, dispatched: [], skipped: [], reclaimed: [] }
 }

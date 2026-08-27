@@ -59,3 +59,27 @@ describe('scrubEnv', () => {
     expect(removed.join(' ')).not.toContain('sk-super-secret')
   })
 })
+
+describe('凭证识别的覆盖面（回归）', () => {
+  it('裸的 *_TOKEN 也算凭证 —— 此前只认 AUTH_TOKEN / ACCESS_TOKEN 这类复合词', () => {
+    const { env, removed } = scrubEnv({
+      GITHUB_TOKEN: 'x', GH_TOKEN: 'x', NPM_TOKEN: 'x',
+      AWS_SESSION_TOKEN: 'x', HF_TOKEN: 'x', VAULT_TOKEN: 'x',
+    })
+    expect(Object.keys(env)).toEqual([])
+    expect(removed).toHaveLength(6)
+  })
+
+  it('按下划线分段匹配，不误伤名字里恰好含 token 的普通变量', () => {
+    const { env } = scrubEnv({
+      TOKENIZERS_PARALLELISM: 'false',
+      TOKEN_BUCKET_SIZE: 'x',
+      MY_KEYBOARD_LAYOUT: 'us',
+    })
+    // TOKENIZERS / KEYBOARD 都不是完整的一段，留下。
+    expect(env['TOKENIZERS_PARALLELISM']).toBe('false')
+    expect(env['MY_KEYBOARD_LAYOUT']).toBe('us')
+    // TOKEN 是完整一段，清掉。
+    expect(env['TOKEN_BUCKET_SIZE']).toBeUndefined()
+  })
+})

@@ -9,7 +9,7 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { extname, join, normalize, resolve as resolvePath } from 'node:path'
+import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
@@ -85,16 +85,30 @@ function sendJson(res: ServerResponse, status: number, body: unknown, extraHeade
   res.end(payload)
 }
 
+/** 客户端输入有问题，不是服务端故障 —— 用它和内部异常区分开。 */
+export class BadRequestError extends Error {
+  constructor(detail: string) {
+    super(detail)
+    this.name = 'BadRequestError'
+  }
+}
+
 async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     size += (chunk as Buffer).length
-    if (size > limitBytes) throw new Error('请求体过大')
+    if (size > limitBytes) throw new BadRequestError('请求体过大')
     chunks.push(chunk as Buffer)
   }
   if (size === 0) return undefined
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch {
+    // 客户端发了坏 JSON 是 400，不是 500 —— 报成 500 会把调用方的输入问题
+    // 伪装成服务端故障，前端也没法据此给出可操作的提示。
+    throw new BadRequestError('请求体不是合法的 JSON')
+  }
 }
 
 /** 从路径里取出形如 `/api/runs/<id>/events` 的片段。 */
@@ -120,11 +134,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
   const server: Server = createHttpServer((req, res) => {
     void handle(req, res).catch((error: unknown) => {
-      if (!res.headersSent) {
-        sendJson(res, 500, { error: '内部错误', detail: error instanceof Error ? error.message : String(error) })
-      } else {
-        res.end()
+      if (res.headersSent) { res.end(); return }
+      if (error instanceof BadRequestError) {
+        sendJson(res, 400, { error: 'bad-request', detail: error.message })
+        return
       }
+      // 内部异常的原文可能带着文件路径等细节，只写进日志，不回给调用方。
+      console.error('[openkanban] 未处理的请求异常:', error)
+      sendJson(res, 500, { error: 'internal-error', detail: '服务端处理这次请求时出错，详情见运行日志' })
     })
   })
 
@@ -189,6 +206,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           { autopilot?: boolean; maxConcurrent?: number; maxPerRepo?: number } | undefined
         const settings = scheduler.updateSettings(body ?? {})
         // 立刻跑一轮，让开关点下去马上有反应，而不是等下一个节拍。
+        // tick() 会排在进行中的那一轮之后，所以这里拿到的一定是**新设置下**
+        // 的结果，而不是上一轮的陈旧报告。
         const lastTick = await scheduler.tick()
         sendJson(res, 200, { settings, lastTick }, extraHeaders)
         return
@@ -407,12 +426,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     res: ServerResponse,
     extraHeaders: Record<string, string>,
   ): Promise<boolean> {
-    const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
+    const requested = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
     // 目录穿越防线：拼完再验证它仍在 root 之下，`../` 一律出局。
-    const candidate = resolvePath(join(root, normalize(relative)))
-    const target = candidate.startsWith(root + '/') || candidate === root
-      ? candidate
-      : join(root, 'index.html')
+    // 用 path.relative 而不是字符串前缀比较 —— 后者要写死分隔符，
+    // 在 Windows 上（反斜杠）会把每一个正常资源都误判成越界。
+    const candidate = resolvePath(join(root, normalize(requested)))
+    const rel = relative(root, candidate)
+    const inside = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+    const target = inside ? candidate : join(root, 'index.html')
 
     const file = await stat(target).catch(() => null)
     const finalPath = file?.isFile() === true ? target : join(root, 'index.html')

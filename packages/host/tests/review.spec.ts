@@ -167,3 +167,46 @@ describe('discard', () => {
     expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
   })
 })
+
+describe('CAS 与不可逆操作的顺序（回归）', () => {
+  it('accept 的 CAS 冲突时 worktree 还在，重试能成功', async () => {
+    const { worktreePath } = await reviewable()
+
+    // 模拟"提交期间别人改了这张卡"：先让存储里的 revision 前进一格。
+    const stale = store.getTask(asTaskId('t1'))
+    if (stale === null) throw new Error('unreachable')
+    store.commitTask({ ...stale, revision: stale.revision + 1, subject: '被人改过' })
+
+    // review 读的是更新前的快照 → CAS 必然失败。
+    const conflicting = new Review({
+      storage: {
+        ...store,
+        getTask: () => stale,
+        listRuns: store.listRuns.bind(store),
+        commitTask: store.commitTask.bind(store),
+      } as unknown as Storage,
+      worktreeRoot: join(sandbox, 'worktrees'),
+      now: () => T0 + 5000,
+    })
+    const first = await conflicting.accept(asTaskId('t1'))
+    expect(first).toMatchObject({ ok: false, reason: 'revision-conflict' })
+
+    // 关键：worktree 没被删掉，所以重试是可行的而不是 500。
+    await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).resolves.toContain('slugify')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+
+    const retry = await review.accept(asTaskId('t1'))
+    expect(retry.ok).toBe(true)
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('done')
+  })
+
+  it('accept 成功后才删 worktree，分支与提交都留着', async () => {
+    const { worktreePath, branch } = await reviewable()
+    const result = await review.accept(asTaskId('t1'))
+    expect(result.ok).toBe(true)
+
+    await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).rejects.toThrow()
+    expect((await git(repo, 'branch', '--list', branch)).stdout.trim()).not.toBe('')
+    expect((await git(repo, 'log', '--oneline', branch)).stdout).toContain('slugify')
+  })
+})

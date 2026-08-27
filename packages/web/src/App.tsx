@@ -8,6 +8,7 @@ import { Autopilot } from '@/components/Autopilot.tsx'
 import { Column } from '@/components/Column.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
+import { insertPosition } from '@/lib/position.ts'
 import { cn } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type RunStats, type SchedulerState, type Skip, type Task,
@@ -35,34 +36,6 @@ const ERROR_HINT: Record<string, string> = {
   'dirty-worktree': '你的主工作区有未提交改动，先处理干净再合并。改动已经提交在任务分支上，不会丢。',
   'wrong-branch': '你的主工作区不在基线分支上。改动已经提交在任务分支上，切回去再合并即可。',
   'no-run': '这张卡还没有执行记录。',
-}
-
-/**
- * 算出拖放后的新 position。
- *
- * position 是浮点数，插入两张卡之间取中点，因此不必重排整列 ——
- * 一次拖动只写一条记录，CAS 冲突的面也最小。
- *
- * @param tasks - 全部任务。
- * @param moving - 被拖动的卡。
- * @param column - 目标列。
- * @param overTask - 落在哪张卡上；落在空白处则为 null（放到列尾）。
- */
-function insertPosition(
-  tasks: Task[], moving: Task, column: ColumnKey, overTask: Task | null,
-): number {
-  const siblings = tasks
-    .filter((t) => t.column === column && t.id !== moving.id)
-    .sort((a, b) => a.position - b.position)
-
-  if (siblings.length === 0) return 1
-  const index = overTask === null ? siblings.length : siblings.findIndex((t) => t.id === overTask.id)
-  if (index <= 0) return (siblings[0]?.position ?? 1) - 1
-  if (index >= siblings.length) return (siblings.at(-1)?.position ?? 0) + 1
-
-  const before = siblings[index - 1]?.position ?? 0
-  const after = siblings[index]?.position ?? before + 2
-  return (before + after) / 2
 }
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
@@ -201,6 +174,10 @@ export default function App(): React.JSX.Element {
     setDraggingId(null)
     const overId = event.over?.id
     if (typeof overId !== 'string') return
+    // 拖到自己身上等于没动。不拦的话 insertPosition 会因为 siblings 已排除它、
+    // findIndex 返回 -1 而把它排到列首 —— position 决定自动认领的派发顺序，
+    // 一次微小的误拖就静默改了优先级。
+    if (overId === event.active.id) return
     const task = tasks.find((t) => t.id === event.active.id)
     if (task === undefined) return
 

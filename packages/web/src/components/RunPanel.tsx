@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
-import { Play, Square } from 'lucide-react'
+import { Check, GitMerge, Play, RotateCcw, Square, Trash2 } from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
+import { DiffView } from '@/components/DiffView.tsx'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, Run, StreamEvent, Task } from '@/types.ts'
+import type { Agent, DiffView as Diff, Run, StreamEvent, Task } from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
 const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
@@ -55,6 +56,8 @@ interface Props {
 export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose }: Props): React.JSX.Element {
   const [runs, setRuns] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
+  const [diff, setDiff] = useState<Diff | null>(null)
+  const [feedback, setFeedback] = useState('')
   const [events, setEvents] = useState<StreamEvent[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
@@ -83,6 +86,16 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     })
   }, [latest, task.id, onLiveTool])
 
+  // 只在有执行记录时拉 diff；卡片状态变了要重拉（打回后又跑了一轮）。
+  useEffect(() => {
+    if (latest === undefined) { setDiff(null); return undefined }
+    let cancelled = false
+    void api.diff(task.id)
+      .then(({ diff: view }) => { if (!cancelled) setDiff(view) })
+      .catch(() => { if (!cancelled) setDiff(null) })
+    return () => { cancelled = true }
+  }, [task.id, task.revision, latest])
+
   // 新事件到达时贴底，除非用户正在往回翻。
   useEffect(() => {
     const node = logRef.current
@@ -100,6 +113,19 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     }
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [events])
+
+  /** 统一处理验收动作的忙碌态与错误上报。 */
+  const act = async (call: () => Promise<unknown>): Promise<void> => {
+    setBusy(true)
+    try {
+      await call()
+      onChanged()
+    } catch (error) {
+      if (error instanceof ApiError) onError(error.code, error.message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <aside className="flex w-[400px] flex-none flex-col border-s border-hairline bg-panel">
@@ -170,9 +196,56 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
         </div>
       ) : null}
 
+      {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
+      {task.column === 'review' ? (
+        <div className="border-b border-hairline px-3 py-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Action
+              icon={<Check className="size-2.5" />} label="通过" tone="ok" busy={busy}
+              onClick={() => { void act(() => api.accept(task.id, false)) }}
+            />
+            <Action
+              icon={<GitMerge className="size-2.5" />} label="通过并合并" busy={busy}
+              onClick={() => { void act(() => api.accept(task.id, true)) }}
+            />
+            <span className="flex-1" />
+            <Action
+              icon={<Trash2 className="size-2.5" />} label="废弃" tone="fail" busy={busy}
+              onClick={() => { void act(() => api.discard(task.id, 'failed')) }}
+            />
+          </div>
+
+          <div className="mt-2 flex gap-1.5">
+            <input
+              value={feedback}
+              onChange={(event) => { setFeedback(event.target.value) }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && feedback.trim().length > 0) {
+                  void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
+                }
+              }}
+              placeholder="要改什么？写清楚再打回"
+              className={cn(
+                'min-w-0 flex-1 rounded-[2px] border border-hairline bg-void px-2 py-1 text-[12px]',
+                'placeholder:text-ink-faint/60 focus:border-sodium-deep focus:outline-none',
+              )}
+            />
+            <Action
+              icon={<RotateCcw className="size-2.5" />} label="打回" busy={busy || feedback.trim().length === 0}
+              onClick={() => {
+                void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
+              }}
+            />
+          </div>
+          <p className="cjk-label mt-1.5 !text-[10px] !text-ink-faint/70">
+            通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区。
+          </p>
+        </div>
+      ) : null}
+
       <Tabs defaultValue="stream" className="flex min-h-0 flex-1 flex-col gap-0">
         <TabsList className="h-auto w-full justify-start rounded-none border-b border-hairline bg-transparent p-0">
-          {([['stream', '事件流'], ['spec', '规格'], ['runs', '执行历史']] as const).map(([value, label]) => (
+          {([['stream', '事件流'], ['diff', 'Diff'], ['spec', '规格'], ['runs', '执行历史']] as const).map(([value, label]) => (
             <TabsTrigger
               key={value}
               value={value}
@@ -227,6 +300,10 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
           )}
         </TabsContent>
 
+        <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
+          {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
+        </TabsContent>
+
         <TabsContent value="spec" className="mt-0 min-h-0 flex-1 overflow-y-auto px-3 py-3">
           <Field label="描述">
             <p className="whitespace-pre-wrap text-ink-dim">{task.description || '（空）'}</p>
@@ -244,6 +321,11 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               </ul>
             )}
           </Field>
+          {task.feedback === undefined ? null : (
+            <Field label="待处理的评审意见">
+              <p className="whitespace-pre-wrap text-sodium">{task.feedback}</p>
+            </Field>
+          )}
           <Field label="仓库">
             <p className="mono text-[11px] text-ink-dim">{task.repoPath}</p>
             <p className="mono text-[11px] text-ink-faint">基线 {task.baseBranch}</p>
@@ -277,6 +359,30 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
         </TabsContent>
       </Tabs>
     </aside>
+  )
+}
+
+function Action({ icon, label, onClick, busy, tone }: {
+  icon: React.ReactNode
+  label: string
+  onClick: () => void
+  busy: boolean
+  tone?: 'ok' | 'fail'
+}): React.JSX.Element {
+  return (
+    <button
+      disabled={busy}
+      onClick={onClick}
+      className={cn(
+        'cjk-label flex items-center gap-1 border border-hairline px-2 py-1 !text-[11px]',
+        'transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+        tone === 'ok' && 'hover:border-lamp-ok hover:!text-lamp-ok',
+        tone === 'fail' && 'hover:border-lamp-fail hover:!text-lamp-fail',
+        tone === undefined && 'hover:border-sodium hover:!text-sodium',
+      )}
+    >
+      {icon}{label}
+    </button>
   )
 }
 

@@ -69,6 +69,8 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (run_id, seq)
   );
   `,
+  // 打回时留下的评审意见，跟着卡片走。
+  `ALTER TABLE tasks ADD COLUMN feedback TEXT;`,
 ]
 
 /** 当前代码期望的结构版本。 */

@@ -17,11 +17,11 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import {
-  acquireLease, asRunId, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
+  acquireLease, asRunId, consumeFeedback, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
   type RunId, type Task, type TaskId,
 } from '@openkanban/core'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
@@ -130,7 +130,8 @@ export class Runner {
 
     // ── 到这里这张卡确定归我们了，可以建 worktree、起进程。 ────
     try {
-      return { ok: true, run: await this.launch(claimed.value, runId, agent) }
+      const prior = await this.resumableRun(claimed.value, agent)
+      return { ok: true, run: await this.launch(claimed.value, runId, agent, prior) }
     } catch (error) {
       // 副作用建到一半失败，必须把卡放回去，否则它会一直卡在 running。
       this.release(taskId, 'failed')
@@ -138,13 +139,33 @@ export class Runner {
     }
   }
 
-  /** 真正建 worktree、写 TASK.md、起进程并接管输出。 */
-  private async launch(task: Task, runId: RunId, agent: DetectedAgent): Promise<Run> {
+  /**
+   * 判断这次执行能否接着上一次继续。
+   *
+   * 四个条件缺一不可：上次留下了会话 id、这个 CLI 版本支持续跑、
+   * 还是同一个 provider（换了就没法续别人的会话）、上次的 worktree 还在。
+   * 任何一条不满足就老老实实重开一次 —— 半吊子的"续跑"比重来更难排查。
+   *
+   * @returns 可续跑的上一次 Run；不可续则 undefined。
+   */
+  private async resumableRun(task: Task, agent: DetectedAgent): Promise<Run | undefined> {
+    if (!agent.caps.canResume) return undefined
+    const prior = this.options.storage.listRuns(task.id).find((run) => run.agentSessionId !== undefined)
+    if (prior === undefined || prior.provider !== agent.provider.id) return undefined
+    const alive = await access(prior.worktreePath).then(() => true, () => false)
+    return alive ? prior : undefined
+  }
+
+  /** 真正建（或复用）worktree、写 TASK.md、起进程并接管输出。 */
+  private async launch(task: Task, runId: RunId, agent: DetectedAgent, prior?: Run): Promise<Run> {
     const { storage, artifactsRoot, worktreeRoot } = this.options
     const { provider, caps } = agent
 
-    const branch = branchSlug(task.id, task.subject)
-    const worktree = await createWorktree(task.repoPath, worktreeRoot, task.id, branch, task.baseBranch)
+    // 续跑复用上次的 worktree：Agent 要能看到自己上次的成果，
+    // 而不是在空目录里对着评审意见发懵。
+    const worktree = prior === undefined
+      ? await createWorktree(task.repoPath, worktreeRoot, task.id, branchSlug(task.id, task.subject), task.baseBranch)
+      : { path: prior.worktreePath, branch: prior.branch }
 
     const artifactsDir = join(artifactsRoot, runId)
     await mkdir(artifactsDir, { recursive: true })
@@ -154,7 +175,7 @@ export class Runner {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task),
+      prompt: renderPrompt(task, prior !== undefined),
       permission: 'standard',
       // claude 支持预先指定会话 id；codex 只能事后从 thread.started 捞。
       ...(caps.canPinSessionId ? { sessionId: randomUUID() } : {}),
@@ -173,11 +194,22 @@ export class Runner {
     }
     storage.createRun(run)
 
-    const spec = provider.buildStart(context, caps)
+    const resumeSpec = prior?.agentSessionId === undefined
+      ? null
+      : provider.buildResume(context, caps, prior.agentSessionId)
+    const spec = resumeSpec ?? provider.buildStart(context, caps)
+
     const spawner = this.options.spawn ?? spawnProcess
     const handle = await spawner(spec)
 
-    this.emit(runId, 'notice', { level: 'info', text: `${provider.id} ${caps.version} · pid ${String(handle.pid)}` })
+    this.emit(runId, 'notice', {
+      level: 'info',
+      text: `${provider.id} ${caps.version} · pid ${String(handle.pid)}`
+        + (resumeSpec === null ? '' : ` · 接续会话 ${String(prior?.agentSessionId)}`),
+    })
+    if (task.feedback !== undefined) {
+      this.emit(runId, 'notice', { level: 'info', text: `带着评审意见重做：${task.feedback.slice(0, 200)}` })
+    }
 
     const renew = setInterval(() => { this.renewLease(task.id, runId) }, this.leaseTtl / RENEW_DIVISOR)
     const timeout = setTimeout(() => {
@@ -256,6 +288,15 @@ export class Runner {
       endedAt: this.now,
     })
 
+    // 评审意见只在真正跑出可验收结果之后才清。
+    // 在交给 Agent 的瞬间就清是错的：那一轮如果失败了，人写的意见就凭空丢了,
+    // 重新派活时 Agent 又会从头做一遍同样的活。
+    if (ok) {
+      const current = storage.getTask(task.id)
+      if (current !== null && current.feedback !== undefined) {
+        storage.commitTask(consumeFeedback(current, this.now))
+      }
+    }
     this.release(task.id, ok ? 'review' : 'failed')
   }
 
@@ -355,13 +396,29 @@ export function renderTaskSpec(task: Task): string {
   return `${lines.join('\n')}\n`
 }
 
-/** 交给 CLI 的 prompt。刻意指向 TASK.md，避免把长文本堆进命令行。 */
-export function renderPrompt(task: Task): string {
-  return [
-    `阅读仓库根目录的 TASK.md 并完成其中的任务：${task.subject}`,
-    '完成后简要说明你做了什么，以及验收标准是否逐条满足。',
-    '不要提交、不要推送、不要改动 TASK.md。',
-  ].join('\n')
+/**
+ * 交给 CLI 的 prompt。刻意指向 TASK.md，避免把长文本堆进命令行。
+ * @param task - 目标任务。
+ * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
+ */
+export function renderPrompt(task: Task, resuming = false): string {
+  const lines: string[] = []
+  if (task.feedback === undefined) {
+    lines.push(`阅读仓库根目录的 TASK.md 并完成其中的任务：${task.subject}`)
+  } else {
+    lines.push(
+      resuming
+        ? '你上一轮的成果被评审打回了。工作区里就是你上次的改动，请在此基础上修改：'
+        : `任务「${task.subject}」上一轮被评审打回。工作区里是上次的改动，请在此基础上修改：`,
+      '',
+      task.feedback,
+      '',
+      '完整需求见仓库根目录的 TASK.md。',
+    )
+  }
+  lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足。')
+  lines.push('不要提交、不要推送、不要改动 TASK.md。')
+  return lines.join('\n')
 }
 
 function describeError(error: unknown): string {

@@ -250,6 +250,43 @@ describe('worktree 隔离', () => {
   })
 })
 
+describe('评审意见的生命周期', () => {
+  it('执行失败时意见留着 —— 否则人写的评审凭空丢了，重派又从头做一遍', async () => {
+    store.createTask(task({ id: 't1', feedback: '连字符后面的字母也要大写' }))
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: false })], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getTask(asTaskId('t1'))?.feedback).toBe('连字符后面的字母也要大写')
+  })
+
+  it('跑出可验收结果之后才清掉意见，避免下一轮重复投喂', async () => {
+    store.createTask(task({ id: 't1', feedback: '改一下' }))
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+    expect(store.getTask(asTaskId('t1'))?.feedback).toBeUndefined()
+  })
+
+  it('意见会出现在事件流里，人能看到这一轮是带着什么要求跑的', async () => {
+    store.createTask(task({ id: 't1', feedback: '要保留 Unicode' }))
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const notices = store.readEvents(started.run.id)
+      .filter((e) => e.kind === 'notice')
+      .map((e) => JSON.stringify(e.payload))
+    expect(notices.join(' ')).toContain('要保留 Unicode')
+  })
+})
+
 describe('崩溃恢复', () => {
   it('reconcile 把上次留下的 running Run 标记为 aborted', () => {
     store.createTask(task({ id: 't1' }))

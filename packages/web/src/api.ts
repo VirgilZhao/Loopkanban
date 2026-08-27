@@ -6,7 +6,7 @@
  * token 拼进 URL（避免它出现在浏览器历史与日志里）。
  */
 
-import type { Agent, Board, Run, StreamEvent, Task } from './types.ts'
+import type { Agent, Board, DiffView, Run, StreamEvent, Task } from './types.ts'
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, detail: string) {
@@ -48,6 +48,27 @@ export const api = {
   /** 取消执行，会连同整棵进程树一起收掉。 */
   cancel: (runId: string) =>
     call<{ stopped: boolean }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
+
+  diff: (taskId: string) => call<{ diff: DiffView }>(`/api/tasks/${encodeURIComponent(taskId)}/diff`),
+
+  /** 验收通过。merge 为真才会动主工作区，且前置条件不满足会被明确拒绝。 */
+  accept: (taskId: string, merge = false) =>
+    call<{ commit: string | null; merged: boolean }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/accept`,
+      { method: 'POST', body: JSON.stringify({ merge }) },
+    ),
+
+  /** 打回重做。worktree 保留，下一次执行接着改。 */
+  requestChanges: (taskId: string, feedback: string) =>
+    call(`/api/tasks/${encodeURIComponent(taskId)}/request-changes`, {
+      method: 'POST', body: JSON.stringify({ feedback }),
+    }),
+
+  /** 废弃这次成果，删掉分支与 worktree。 */
+  discard: (taskId: string, to: 'backlog' | 'failed' = 'failed') =>
+    call(`/api/tasks/${encodeURIComponent(taskId)}/discard`, {
+      method: 'POST', body: JSON.stringify({ to }),
+    }),
 
   /** 移动任务。409 表示期间已被他人改动，调用方应重读后重试。 */
   move: (taskId: string, expectedRevision: number, to: string, position?: number) =>

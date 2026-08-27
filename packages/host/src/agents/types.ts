@@ -21,6 +21,14 @@ export interface AgentCaps {
   readonly permissionTiers: readonly PermissionTier[]
   /** 原始解析结果，供 provider 自己拼参数时查。 */
   readonly help: HelpSurface
+  /**
+   * 续跑那条路径的参数面。
+   *
+   * 单独探测是必须的：续跑可能是**另一个子命令**，参数集合和主命令并不一样
+   * （实测 `codex exec resume` 没有 `--cd` / `--sandbox` / `--approve-for-me`，
+   * 照搬主命令的参数会被 clap 直接拒绝）。缺省等于 {@link help}。
+   */
+  readonly resumeHelp?: HelpSurface
 }
 
 /** 一次执行需要的上下文。 */

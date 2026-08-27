@@ -13,6 +13,7 @@ import { extname, join, normalize, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { asBoardId, asRunId, asTaskId, moveTask, type Column, type Task } from '@openkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
+import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Storage } from '../storage/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
@@ -34,6 +35,8 @@ export interface ServerOptions {
   readonly agents?: readonly DetectedAgent[]
   /** 执行器。不给则只能看板，不能真正派活。 */
   readonly runner?: Runner
+  /** 验收器。不给则不能通过/打回/废弃。 */
+  readonly review?: Review
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -105,6 +108,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const heartbeatMs = options.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS
   const agents = options.agents ?? []
   const runner = options.runner
+  const review = options.review
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
 
   const server: Server = createHttpServer((req, res) => {
@@ -255,6 +259,40 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 202, { run: result.run }, extraHeaders)
+      return
+    }
+
+    // ── 验收：看 diff ───────────────────────────────────────
+    const diffOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/diff$/)
+    if (method === 'GET' && diffOf !== null) {
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+      const view = await review.diff(asTaskId(decodeURIComponent(diffOf)))
+      if (view === null) { sendJson(res, 404, { error: 'no-run', detail: '这张卡还没有执行记录' }); return }
+      sendJson(res, 200, { diff: view }, extraHeaders)
+      return
+    }
+
+    // ── 验收：通过 / 打回 / 废弃 ────────────────────────────
+    const verdict = /^\/api\/tasks\/([^/]+)\/(accept|request-changes|discard)$/.exec(pathname)
+    if (method === 'POST' && verdict !== null) {
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+      const taskId = asTaskId(decodeURIComponent(verdict[1] as string))
+      const body = await readJsonBody(req) as
+        { merge?: boolean; feedback?: string; to?: 'backlog' | 'failed' } | undefined
+
+      const result = verdict[2] === 'accept'
+        ? await review.accept(taskId, body?.merge === true)
+        : verdict[2] === 'request-changes'
+          ? review.requestChanges(taskId, body?.feedback ?? '')
+          : await review.discard(taskId, body?.to ?? 'failed')
+
+      if (!result.ok) {
+        sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {
+          error: result.reason, detail: result.detail,
+        })
+        return
+      }
+      sendJson(res, 200, result, extraHeaders)
       return
     }
 

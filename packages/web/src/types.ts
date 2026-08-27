@@ -10,6 +10,15 @@ export interface Lease {
   expiresAt: number
 }
 
+export interface DiffView {
+  runId: string
+  branch: string
+  baseBranch: string
+  stat: string
+  patch: string
+  truncated: boolean
+}
+
 export interface Task {
   id: string
   boardId: string
@@ -25,6 +34,7 @@ export interface Task {
   blockedBy: string[]
   writeScopes: string[]
   lease?: Lease
+  feedback?: string
   createdAt: number
   updatedAt: number
 }

@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import type { SpawnSpec } from '../../subprocess/index.ts'
 import { capture, findExecutable, probeVersion } from '../discover.ts'
 import { scrubEnv } from '../env.ts'
-import { choicesOf, hasFlag, parseHelp } from '../help-parser.ts'
+import { choicesOf, hasFlag, parseHelp, type HelpSurface } from '../help-parser.ts'
 import type { AgentCaps, AgentEvent, AgentProvider, PermissionTier, RunContext } from '../types.ts'
 
 /** OpenKanban 三档 → codex 的 `--sandbox` 取值。yolo 走独立的 bypass 参数。 */
@@ -44,25 +44,34 @@ function supportedTiers(sandboxes: readonly string[], help: ReturnType<typeof pa
  * workspace-write 沙箱，同时传 `-s` 会被 clap 直接拒绝（exit 2）。
  * 这是实测踩出来的，不是文档写的。
  */
-function permissionArgs(run: RunContext, caps: AgentCaps): string[] {
+function permissionArgs(run: RunContext, surface: HelpSurface): string[] {
   if (run.permission === 'yolo') {
-    return hasFlag(caps.help, BYPASS_FLAG) ? [`--${BYPASS_FLAG}`] : []
+    return hasFlag(surface, BYPASS_FLAG) ? [`--${BYPASS_FLAG}`] : []
   }
   // 无人值守时优先把审批交给 codex 自己的自动审阅，否则审批请求会悬着没人回答。
-  if (run.permission === 'standard' && hasFlag(caps.help, 'approve-for-me')) {
+  if (run.permission === 'standard' && hasFlag(surface, 'approve-for-me')) {
     return ['--approve-for-me']
   }
   const sandbox = TIER_TO_SANDBOX[run.permission]
-  return choicesOf(caps.help, 'sandbox').includes(sandbox) ? ['-s', sandbox] : []
+  // 续跑路径上这些参数可能都不存在（codex 的 resume 就是），
+  // 此时沿用该会话创建时的策略，这也是"接着上次继续"应有的语义。
+  return choicesOf(surface, 'sandbox').includes(sandbox) ? ['-s', sandbox] : []
 }
 
-function commonArgs(run: RunContext, caps: AgentCaps): string[] {
+/**
+ * 拼参数时只用该条路径**自己声明过**的参数。
+ *
+ * `surface` 必须是这条命令自己的 help 解析结果，不能借用主命令的 ——
+ * 这正是当初决定"探测能力而不是判断版本"的同一条道理，只是粒度更细一层。
+ */
+function commonArgs(run: RunContext, caps: AgentCaps, surface: HelpSurface): string[] {
   const args: string[] = []
-  if (caps.streaming) args.push('--json')
-  args.push('-C', run.worktreePath)
-  args.push(...permissionArgs(run, caps))
-  if (hasFlag(caps.help, 'output-last-message')) args.push('-o', codexLastMessagePath(run))
-  if (run.model !== undefined && hasFlag(caps.help, 'model')) args.push('-m', run.model)
+  if (caps.streaming && hasFlag(surface, 'json')) args.push('--json')
+  // 没有 --cd 时靠子进程自身的 cwd（spawn 时已指向 worktree）。
+  if (hasFlag(surface, 'cd')) args.push('-C', run.worktreePath)
+  args.push(...permissionArgs(run, surface))
+  if (hasFlag(surface, 'output-last-message')) args.push('-o', codexLastMessagePath(run))
+  if (run.model !== undefined && hasFlag(surface, 'model')) args.push('-m', run.model)
   return args
 }
 
@@ -103,9 +112,11 @@ export const codexCliProvider: AgentProvider = {
     const help = parseHelp(`${execHelp.stdout}\n${execHelp.stderr}`)
     if (!hasFlag(help, 'cd')) return null
 
-    // resume 是子命令而非参数，只能靠它自己的 help 是否成立来判断。
-    const resumeHelp = await capture([bin, 'exec', 'resume', '--help'])
-    const canResume = resumeHelp.code === 0
+    // resume 是子命令而非参数，只能靠它自己的 help 是否成立来判断，
+    // 并且必须单独解析它的参数面 —— 它和主命令并不一样。
+    const resumeProbe = await capture([bin, 'exec', 'resume', '--help'])
+    const canResume = resumeProbe.code === 0
+    const resumeHelp = parseHelp(`${resumeProbe.stdout}\n${resumeProbe.stderr}`)
 
     return {
       id: 'codex',
@@ -117,18 +128,23 @@ export const codexCliProvider: AgentProvider = {
       canResume,
       permissionTiers: supportedTiers(choicesOf(help, 'sandbox'), help),
       help,
+      ...(canResume ? { resumeHelp } : {}),
     }
   },
 
   buildStart(run: RunContext, caps: AgentCaps): SpawnSpec {
     // 绝不加 --ephemeral：会话必须落盘才能续跑。
-    const argv = [caps.bin, 'exec', ...commonArgs(run, caps), run.prompt]
+    const argv = [caps.bin, 'exec', ...commonArgs(run, caps, caps.help), run.prompt]
     return { argv, cwd: run.worktreePath, env: scrubEnv(process.env, run.envOverrides).env, stdin: 'ignore', stderr: 'pipe' }
   },
 
   buildResume(run: RunContext, caps: AgentCaps, sessionId: string): SpawnSpec | null {
     if (!caps.canResume) return null
-    const argv = [caps.bin, 'exec', 'resume', sessionId, ...commonArgs(run, caps), run.prompt]
+    const argv = [
+      caps.bin, 'exec', 'resume', sessionId,
+      ...commonArgs(run, caps, caps.resumeHelp ?? caps.help),
+      run.prompt,
+    ]
     return { argv, cwd: run.worktreePath, env: scrubEnv(process.env, run.envOverrides).env, stdin: 'ignore', stderr: 'pipe' }
   },
 

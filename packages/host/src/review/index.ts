@@ -1,0 +1,176 @@
+/**
+ * 验收：看 diff、通过、打回、废弃。
+ *
+ * 一条贯穿的原则：**绝不擅自动用户的主工作区**。Agent 的改动始终留在自己的
+ * worktree 分支上；验收通过默认只是把它提交成一个可合并的对象，合不合、
+ * 什么时候合由人决定。自动 merge 进一个可能是脏的、可能停在别的分支上的
+ * 主工作区，是这个工具最容易造成破坏性意外的地方。
+ */
+
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { moveTask, requestChanges, type Task, type TaskId } from '@openkanban/core'
+import type { Run, Storage } from '../storage/index.ts'
+import { commitAll, mergeBranch, removeWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+
+export interface ReviewOptions {
+  readonly storage: Storage
+  readonly worktreeRoot: string
+  readonly now?: () => number
+}
+
+export type ReviewFailure = { readonly ok: false; readonly reason: string; readonly detail: string }
+export type ReviewSuccess<T = unknown> = { readonly ok: true } & T
+export type ReviewResult<T = unknown> = ReviewSuccess<T> | ReviewFailure
+
+export interface DiffView {
+  readonly runId: string
+  readonly branch: string
+  readonly baseBranch: string
+  readonly stat: string
+  readonly patch: string
+  /** patch 是否因为过大而被截断。 */
+  readonly truncated: boolean
+}
+
+/** diff 展示上限。再大就不该在浏览器里看了，产物目录有完整的。 */
+const PATCH_MAX = 400_000
+
+export class Review {
+  // 不用参数属性：`node --experimental-strip-types` 的 strip-only 模式不支持它
+  // （也不支持 enum / namespace / 装饰器）。全项目靠这个模式免掉构建步骤。
+  private readonly options: ReviewOptions
+
+  constructor(options: ReviewOptions) {
+    this.options = options
+  }
+
+  private get now(): number {
+    return this.options.now?.() ?? Date.now()
+  }
+
+  /** 任务最近一次 Run；没有则 null。 */
+  private latestRun(taskId: TaskId): Run | null {
+    return this.options.storage.listRuns(taskId)[0] ?? null
+  }
+
+  private worktreeOf(run: Run): Worktree {
+    return { path: run.worktreePath, branch: run.branch }
+  }
+
+  /**
+   * 取出待验收的改动。
+   * @param taskId - 目标任务。
+   */
+  async diff(taskId: TaskId): Promise<DiffView | null> {
+    const task = this.options.storage.getTask(taskId)
+    const run = this.latestRun(taskId)
+    if (task === null || run === null) return null
+
+    const full = await worktreeDiff(this.worktreeOf(run), task.baseBranch).catch(() => '')
+    const [stat = '', ...rest] = full.split('\ndiff --git ')
+    const patch = rest.length === 0 ? '' : `diff --git ${rest.join('\ndiff --git ')}`
+    return {
+      runId: run.id,
+      branch: run.branch,
+      baseBranch: task.baseBranch,
+      stat: stat.trim(),
+      patch: patch.slice(0, PATCH_MAX),
+      truncated: patch.length > PATCH_MAX,
+    }
+  }
+
+  /**
+   * 验收通过。
+   *
+   * 默认行为：把改动提交到任务分支、移除 worktree、**保留分支**，卡片进 Done。
+   * 用户拿到分支名，自己决定合并还是开 PR。
+   *
+   * @param taskId - 目标任务。
+   * @param merge - 显式要求合并回基线。前置条件不满足会明确拒绝而不是勉强执行。
+   */
+  async accept(taskId: TaskId, merge = false): Promise<ReviewResult<{ commit: string | null; merged: boolean }>> {
+    const { storage } = this.options
+    const task = storage.getTask(taskId)
+    if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
+    if (task.column !== 'review') {
+      return { ok: false, reason: 'illegal-transition', detail: `只有 review 列的任务可以验收，当前在 ${task.column}` }
+    }
+    const run = this.latestRun(taskId)
+    if (run === null) return { ok: false, reason: 'no-run', detail: '这张卡没有执行记录' }
+
+    const worktree = this.worktreeOf(run)
+    const commit = await commitAll(worktree, commitMessage(task, run))
+
+    let merged = false
+    if (merge) {
+      const result = await mergeBranch(task.repoPath, run.branch, task.baseBranch)
+      // 合并失败不等于验收失败：改动已经提交在分支上，不会丢。
+      // 但必须如实告诉用户没合上，否则他会以为已经进主干了。
+      if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail }
+      merged = true
+    }
+
+    // 分支保留：worktree 只是工作场地，删掉它不影响成果。
+    await removeWorktree(task.repoPath, worktree, true)
+
+    const moved = moveTask(task, { expectedRevision: task.revision, to: 'done', now: this.now })
+    if (!moved.ok) return { ok: false, reason: moved.reason, detail: moved.detail }
+    if (!storage.commitTask(moved.value)) {
+      return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
+    }
+    return { ok: true, commit, merged }
+  }
+
+  /**
+   * 打回重做：带上评审意见把卡片放回队列。
+   *
+   * worktree 与分支**保留** —— 下一次执行接着在同一个工作区继续，
+   * 这样 Agent 能看到自己上次的成果，而不是从空目录重来。
+   *
+   * @param taskId - 目标任务。
+   * @param feedback - 要改什么。空的会被拒绝。
+   */
+  requestChanges(taskId: TaskId, feedback: string): ReviewResult {
+    const { storage } = this.options
+    const task = storage.getTask(taskId)
+    if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
+
+    const changed = requestChanges(task, { expectedRevision: task.revision, feedback, now: this.now })
+    if (!changed.ok) return { ok: false, reason: changed.reason, detail: changed.detail }
+    if (!storage.commitTask(changed.value)) {
+      return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
+    }
+    return { ok: true }
+  }
+
+  /**
+   * 废弃这次成果：删掉分支与 worktree，卡片回到指定列。
+   * @param taskId - 目标任务。
+   * @param to - 回 backlog（重新想需求）还是 failed（记为失败）。
+   */
+  async discard(taskId: TaskId, to: 'backlog' | 'failed' = 'failed'): Promise<ReviewResult> {
+    const { storage } = this.options
+    const task = storage.getTask(taskId)
+    if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
+
+    const run = this.latestRun(taskId)
+    if (run !== null) {
+      // 连分支一起删：用户明确表示这次成果不要了。
+      await removeWorktree(task.repoPath, this.worktreeOf(run), false)
+      await rm(join(this.options.worktreeRoot, taskId), { recursive: true, force: true })
+    }
+
+    const moved = moveTask(task, { expectedRevision: task.revision, to, now: this.now })
+    if (!moved.ok) return { ok: false, reason: moved.reason, detail: moved.detail }
+    if (!storage.commitTask(moved.value)) {
+      return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
+    }
+    return { ok: true }
+  }
+}
+
+/** 提交信息带上执行者，日后 blame 时看得出这段是谁写的。 */
+function commitMessage(task: Task, run: Run): string {
+  return [task.subject, '', `Task: ${task.id}`, `Agent: ${run.provider} ${run.cliVersion}`].join('\n')
+}

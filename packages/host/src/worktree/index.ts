@@ -79,6 +79,68 @@ export async function removeWorktree(repoPath: string, worktree: Worktree, keepB
   }
 }
 
+/** 工作区是否干净（无未提交改动，也无未跟踪文件）。 */
+export async function isClean(path: string): Promise<boolean> {
+  return (await git(path, ['status', '--porcelain'])).trim().length === 0
+}
+
+/** 当前分支名；detached HEAD 时返回 null。 */
+export async function currentBranch(path: string): Promise<string | null> {
+  const name = (await git(path, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+  return name === 'HEAD' ? null : name
+}
+
+/**
+ * 把 worktree 里的全部改动提交到它自己的分支。
+ *
+ * Agent 被要求不要提交，所以改动一直躺在工作区。验收通过时由我们来提交，
+ * 这样才有一个可以合并、可以开 PR、可以回滚的对象。
+ *
+ * @param worktree - 目标 worktree。
+ * @param message - 提交信息。
+ * @returns 新提交的 sha；没有任何改动时返回 null。
+ */
+export async function commitAll(worktree: Worktree, message: string): Promise<string | null> {
+  await git(worktree.path, ['add', '-A'])
+  if ((await git(worktree.path, ['diff', '--cached', '--name-only'])).trim().length === 0) return null
+  await git(worktree.path, ['commit', '-m', message])
+  return (await git(worktree.path, ['rev-parse', 'HEAD'])).trim()
+}
+
+export type MergeRefusal = 'dirty-worktree' | 'wrong-branch'
+
+/**
+ * 把任务分支合并回基线。
+ *
+ * **默认不做这件事**：用户的主工作区可能是脏的、可能停在别的分支上，
+ * 自动合并进去正是最该避免的破坏性意外。只有用户显式要求时才调用，
+ * 且前置条件不满足就明确拒绝，绝不"尽力而为"。
+ *
+ * @param repoPath - 主仓库。
+ * @param branch - 任务分支。
+ * @param baseBranch - 目标基线分支。
+ * @returns 成功，或拒绝的原因。
+ */
+export async function mergeBranch(
+  repoPath: string,
+  branch: string,
+  baseBranch: string,
+): Promise<{ ok: true } | { ok: false; reason: MergeRefusal; detail: string }> {
+  if (!(await isClean(repoPath))) {
+    return { ok: false, reason: 'dirty-worktree', detail: '主工作区有未提交改动，先处理干净再合并' }
+  }
+  const branchNow = await currentBranch(repoPath)
+  if (branchNow !== baseBranch) {
+    return {
+      ok: false,
+      reason: 'wrong-branch',
+      detail: `主工作区当前在 ${branchNow ?? 'detached HEAD'}，不是基线分支 ${baseBranch}`,
+    }
+  }
+  await git(repoPath, ['merge', '--no-ff', '-m', `Merge ${branch}`, branch])
+  return { ok: true }
+}
+
 /** worktree 相对基线分支的完整 diff（含未提交改动）。 */
 export async function worktreeDiff(worktree: Worktree, baseBranch: string): Promise<string> {
   await git(worktree.path, ['add', '-A', '--intent-to-add'])

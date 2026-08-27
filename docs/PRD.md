@@ -280,8 +280,8 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 | 阶段 | 内容 | 产出判据 |
 |---|---|---|
 | **M0 编排穿刺**（纯脚本，无 UI）✅ **已完成** | `subprocess` 进程组模块 + 终止测试；`claude-cli` 探测与启动；解析 stream-json；worktree 创建；跑通一个任务 | **命令行能让本机 `claude` 在独立分支上做完一张卡，并能随时 kill 干净**。项目最大技术风险在此关掉 |
-| **M1 单任务闭环** | SQLite + 事件日志；board CAS；HTTP server + token 鉴权 + Origin 校验；SSE 日志流；最简看板视图；`codex-cli` provider | 浏览器里点一下，实时看着 Agent 干完 |
-| **M2 验收闭环** | Diff 查看、合并 / 打回 / 废弃；**打回走真续跑**；权限档位定稿 | 完整走完 Ready→Done，打回能接着上次改 |
+| **M1 单任务闭环** ✅ **已完成** | SQLite + 事件日志；board CAS；HTTP server + token 鉴权 + Origin 校验；SSE 日志流；最简看板视图；`codex-cli` provider | 浏览器里点一下，实时看着 Agent 干完 |
+| **M2 验收闭环** ✅ **已完成** | Diff 查看、合并 / 打回 / 废弃；**打回走真续跑**；权限档位定稿 | 完整走完 Ready→Done，打回能接着上次改 |
 | **M3 自动驾驶**（核心卖点） | 调度器、租约与超时回收、并发上限、依赖阻塞、孤儿进程与 worktree 对账、崩溃恢复、浏览器通知 | 扔 5 张卡进 Ready，关掉浏览器去睡觉，回来全在 Review |
 | **M4 体验** | 拖拽排序、任务模板、`writeScopes` 冲突预警、Runs 统计与成本 | 日常可用 |
 | **M5 分发** | `npx openkanban` 一行启动；`service install` 装 launchd/systemd 常驻；文档 | 别人能装上用 |
@@ -354,6 +354,50 @@ result         → finished   item.completed/file_change   → tool
                             item.completed/command_execution → tool
                             turn.completed  → usage
 ```
+
+## 5.2 M1 / M2 实测结论
+
+### 又一批文档里没有的坑
+
+6. **`codex exec resume` 的参数面和 `codex exec` 不一样** —— 它没有 `--cd`、
+   `--sandbox`、`--approve-for-me`、`--add-dir`。照搬主命令的参数会被 clap
+   直接拒绝（exit 2）。**能力探测必须按每条命令分别做**，这是「探测而不是假设」
+   原则在更细粒度上的同一条道理。
+7. **`node --experimental-strip-types` 不支持参数属性 / enum / namespace /
+   装饰器**。vitest 用 esbuild 能编过，运行时才炸 —— 类型检查和单测都拦不住。
+   这是「不要构建步骤」的代价，得全项目遵守。
+
+### 用起来才发现的三个设计错误
+
+- **评审意见在交给 Agent 的瞬间就被清掉**。那一轮如果失败，人写的意见凭空
+  消失，重新派活时 Agent 又从头做一遍同样的活。改成**跑出可验收结果之后才清**。
+- **每次重启换新 token**，用户开着的标签页立刻失效、书签永远过期，而开发时
+  会频繁重启。token 持久化到数据目录（0600），`--new-token` 主动轮换。
+- **拉 Run 列表的 effect 只依赖 `task.id`**。派活后 id 不变，effect 不重跑，
+  刚创建的 Run 永远拉不到，事件流一直空着。改成依赖 `revision`。
+
+### 验收的核心决策：默认绝不动主工作区
+
+「通过」只做三件事：把改动提交到任务分支、移除 worktree、**保留分支**。
+用户拿到分支名自己决定合并还是开 PR。
+
+自动 merge 进一个可能是脏的、可能停在别的分支上的主工作区，是这个工具最容易
+造成破坏性意外的地方。`merge: true` 是显式选项，且前置条件（工作区干净 +
+停在基线分支）不满足就**明确拒绝而不是勉强执行** —— 改动已经提交在分支上不会丢，
+但必须如实告诉用户没合上，否则他会以为已经进主干了。
+
+### 流转规则的收紧边界
+
+收紧的目标只有两个：**不许跳过认领**（否则「租约属于谁」无法推理）、
+**不许跳过验收**（否则等于让 Agent 自己给自己盖章）。除此之外的移动都是
+无租约状态之间的整理动作，一律放行 —— `review → backlog`（废弃成果、重新想
+需求）就是被测试问出来后放开的。
+
+`running → ready` 是唯一的例外：它是系统回收租约的专属通道
+（`reclaimIfExpired`），人不能走。Runner 里我一度错用了通用的 `moveTask`，
+被测试当场抓住。
+
+---
 
 ---
 

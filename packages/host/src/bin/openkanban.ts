@@ -8,14 +8,16 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asBoardId, asTaskId, type Task } from '@openkanban/core'
+import { createToken } from '../server/auth.ts'
 import { detectAgents } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
 import { startServer } from '../server/index.ts'
+import { Review } from '../review/index.ts'
 import { Runner } from '../runner/index.ts'
 import { Storage } from '../storage/index.ts'
 
@@ -42,6 +44,29 @@ function dataDir(): string {
   if (process.platform === 'darwin') return join(home, 'Library', 'Application Support', 'openkanban')
   if (process.platform === 'win32') return join(process.env['APPDATA'] ?? home, 'openkanban')
   return join(process.env['XDG_DATA_HOME'] ?? join(home, '.local', 'share'), 'openkanban')
+}
+
+/**
+ * 取得访问 token，持久化在数据目录里。
+ *
+ * 每次重启都换一个新 token 意味着用户开着的标签页立刻失效、书签永远过期，
+ * 而开发时会频繁重启。token 与数据库同处一个目录、同一信任级别，
+ * 存起来并把权限收到 0600 是合理的。`--new-token` 可以主动轮换。
+ *
+ * @param dir - 数据目录。
+ * @param rotate - 强制换一个新的。
+ */
+async function resolveToken(dir: string, rotate: boolean): Promise<string> {
+  const path = join(dir, 'token')
+  if (!rotate) {
+    const existing = await readFile(path, 'utf8').catch(() => null)
+    if (existing !== null && existing.trim().length >= 32) return existing.trim()
+  }
+  const token = createToken()
+  await writeFile(path, token, { encoding: 'utf8', mode: 0o600 })
+  // 已存在的文件不会被 writeFile 的 mode 改动，显式收一次权限。
+  await chmod(path, 0o600).catch(() => undefined)
+  return token
 }
 
 /** 首次启动时放几张示例卡，免得看板空着无从下手。 */
@@ -123,11 +148,13 @@ async function main(): Promise<void> {
 
   // ── 执行器 ───────────────────────────────────────────────
   const bus = new RunBus()
+  const worktreeRoot = join(dir, 'worktrees')
   const runner = new Runner({
     storage, bus, agents,
-    worktreeRoot: join(dir, 'worktrees'),
+    worktreeRoot,
     artifactsRoot: join(dir, 'runs'),
   })
+  const review = new Review({ storage, worktreeRoot })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
   const aborted = runner.reconcile()
@@ -141,17 +168,21 @@ async function main(): Promise<void> {
 
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
+  const token = await resolveToken(dir, process.argv.includes('--new-token'))
   const server = await startServer({
     storage,
     agents,
     runner,
+    review,
     bus,
+    token,
     staticDir: STATIC_DIR,
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })
 
   console.log(`\n  ${C.amber('▸')} ${server.url}`)
   console.log(C.dim('    只监听 127.0.0.1。远程访问请用 SSH 端口转发，不要改成 0.0.0.0。'))
+  console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
   console.log(C.dim(`    数据 ${join(dir, 'openkanban.db')}\n`))
 
   if (!process.argv.includes('--no-open')) openBrowser(server.url)

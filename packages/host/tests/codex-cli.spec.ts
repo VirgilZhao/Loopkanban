@@ -17,6 +17,7 @@ const CAPS: AgentCaps = {
   canResume: true,
   permissionTiers: ['strict', 'standard', 'yolo'],
   help: parseHelp(fixture('codex-exec-help.txt')),
+  resumeHelp: parseHelp(fixture('codex-exec-resume-help.txt')),
 }
 
 const RUN: RunContext = {
@@ -88,6 +89,29 @@ describe('codexCliProvider.buildResume', () => {
     const argv = codexCliProvider.buildResume(RUN, CAPS, 'thread-9')?.argv ?? []
     expect(argv.slice(0, 4)).toEqual(['/fake/codex', 'exec', 'resume', 'thread-9'])
     expect(argv.at(-1)).toBe('做点事')
+  })
+
+  it('只用 resume 自己声明过的参数 —— 它的参数面和主命令不一样', () => {
+    const argv = codexCliProvider.buildResume(RUN, CAPS, 'thread-9')?.argv ?? []
+    // 实测: codex exec resume 没有这几个，硬塞进去会被 clap 直接拒绝(exit 2)。
+    for (const absent of ['-C', '--cd', '-s', '--sandbox', '--approve-for-me', '--add-dir']) {
+      expect(argv, `resume 不该出现 ${absent}`).not.toContain(absent)
+    }
+    // 它自己有的仍然要用上。
+    expect(argv).toContain('--json')
+    expect(argv).toContain('-o')
+  })
+
+  it('主命令那条路径照旧带上 -C 与权限参数', () => {
+    const argv = codexCliProvider.buildStart(RUN, CAPS).argv
+    expect(argv).toContain('-C')
+    expect(argv).toContain('--approve-for-me')
+  })
+
+  it('没探测到 resume 参数面时退回主命令的，但也只用两边都有的', () => {
+    const { resumeHelp: _drop, ...noResumeSurface } = CAPS
+    const argv = codexCliProvider.buildResume(RUN, noResumeSurface, 'thread-9')?.argv ?? []
+    expect(argv).toContain('--json')
   })
 
   it('不支持续跑时返回 null', () => {

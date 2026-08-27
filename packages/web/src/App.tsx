@@ -24,6 +24,10 @@ const ERROR_HINT: Record<string, string> = {
   'provider-unavailable': '这个 Agent CLI 本机没有探测到。装好它，或者换一个。',
   'launch-failed': '起进程失败。多半是 worktree 建不出来 —— 检查仓库路径和基线分支。',
   'no-runner': '当前实例没有启用执行器，只能看板不能派活。',
+  'feedback-required': '打回要写明改什么，否则 Agent 只会把上次的活重做一遍。',
+  'dirty-worktree': '你的主工作区有未提交改动，先处理干净再合并。改动已经提交在任务分支上，不会丢。',
+  'wrong-branch': '你的主工作区不在基线分支上。改动已经提交在任务分支上，切回去再合并即可。',
+  'no-run': '这张卡还没有执行记录。',
 }
 
 export default function App(): React.JSX.Element {

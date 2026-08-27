@@ -42,18 +42,33 @@ export interface Task {
   readonly writeScopes: readonly string[]
   /** `undefined` 表示未被占用；清除租约就是把它置回 undefined。 */
   readonly lease?: Lease | undefined
+  /**
+   * 打回时留下的评审意见。下一次执行会把它交给 Agent，然后清空。
+   *
+   * 存在任务上而不是 Run 上：打回之后这张卡回到队列，谁来接、什么时候接
+   * 都还不确定，意见必须跟着卡走。
+   */
+  readonly feedback?: string | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }
 
-/** 允许的列流转。故意收紧：随便乱跳会让「租约属于谁」变得无法推理。 */
+/**
+ * 允许的列流转。
+ *
+ * 收紧的目标只有两个：**不许跳过认领**（那会让「租约属于谁」无法推理），
+ * **不许跳过验收**（那等于让 Agent 自己给自己盖章）。除此之外的移动都是
+ * 无租约状态之间的整理动作，一律放行 —— 过度收紧只会逼用户绕路。
+ */
 const ALLOWED: Readonly<Record<Column, readonly Column[]>> = {
   backlog: ['ready'],
   ready: ['backlog', 'running'],
+  // running 只能去 review 或 failed：直接去 done 就是跳过验收。
+  // 回 ready 也不行 —— 那是系统回收租约的专属通道，见 reclaimIfExpired。
   running: ['review', 'failed'],
-  review: ['done', 'ready', 'failed'],
+  // 验收后：通过、打回重做、废弃记为失败、或者废弃并回想法池重新想需求。
+  review: ['done', 'ready', 'failed', 'backlog'],
   done: [],
-  // 失败后可以改需求重排队，也可以直接放回想法池。
   failed: ['ready', 'backlog'],
 }
 
@@ -79,6 +94,7 @@ export type DomainError =
   | 'lease-held'
   | 'lease-missing'
   | 'lease-mismatch'
+  | 'feedback-required'
 
 const fail = <T>(reason: DomainError, detail: string): DomainResult<T> => ({ ok: false, reason, detail })
 const succeed = <T>(value: T): DomainResult<T> => ({ ok: true, value })
@@ -190,6 +206,44 @@ export function renewLease(task: Task, runId: RunId, ttlMs: number, now: number)
     return fail('lease-mismatch', `租约属于 ${task.lease.runId}，不是 ${runId}`)
   }
   return succeed(bump(task, { lease: { ...task.lease, expiresAt: now + ttlMs } }, now))
+}
+
+export interface RequestChangesRequest {
+  readonly expectedRevision: number
+  readonly feedback: string
+  readonly now: number
+}
+
+/**
+ * 打回重做：带着评审意见把卡片放回队列。
+ *
+ * 刻意不引入 `review → running` 这条流转。打回后走的仍是普通的排队路径，
+ * 于是自动调度、并发上限、依赖阻塞这些规则一视同仁地作用在它身上，
+ * 而"接着上次改"是执行时的实现细节（见 Runner 的续跑判定），不是状态机的分支。
+ *
+ * @param task - 当前任务。
+ * @param request - CAS 凭据、评审意见与时间。
+ */
+export function requestChanges(task: Task, request: RequestChangesRequest): DomainResult<Task> {
+  const guard = checkRevision(task, request.expectedRevision)
+  if (!guard.ok) return guard
+  if (task.column !== 'review') {
+    return fail('illegal-transition', `只有 review 列的任务可以打回，当前在 ${task.column}`)
+  }
+  const feedback = request.feedback.trim()
+  if (feedback.length === 0) {
+    return fail('feedback-required', '打回必须写明要改什么，否则 Agent 只会把上次的活重做一遍')
+  }
+  return succeed(bump(task, { column: 'ready', feedback, lease: undefined }, request.now))
+}
+
+/**
+ * 清空已经交给 Agent 的评审意见，避免它在后续执行里被重复投喂。
+ * @param task - 当前任务。
+ * @param now - 当前时间。
+ */
+export function consumeFeedback(task: Task, now: number): Task {
+  return task.feedback === undefined ? task : bump(task, { feedback: undefined }, now)
 }
 
 /** 租约是否已失效（不存在也算失效）。 */

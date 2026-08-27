@@ -43,6 +43,8 @@ describe('canTransition', () => {
     expect(canTransition('running', 'review')).toBe(true)
     expect(canTransition('review', 'done')).toBe(true)
     expect(canTransition('review', 'ready')).toBe(true)
+    // 废弃成果、回想法池重新想需求：无租约状态之间的整理，该放行。
+    expect(canTransition('review', 'backlog')).toBe(true)
     expect(canTransition('failed', 'ready')).toBe(true)
   })
 
@@ -51,6 +53,8 @@ describe('canTransition', () => {
     expect(canTransition('ready', 'done')).toBe(false)
     expect(canTransition('done', 'ready')).toBe(false)
     expect(canTransition('running', 'done')).toBe(false)
+    // running → ready 是系统回收租约的专属通道，人不能走。
+    expect(canTransition('running', 'ready')).toBe(false)
   })
 })
 

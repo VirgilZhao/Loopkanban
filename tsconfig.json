@@ -4,5 +4,12 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["packages/*/src/**/*.ts", "packages/*/tests/**/*.ts", "vitest.config.ts"]
+  "comment": "web 有自己的 tsconfig（需要 DOM lib 与 jsx），单独检查。",
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/core/tests/**/*.ts",
+    "packages/host/src/**/*.ts",
+    "packages/host/tests/**/*.ts",
+    "vitest.config.ts"
+  ]
 }

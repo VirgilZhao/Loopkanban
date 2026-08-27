@@ -5,9 +5,14 @@
  * 校验 Host/Origin 防 DNS rebinding。远程访问走 SSH 端口转发。
  */
 
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { asRunId, asTaskId, moveTask, type Column, type Task } from '@openkanban/core'
+import { extname, join, normalize, resolve as resolvePath } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { asBoardId, asRunId, asTaskId, moveTask, type Column, type Task } from '@openkanban/core'
+import type { DetectedAgent } from '../agents/index.ts'
 import type { Storage } from '../storage/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { RunBus } from './bus.ts'
@@ -24,6 +29,8 @@ const DEFAULT_SSE_HEARTBEAT_MS = 20_000
 
 export interface ServerOptions {
   readonly storage: Storage
+  /** 本机探测到的 Agent CLI。UI 只允许在这些里面选。 */
+  readonly agents?: readonly DetectedAgent[]
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -31,6 +38,8 @@ export interface ServerOptions {
   readonly token?: string
   /** SSE 心跳间隔，同时决定发现死连接的最长延迟。 */
   readonly sseHeartbeatMs?: number
+  /** 前端构建产物目录；不给则只提供 API。 */
+  readonly staticDir?: string
 }
 
 export interface RunningServer {
@@ -39,6 +48,17 @@ export interface RunningServer {
   readonly port: number
   readonly bus: RunBus
   close(): Promise<void>
+}
+
+const MIME: Readonly<Record<string, string>> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.woff2': 'font/woff2',
+  '.ico': 'image/x-icon',
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
@@ -80,6 +100,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const token = options.token ?? createToken()
   const bus = options.bus ?? new RunBus()
   const heartbeatMs = options.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS
+  const agents = options.agents ?? []
+  const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
 
   const server: Server = createHttpServer((req, res) => {
     void handle(req, res).catch((error: unknown) => {
@@ -114,6 +136,68 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         boards: storage.listBoards(),
         tasks: storage.listTasks(),
       }, extraHeaders)
+      return
+    }
+
+    // ── 已探测到的 Agent ────────────────────────────────────
+    if (method === 'GET' && pathname === '/api/agents') {
+      // 只暴露能力事实，不暴露 help 原文这类噪音。
+      sendJson(res, 200, {
+        agents: agents.map(({ provider, caps }) => ({
+          id: provider.id,
+          bin: caps.bin,
+          version: caps.version,
+          streaming: caps.streaming,
+          canPinSessionId: caps.canPinSessionId,
+          canResume: caps.canResume,
+          permissionTiers: caps.permissionTiers,
+        })),
+      }, extraHeaders)
+      return
+    }
+
+    // ── 新建任务 ────────────────────────────────────────────
+    if (method === 'POST' && pathname === '/api/tasks') {
+      const body = await readJsonBody(req) as Partial<{
+        boardId: string; subject: string; description: string; acceptance: string[]
+        repoPath: string; baseBranch: string; preferredProvider: string; writeScopes: string[]
+      }> | undefined
+      if (body?.subject === undefined || body.subject.trim().length === 0) {
+        sendJson(res, 400, { error: 'bad-request', detail: '需要 subject' })
+        return
+      }
+      const board = storage.listBoards().find((b) => b.id === body.boardId) ?? storage.listBoards()[0]
+      if (board === undefined) { sendJson(res, 400, { error: 'no-board' }); return }
+
+      const now = Date.now()
+      const tasks = storage.listTasks(board.id)
+      const created: Task = {
+        id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
+        boardId: asBoardId(board.id),
+        revision: 1,
+        // 新卡一律先落 backlog：验收标准没写全就不该进队列。
+        column: 'backlog',
+        position: Math.max(0, ...tasks.map((t) => t.position)) + 1,
+        subject: body.subject.trim(),
+        description: body.description ?? '',
+        acceptance: (body.acceptance ?? []).filter((a) => a.trim().length > 0),
+        repoPath: body.repoPath ?? board.repoPath,
+        baseBranch: body.baseBranch ?? board.baseBranch,
+        ...(body.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
+        blockedBy: [],
+        writeScopes: body.writeScopes ?? [],
+        createdAt: now,
+        updatedAt: now,
+      }
+      storage.createTask(created)
+      sendJson(res, 201, { task: created }, extraHeaders)
+      return
+    }
+
+    // ── 某任务的 Run 列表 ───────────────────────────────────
+    const runsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/runs$/)
+    if (method === 'GET' && runsOf !== null) {
+      sendJson(res, 200, { runs: storage.listRuns(asTaskId(decodeURIComponent(runsOf))) }, extraHeaders)
       return
     }
 
@@ -166,7 +250,47 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    // ── 静态资源（前端产物）─────────────────────────────────
+    if (method === 'GET' && staticDir !== undefined && !pathname.startsWith('/api/')) {
+      if (await serveStatic(staticDir, pathname, res, extraHeaders)) return
+    }
+
     sendJson(res, 404, { error: 'not-found', detail: pathname })
+  }
+
+  /**
+   * 托管前端产物。找不到具体文件时回落到 `index.html`，让前端路由接管。
+   * @returns 是否已经把响应处理掉了。
+   */
+  async function serveStatic(
+    root: string,
+    pathname: string,
+    res: ServerResponse,
+    extraHeaders: Record<string, string>,
+  ): Promise<boolean> {
+    const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
+    // 目录穿越防线：拼完再验证它仍在 root 之下，`../` 一律出局。
+    const candidate = resolvePath(join(root, normalize(relative)))
+    const target = candidate.startsWith(root + '/') || candidate === root
+      ? candidate
+      : join(root, 'index.html')
+
+    const file = await stat(target).catch(() => null)
+    const finalPath = file?.isFile() === true ? target : join(root, 'index.html')
+    const fallback = await stat(finalPath).catch(() => null)
+    if (fallback?.isFile() !== true) return false
+
+    res.writeHead(200, {
+      'content-type': MIME[extname(finalPath)] ?? 'application/octet-stream',
+      'content-length': fallback.size,
+      // 带内容哈希的资源可以长缓存，index.html 绝不缓存。
+      'cache-control': finalPath.endsWith('index.html')
+        ? 'no-store'
+        : 'public, max-age=31536000, immutable',
+      ...extraHeaders,
+    })
+    createReadStream(finalPath).pipe(res)
+    return true
   }
 
   function streamRunEvents(req: IncomingMessage, res: ServerResponse, id: ReturnType<typeof asRunId>): void {

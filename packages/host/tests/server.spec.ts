@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { request as httpRequest } from 'node:http'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { connect } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
 import { Storage } from '../src/storage/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
@@ -238,5 +242,86 @@ describe('SSE 事件流', () => {
       await new Promise((r) => setTimeout(r, 25))
     }
     expect(server.bus.size).toBe(0)
+  })
+})
+
+describe('静态资源托管', () => {
+  let staticServer: RunningServer
+  let root: string
+  let outside: string
+
+  beforeEach(async () => {
+    // 自建固件：测试不能依赖机器上恰好存在的文件。
+    const sandbox = await mkdtemp(join(tmpdir(), 'openkanban-static-'))
+    root = join(sandbox, 'dist')
+    outside = join(sandbox, 'secret.txt')
+    await mkdir(join(root, 'assets'), { recursive: true })
+    await writeFile(join(root, 'index.html'), '<!doctype html><title>app</title>', 'utf8')
+    await writeFile(join(root, 'assets', 'app.css'), 'body{}', 'utf8')
+    // 放在 root 的兄弟目录，正是穿越攻击想读到的位置。
+    await writeFile(outside, 'SECRET', 'utf8')
+
+    staticServer = await startServer({
+      storage: store, token: TOKEN, sseHeartbeatMs: 50, staticDir: root,
+    })
+  })
+
+  afterEach(async () => {
+    await staticServer.close()
+    await rm(join(root, '..'), { recursive: true, force: true })
+  })
+
+  const get = (path: string): Promise<Response> =>
+    fetch(`http://127.0.0.1:${String(staticServer.port)}${path}`, {
+      headers: { cookie: `openkanban_token=${TOKEN}` },
+    })
+
+  it('根路径返回 index.html', async () => {
+    const res = await get('/')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/html')
+    expect(await res.text()).toContain('<title>app</title>')
+  })
+
+  it('带内容哈希的资源长缓存，index.html 绝不缓存', async () => {
+    expect((await get('/assets/app.css')).headers.get('cache-control')).toContain('immutable')
+    expect((await get('/')).headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('目录穿越被挡住 —— 不能借静态路由读到 root 之外的文件', async () => {
+    // 必须走原始 socket：fetch 会在发送前把 `..` 规范化掉，
+    // 用它测出来的"通过"只证明了客户端做了事，服务端可能毫无防护。
+    const raw = (path: string): Promise<string> => new Promise((resolve) => {
+      const socket = connect(staticServer.port, '127.0.0.1', () => {
+        socket.write(
+          `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${String(staticServer.port)}\r\n`
+          + `Cookie: openkanban_token=${TOKEN}\r\nConnection: close\r\n\r\n`,
+        )
+      })
+      let buffer = ''
+      socket.on('data', (chunk) => { buffer += String(chunk) })
+      socket.on('end', () => { resolve(buffer) })
+    })
+
+    for (const attack of [
+      '/../secret.txt',
+      '/assets/../../secret.txt',
+      '/./../secret.txt',
+      '/..%2fsecret.txt',
+      `/..${outside}`,
+    ]) {
+      expect(await raw(attack), `${attack} 泄漏了 root 之外的文件`).not.toContain('SECRET')
+    }
+  })
+
+  it('找不到的路径回落到 index.html，交给前端路由', async () => {
+    const res = await get('/board/some-id')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('<title>app</title>')
+  })
+
+  it('静态托管不会吃掉 /api 路径', async () => {
+    expect((await get('/api/nope')).status).toBe(404)
+    expect((await get('/api/state')).status).toBe(200)
   })
 })

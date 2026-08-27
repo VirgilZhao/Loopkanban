@@ -1,0 +1,225 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────
+   OpenKanban — 工业调度台
+   参考物是 CNC 机床 HMI 与塔台进程条，不是 SaaS 看板。
+   暖黑底 + 钠灯琥珀单一强调色 + 发丝分隔线 + 高信息密度。
+   ───────────────────────────────────────────────────────────── */
+
+@font-face { font-display: swap; }
+
+@theme {
+  /* 面板层次：暖黑，不是常见的蓝灰。 */
+  --color-void:      oklch(0.145 0.004 70);
+  --color-panel:     oklch(0.185 0.005 70);
+  --color-raised:    oklch(0.225 0.006 70);
+  --color-hairline:  oklch(0.30 0.006 70);
+  --color-hairline-bright: oklch(0.42 0.008 70);
+
+  --color-ink:       oklch(0.93 0.006 80);
+  --color-ink-dim:   oklch(0.70 0.008 80);
+  --color-ink-faint: oklch(0.52 0.008 80);
+
+  /* 钠灯琥珀 —— 整个界面唯一的强调色，只给"正在发生的事"。 */
+  --color-sodium:      oklch(0.80 0.155 72);
+  --color-sodium-deep: oklch(0.62 0.14 62);
+
+  /* 状态灯，只用在小圆点和细轨上，绝不铺面积。 */
+  --color-lamp-idle:   oklch(0.55 0.01 80);
+  --color-lamp-live:   oklch(0.80 0.155 72);
+  --color-lamp-ok:     oklch(0.76 0.15 152);
+  --color-lamp-fail:   oklch(0.65 0.19 30);
+  --color-lamp-review: oklch(0.75 0.12 230);
+
+  --font-chrome: "Martian Mono", ui-monospace, monospace;
+  --font-body:   "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --font-code:   "JetBrains Mono", ui-monospace, monospace;
+
+  --radius-panel: 3px;
+}
+
+/* shadcn 的语义变量映射到上面的调色板。 */
+:root {
+  --background: var(--color-void);
+  --foreground: var(--color-ink);
+  --card: var(--color-panel);
+  --card-foreground: var(--color-ink);
+  --popover: var(--color-raised);
+  --popover-foreground: var(--color-ink);
+  --primary: var(--color-sodium);
+  --primary-foreground: var(--color-void);
+  --secondary: var(--color-raised);
+  --secondary-foreground: var(--color-ink);
+  --muted: var(--color-raised);
+  --muted-foreground: var(--color-ink-faint);
+  --accent: var(--color-raised);
+  --accent-foreground: var(--color-sodium);
+  --destructive: var(--color-lamp-fail);
+  --destructive-foreground: var(--color-ink);
+  --border: var(--color-hairline);
+  --input: var(--color-hairline);
+  --ring: var(--color-sodium-deep);
+  --radius: 3px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 6px;
+}
+
+@layer base {
+  * { border-color: var(--color-hairline); }
+
+  html, body, #root { height: 100%; }
+
+  body {
+    background: var(--color-void);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* 工程纸网格：两组极淡的线，给底面一点"图纸"质感而不喧宾夺主。 */
+    background-image:
+      linear-gradient(oklch(1 0 0 / 0.015) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(1 0 0 / 0.015) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  /* 颗粒层：低透明度噪点，让大片暗面不至于像塑料。 */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.028;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-hairline);
+    border: 2px solid var(--color-void);
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-hairline-bright); }
+
+  ::selection { background: var(--color-sodium-deep); color: var(--color-ink); }
+
+  :focus-visible {
+    outline: 1px solid var(--color-sodium);
+    outline-offset: 1px;
+  }
+}
+
+@layer components {
+  /* 界面骨架上的微标签：极小、大写、宽字距，机器面板的说明字。 */
+  .chrome-label {
+    font-family: var(--font-chrome);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-ink-faint);
+  }
+
+  /* 中文微标签：chrome-label 的大写与宽字距只适合拉丁字母，
+     用在中文上会把字拆散（"事 件 流"），所以另起一套。 */
+  .cjk-label {
+    font-family: var(--font-body);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--color-ink-faint);
+  }
+
+  .mono { font-family: var(--font-code); font-variant-ligatures: none; }
+
+  /* 任务 id 之类的标识块。 */
+  .tag {
+    font-family: var(--font-code);
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    padding: 1px 4px;
+    border: 1px solid var(--color-hairline);
+    border-radius: 2px;
+    color: var(--color-ink-faint);
+  }
+
+  /* 正在执行的卡片左侧扫描轨 —— 界面里唯一持续运动的东西，
+     一眼就能看出"有 Agent 活着在干活"。 */
+  .scan-rail {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: 2px;
+    overflow: hidden;
+    background: var(--color-sodium-deep);
+  }
+  .scan-rail::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    height: 40%;
+    background: linear-gradient(180deg, transparent, var(--color-sodium), transparent);
+    animation: scan 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes scan {
+    0%   { transform: translateY(-100%); }
+    100% { transform: translateY(350%); }
+  }
+
+  /* 状态灯。live 会缓慢呼吸。 */
+  .lamp {
+    width: 5px; height: 5px;
+    border-radius: 99px;
+    flex: none;
+    background: var(--color-lamp-idle);
+  }
+  .lamp[data-state="running"] {
+    background: var(--color-lamp-live);
+    box-shadow: 0 0 6px var(--color-lamp-live);
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  .lamp[data-state="done"]   { background: var(--color-lamp-ok); }
+  .lamp[data-state="failed"] { background: var(--color-lamp-fail); box-shadow: 0 0 6px var(--color-lamp-fail); }
+  .lamp[data-state="review"] { background: var(--color-lamp-review); }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+  }
+
+  /* 入场：列依次落位，只在首屏放一次。 */
+  @keyframes settle {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .settle { animation: settle 0.4s cubic-bezier(0.16, 1, 0.3, 1) backwards; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-rail::after, .lamp, .settle { animation: none !important; }
+}

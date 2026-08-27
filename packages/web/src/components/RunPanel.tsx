@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
-import { api, subscribeRun } from '@/api.ts'
+import { Play, Square } from 'lucide-react'
+import { api, ApiError, subscribeRun } from '@/api.ts'
 import { cn } from '@/lib/utils.ts'
-import type { Run, StreamEvent, Task } from '@/types.ts'
+import type { Agent, Run, StreamEvent, Task } from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
 const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
@@ -15,38 +16,63 @@ const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
   raw:      { label: 'RAW',      tone: 'text-ink-faint/60' },
 }
 
+/** raw 行是没被识别的原始输出，只留个头，别把整坨 JSON 倒进界面。 */
+const RAW_MAX = 140
+
 /** 把一条事件压成一行可读文本。 */
 function summarize(event: StreamEvent): string {
   const p = event.payload
   switch (event.kind) {
-    case 'session': return `${String(p['sessionId'] ?? '')}  model=${String(p['model'] ?? '?')}  apiKeySource=${String(p['apiKeySource'] ?? '?')}`
+    case 'session': {
+      // 不同 CLI 给的字段不一样（codex 没有 model / apiKeySource），
+      // 缺的就不显示，别用 "?" 占位假装它存在。
+      const parts = [String(p['sessionId'] ?? '')]
+      if (typeof p['model'] === 'string') parts.push(`model=${p['model']}`)
+      if (typeof p['apiKeySource'] === 'string') parts.push(`apiKeySource=${p['apiKeySource']}`)
+      return parts.join('  ')
+    }
     case 'text': return String(p['text'] ?? '')
     case 'tool': return String(p['name'] ?? '')
     case 'notice': return String(p['text'] ?? '')
     case 'usage': return `in=${String(p['inputTokens'] ?? '-')} out=${String(p['outputTokens'] ?? '-')}${p['costUsd'] === undefined ? '' : ` $${String(p['costUsd'])}`}`
     case 'finished': return `${p['ok'] === true ? 'ok' : 'failed'} ${String(p['diagnostic'] ?? p['summary'] ?? '')}`
-    default: return String(p['line'] ?? JSON.stringify(p))
+    default: {
+      const text = String(p['line'] ?? JSON.stringify(p))
+      return text.length > RAW_MAX ? `${text.slice(0, RAW_MAX)}…` : text
+    }
   }
 }
 
 interface Props {
   task: Task
+  agents: Agent[]
   onLiveTool: (taskId: string, tool: string | undefined) => void
+  onChanged: () => void
+  onError: (code: string, detail: string) => void
   onClose: () => void
 }
 
-export function RunPanel({ task, onLiveTool, onClose }: Props): React.JSX.Element {
+export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose }: Props): React.JSX.Element {
   const [runs, setRuns] = useState<Run[]>([])
+  const [busy, setBusy] = useState(false)
   const [events, setEvents] = useState<StreamEvent[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
 
+  // 依赖 revision 而不只是 id：派活之后卡片 id 不变，只有 revision 会动。
+  // 只看 id 的话，刚派出去的 Run 永远不会被拉到，事件流会一直空着。
   useEffect(() => {
-    setEvents([])
     let cancelled = false
-    void api.runsOf(task.id).then(({ runs: loaded }) => { if (!cancelled) setRuns(loaded) })
+    void api.runsOf(task.id).then(({ runs: loaded }) => {
+      if (cancelled) return
+      setRuns((prev) => {
+        // 换了一次新的执行才清空日志，同一次执行的刷新要保留已收到的事件。
+        if (prev[0]?.id !== loaded[0]?.id) setEvents([])
+        return loaded
+      })
+    })
     return () => { cancelled = true }
-  }, [task.id])
+  }, [task.id, task.revision])
 
   useEffect(() => {
     if (latest === undefined) return undefined
@@ -93,6 +119,56 @@ export function RunPanel({ task, onLiveTool, onClose }: Props): React.JSX.Elemen
           esc
         </button>
       </header>
+
+      {/* 派活 / 取消。只有 ready 的卡能派，running 的能停。 */}
+      {task.column === 'ready' || task.column === 'running' ? (
+        <div className="flex items-center gap-1.5 border-b border-hairline px-3 py-2">
+          {task.column === 'ready' ? (
+            <>
+              <span className="cjk-label !text-[10px]">派给</span>
+              {agents.length === 0 ? (
+                <span className="cjk-label !text-lamp-fail">没有可用的 Agent CLI</span>
+              ) : agents.map((agent) => (
+                <button
+                  key={agent.id}
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true)
+                    void api.run(task.id, agent.id)
+                      .then(() => { onChanged() })
+                      .catch((error: unknown) => {
+                        if (error instanceof ApiError) onError(error.code, error.message)
+                      })
+                      .finally(() => { setBusy(false) })
+                  }}
+                  className={cn(
+                    'chrome-label flex items-center gap-1 border border-hairline px-2 py-1',
+                    'transition-colors hover:border-sodium hover:text-sodium',
+                    'disabled:cursor-not-allowed disabled:opacity-40',
+                  )}
+                >
+                  <Play className="size-2.5" />{agent.id}
+                </button>
+              ))}
+            </>
+          ) : (
+            <button
+              disabled={busy || latest === undefined}
+              onClick={() => {
+                if (latest === undefined) return
+                setBusy(true)
+                void api.cancel(latest.id).then(() => { onChanged() }).finally(() => { setBusy(false) })
+              }}
+              className={cn(
+                'chrome-label flex items-center gap-1 border border-lamp-fail/50 px-2 py-1 text-lamp-fail',
+                'transition-colors hover:bg-lamp-fail/10 disabled:opacity-40',
+              )}
+            >
+              <Square className="size-2.5" />终止执行
+            </button>
+          )}
+        </div>
+      ) : null}
 
       <Tabs defaultValue="stream" className="flex min-h-0 flex-1 flex-col gap-0">
         <TabsList className="h-auto w-full justify-start rounded-none border-b border-hairline bg-transparent p-0">

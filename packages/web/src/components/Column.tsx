@@ -21,7 +21,7 @@ export function Column({ column, tasks, now, index, selectedId, liveTools, onSel
     <section
       ref={setNodeRef}
       className={cn(
-        'settle flex min-w-[236px] flex-1 flex-col border-e border-hairline/70 last:border-e-0',
+        'settle flex min-w-[208px] flex-1 flex-col border-e border-hairline/70 last:border-e-0',
         isOver && 'bg-sodium/[0.035]',
       )}
       style={{ animationDelay: `${String(index * 45)}ms` }}

@@ -80,6 +80,16 @@ function num(value: unknown, key: string): number | undefined {
 
 const DIAGNOSTIC_MAX = 512
 
+/** 把 file_change 的改动列表压成 `add a.js, modify b.js` 这样的一行。 */
+function summarizeChanges(item: unknown): string | undefined {
+  if (typeof item !== 'object' || item === null) return undefined
+  const changes = (item as Record<string, unknown>)['changes']
+  if (!Array.isArray(changes)) return undefined
+  return changes
+    .map((change) => `${str(change, 'kind') ?? '?'} ${(str(change, 'path') ?? '').split('/').at(-1) ?? ''}`)
+    .join(', ')
+}
+
 export const codexCliProvider: AgentProvider = {
   id: 'codex',
 
@@ -170,9 +180,20 @@ export const codexCliProvider: AgentProvider = {
           ? { kind: 'raw', line }
           : { kind: 'text', text }
       }
-      // 只在 completed 时上报工具，避免同一个动作被 started/completed 报两遍。
+      // 只在 completed 时上报为工具调用，避免同一个动作被计两次。
       if (itemType !== undefined && type === 'item.completed') {
         return { kind: 'tool', name: itemType, input: item }
+      }
+      // started 不能直接丢：长命令跑起来后界面会长时间没动静，让人以为卡死。
+      // 但也不能把整条 JSON 倒出去，所以压成一行可读的提示。
+      if (type === 'item.started' && itemType !== undefined) {
+        const command = str(item, 'command')
+        const detail = command ?? summarizeChanges(item) ?? ''
+        return {
+          kind: 'notice',
+          level: 'info',
+          text: `${itemType}${detail === '' ? '' : ` ${detail.slice(0, 160)}`}`,
+        }
       }
       return { kind: 'raw', line }
     }

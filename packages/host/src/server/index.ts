@@ -13,6 +13,7 @@ import { extname, join, normalize, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { asBoardId, asRunId, asTaskId, moveTask, type Column, type Task } from '@openkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
+import type { Runner } from '../runner/index.ts'
 import type { Storage } from '../storage/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { RunBus } from './bus.ts'
@@ -31,6 +32,8 @@ export interface ServerOptions {
   readonly storage: Storage
   /** 本机探测到的 Agent CLI。UI 只允许在这些里面选。 */
   readonly agents?: readonly DetectedAgent[]
+  /** 执行器。不给则只能看板，不能真正派活。 */
+  readonly runner?: Runner
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -101,6 +104,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const bus = options.bus ?? new RunBus()
   const heartbeatMs = options.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS
   const agents = options.agents ?? []
+  const runner = options.runner
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
 
   const server: Server = createHttpServer((req, res) => {
@@ -231,6 +235,35 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 200, { task: moved.value }, extraHeaders)
+      return
+    }
+
+    // ── 派活 ────────────────────────────────────────────────
+    const runTarget = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/run$/)
+    if (method === 'POST' && runTarget !== null) {
+      if (runner === undefined) {
+        sendJson(res, 503, { error: 'no-runner', detail: '当前实例未启用执行器' })
+        return
+      }
+      const body = await readJsonBody(req) as { provider?: string } | undefined
+      const result = await runner.start(asTaskId(decodeURIComponent(runTarget)), body?.provider)
+      if (!result.ok) {
+        // 422 表达"这个请求本身不成立"，重试也没用；409 才是"重读后再试"。
+        sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {
+          error: result.reason, detail: result.detail,
+        })
+        return
+      }
+      sendJson(res, 202, { run: result.run }, extraHeaders)
+      return
+    }
+
+    // ── 取消执行 ────────────────────────────────────────────
+    const cancelTarget = matchPath(pathname, /^\/api\/runs\/([^/]+)\/cancel$/)
+    if (method === 'POST' && cancelTarget !== null) {
+      if (runner === undefined) { sendJson(res, 503, { error: 'no-runner' }); return }
+      const stopped = await runner.cancel(asRunId(decodeURIComponent(cancelTarget)))
+      sendJson(res, stopped ? 202 : 404, { stopped }, extraHeaders)
       return
     }
 

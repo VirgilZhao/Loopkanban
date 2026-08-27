@@ -21,6 +21,9 @@ const ERROR_HINT: Record<string, string> = {
   'blocked-by-dependency': '它依赖的任务还没完成。',
   'lease-held': '这张卡正被某个 Agent 持有，等它跑完或超时释放。',
   'revision-conflict': '这张卡刚被改动过，已为你重新加载。',
+  'provider-unavailable': '这个 Agent CLI 本机没有探测到。装好它，或者换一个。',
+  'launch-failed': '起进程失败。多半是 worktree 建不出来 —— 检查仓库路径和基线分支。',
+  'no-runner': '当前实例没有启用执行器，只能看板不能派活。',
 }
 
 export default function App(): React.JSX.Element {
@@ -45,6 +48,14 @@ export default function App(): React.JSX.Element {
     const timer = setInterval(() => { setNow(Date.now()) }, CLOCK_MS)
     return () => { clearInterval(timer) }
   }, [])
+
+  // Run 结束时卡片会自己换列（running → review/failed），界面必须跟上。
+  // 有 Agent 在跑时盯紧一点，闲着时放慢，别白烧 CPU。
+  useEffect(() => {
+    const busy = tasks.some((t) => t.column === 'running')
+    const timer = setInterval(() => { void refresh() }, busy ? 1_500 : 6_000)
+    return () => { clearInterval(timer) }
+  }, [tasks, refresh])
 
   useEffect(() => {
     // 只有信息类提示自动消失；被拒绝的操作要留在屏幕上，
@@ -191,7 +202,12 @@ export default function App(): React.JSX.Element {
         {selected === null ? null : (
           <RunPanel
             task={selected}
+            agents={agents}
             onLiveTool={onLiveTool}
+            onChanged={() => { void refresh() }}
+            onError={(code, detail) => {
+              setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
+            }}
             onClose={() => { setSelectedId(null) }}
           />
         )}

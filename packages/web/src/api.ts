@@ -38,6 +38,17 @@ export const api = {
   createTask: (input: { subject: string; description?: string; acceptance?: string[]; preferredProvider?: string }) =>
     call<{ task: Task }>('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
 
+  /** 派活。202 表示已接受并开始执行。 */
+  run: (taskId: string, provider?: string) =>
+    call<{ run: Run }>(`/api/tasks/${encodeURIComponent(taskId)}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    }),
+
+  /** 取消执行，会连同整棵进程树一起收掉。 */
+  cancel: (runId: string) =>
+    call<{ stopped: boolean }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
+
   /** 移动任务。409 表示期间已被他人改动，调用方应重读后重试。 */
   move: (taskId: string, expectedRevision: number, to: string, position?: number) =>
     call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}/move`, {

@@ -14,7 +14,9 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asBoardId, asTaskId, type Task } from '@openkanban/core'
 import { detectAgents } from '../agents/index.ts'
+import { RunBus } from '../server/bus.ts'
 import { startServer } from '../server/index.ts'
+import { Runner } from '../runner/index.ts'
 import { Storage } from '../storage/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -93,7 +95,8 @@ function openBrowser(url: string): void {
 }
 
 async function main(): Promise<void> {
-  const dir = dataDir()
+  // --data 让多个看板/临时试验各用各的库，不污染日常数据。
+  const dir = flag('data') ?? dataDir()
   await mkdir(dir, { recursive: true })
   const storage = Storage.open(join(dir, 'openkanban.db'))
   seed(storage, process.cwd())
@@ -118,11 +121,31 @@ async function main(): Promise<void> {
     )
   }
 
+  // ── 执行器 ───────────────────────────────────────────────
+  const bus = new RunBus()
+  const runner = new Runner({
+    storage, bus, agents,
+    worktreeRoot: join(dir, 'worktrees'),
+    artifactsRoot: join(dir, 'runs'),
+  })
+
+  // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
+  const aborted = runner.reconcile()
+  const reclaimed = runner.reclaimExpired()
+  if (aborted > 0 || reclaimed.length > 0) {
+    console.log(C.dim(`\n  对账：${String(aborted)} 个中断的 Run，${String(reclaimed.length)} 张卡放回 Ready`))
+  }
+  // 定期回收租约过期的卡片 —— 没有它，一次崩溃就会让任务永远卡在 Running。
+  const sweeper = setInterval(() => { runner.reclaimExpired() }, 30_000)
+  sweeper.unref()
+
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
   const server = await startServer({
     storage,
     agents,
+    runner,
+    bus,
     staticDir: STATIC_DIR,
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })

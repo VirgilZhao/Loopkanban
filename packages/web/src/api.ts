@@ -8,8 +8,8 @@
 
 import type {
   Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
-  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent,
-  Task, TaskComment, TaskEdit, Workspace,
+  FilePreview, LiveLine, Project, Run, RunFailure, RunStats, SchedulerSettings, SchedulerState,
+  StreamEvent, Task, TaskComment, TaskEdit, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
@@ -53,6 +53,8 @@ export const api = {
     live: Record<string, LiveLine>
     /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
     attachments: Record<string, number>
+    /** Review 里上一轮没跑成的卡；跑成了的、以及别的列的卡不在里面。 */
+    failures: Record<string, RunFailure>
   }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),

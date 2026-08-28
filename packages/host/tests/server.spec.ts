@@ -649,6 +649,65 @@ describe('GET /api/state 的运行中预览', () => {
   })
 })
 
+describe('GET /api/state 里 Review 的失败标记', () => {
+  /** 给某张卡记一次执行。默认是跑成了的那种。 */
+  const run = (id: string, taskId: string, patch: Partial<{
+    status: 'running' | 'completed' | 'failed' | 'aborted'
+    diagnostic: string
+    startedAt: number
+    endedAt: number
+  }> = {}) => {
+    const { status = 'completed', diagnostic, startedAt = T0, endedAt = T0 + 1_000 } = patch
+    store.createRun({
+      id: asRunId(id), taskId: asTaskId(taskId), provider: 'claude', cliVersion: '1.0',
+      worktreePath: '/wt', branch: `task/${taskId}`, status, startedAt, endedAt,
+      ...(diagnostic === undefined ? {} : { diagnostic }),
+    })
+  }
+
+  const failures = async () =>
+    (await (await api('/api/state')).json() as
+      { failures: Record<string, { status: string; provider: string; diagnostic?: string }> }).failures
+
+  it('这一轮跑挂的卡带上收场 —— 成败同处 Review，不标就分不出哪张该看日志', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    run('run-1', 't1', { status: 'failed', diagnostic: '退出码 1' })
+
+    expect(await failures()).toEqual({
+      't1': { runId: 'run-1', provider: 'claude', status: 'failed', diagnostic: '退出码 1', at: T0 + 1_000 },
+    })
+  })
+
+  it('被人终止的那次也算没跑成，但要认得出它不是自己挂的', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    run('run-1', 't1', { status: 'aborted' })
+    expect((await failures())['t1']).toMatchObject({ status: 'aborted' })
+  })
+
+  it('跑成了的不标 —— 那张卡等的是验收，不是查错', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    run('run-1', 't1')
+    expect(await failures()).toEqual({})
+  })
+
+  it('只看最近一轮：上一轮挂了、这一轮跑成了，标记就该消失', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    run('run-1', 't1', { status: 'failed', startedAt: T0, endedAt: T0 + 1 })
+    run('run-2', 't1', { status: 'completed', startedAt: T0 + 10_000, endedAt: T0 + 11_000 })
+    expect(await failures()).toEqual({})
+  })
+
+  it('重新派出去跑的卡不标 —— 它已经不在 Review 了，红字说的是上一轮的旧闻', async () => {
+    store.createTask(task({
+      id: 't1',
+      column: 'running',
+      lease: { runId: asRunId('run-2'), provider: 'claude', acquiredAt: T0, expiresAt: T0 + 60_000 },
+    }))
+    run('run-1', 't1', { status: 'failed' })
+    expect(await failures()).toEqual({})
+  })
+})
+
 describe('POST /api/tasks/:id/move', () => {
   beforeEach(() => { store.createTask(task({ id: 't1' })) })
 

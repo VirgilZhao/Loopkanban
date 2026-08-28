@@ -30,7 +30,7 @@ import type { AgentPool, DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
 import type { Run, Storage, TaskComment } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
-import { branchSlug, ensureWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+import { branchSlug, ensureWorktree, worktreeDir, worktreeDiff, type Worktree } from '../worktree/index.ts'
 
 /** 租期。跑着的 Run 会在到期前续，崩溃的 Run 到期后被回收。 */
 export const DEFAULT_LEASE_TTL_MS = 90_000
@@ -149,10 +149,36 @@ export class Runner {
       return { ok: true, run: await this.launch(claimed.value, runId, agent, prior) }
     } catch (error) {
       const detail = describeError(error)
-      // launch 可能已经写了 Run 记录才失败（例如 spawn 时 CLI 二进制刚被替换）。
-      // 不打到终态的话，它会永远算作 running，把统计和孤儿对账都带偏。
+      /*
+       * 这次派活**一定**要留下一条终态的 Run。两种失败都要兜住：
+       *
+       * 一是 launch 已经写了 Run 记录才失败（例如 spawn 时 CLI 二进制刚被
+       * 替换）。不打到终态的话，它会永远算作 running，把统计和孤儿对账都带偏。
+       *
+       * 二是更早就失败了，连 Run 都还没写 —— worktree 建不出来（基线分支被
+       * 删、仓库被移走、index.lock 没清、磁盘满）就是这一种。这一条更要补：
+       * 卡照样被 release 进 Review，而"这一轮跑挂了"全靠 runs 表判断，一条
+       * 记录都没有就等于这次失败从没发生过 —— 自动驾驶下没有任何人看得见它，
+       * 上一轮跑成过的卡还会顶着那条 completed 冒充"干完了等你验"。
+       */
       const created = storage.getRun(runId)
-      if (created !== null && created.status === 'running') {
+      if (created === null) {
+        // 工作区没建成，但它该在哪儿、分支该叫什么是确定的（同一张卡永远是
+        // 同一个目录），照实记下来 —— 验收那头本来就容得下"根本没建出工作区"
+        // 的卡，会明确拒绝而不是在不存在的目录上炸开。
+        storage.createRun({
+          id: runId,
+          taskId,
+          provider: agent.provider.id,
+          cliVersion: agent.caps.version,
+          worktreePath: worktreeDir(task.repoPath, task.id),
+          branch: branchSlug(task.id, taskTitle(task)),
+          status: 'failed',
+          diagnostic: detail,
+          startedAt: now,
+          endedAt: this.now,
+        })
+      } else if (created.status === 'running') {
         storage.updateRun({ ...created, status: 'failed', diagnostic: detail, endedAt: this.now })
       }
       // 副作用建到一半失败，必须把卡放回去，否则它会一直卡在 running。

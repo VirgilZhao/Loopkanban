@@ -225,6 +225,22 @@ export interface LiveLine {
   at: number
 }
 
+/**
+ * 一张卡上一轮执行的收场 —— 只在它没跑成时才有。
+ *
+ * 成功与失败都停在 Review，所以那一列里必须有个东西把两者分开；
+ * 卡片上那个红标记就靠它。
+ */
+export interface RunFailure {
+  runId: string
+  provider: string
+  /** `failed` 是它自己挂了，`aborted` 是被人（或重启）打断的。 */
+  status: 'failed' | 'aborted'
+  /** 失败原因的一句话；起进程就失败时也可能没有。 */
+  diagnostic?: string
+  at: number
+}
+
 export interface StreamEvent {
   seq: number
   kind: string

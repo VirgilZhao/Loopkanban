@@ -264,15 +264,42 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 带了几个附件也捎上：看板上那枚回形针得知道自己该不该出现，而为它
       // 单独开一轮请求（每张卡一次）就太贵了。只给数量，内容按需再取。
       const attachments: Record<string, number> = {}
+      /*
+       * 上一轮没跑成的卡，把收场也捎上。
+       *
+       * 成功与失败都停在 Review（running 只有这一个出口），所以那一列里
+       * 「已经干完等你验」和「压根没跑起来」长得一模一样 —— 不标出来，人只能
+       * 一张张点开才知道该验哪张。**只给 Review 那一列**：别处的卡要么还没跑、
+       * 要么已经判过，一个红标记在那儿只是旧闻。
+       */
+      const failures: Record<string, {
+        runId: string; provider: string; status: string; diagnostic?: string; at: number
+      }> = {}
+      const latest = storage.latestRuns()
       for (const task of tasks) {
         const count = storage.listAttachments(task.id).length
         if (count > 0) attachments[task.id] = count
+
+        const last = latest.get(task.id)
+        if (task.column === 'review' && last !== undefined
+          && (last.status === 'failed' || last.status === 'aborted')) {
+          failures[task.id] = {
+            runId: last.id,
+            provider: last.provider,
+            status: last.status,
+            ...(last.diagnostic === undefined ? {} : { diagnostic: last.diagnostic }),
+            at: last.endedAt ?? last.startedAt,
+          }
+        }
+
         const runId = task.lease?.runId
         if (task.column !== 'running' || runId === undefined) continue
         const event = storage.lastEvent(runId)
         if (event !== null) live[task.id] = { kind: event.kind, payload: event.payload, at: event.at }
       }
-      sendJson(res, 200, { projects: storage.listProjects(), tasks, live, attachments }, extraHeaders)
+      sendJson(res, 200, {
+        projects: storage.listProjects(), tasks, live, attachments, failures,
+      }, extraHeaders)
       return
     }
 

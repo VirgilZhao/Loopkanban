@@ -1,11 +1,13 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, Paperclip, PauseCircle } from 'lucide-react'
+import {
+  Archive, CircleAlert, FolderGit2, ListChecks, Lock, Paperclip, PauseCircle, TriangleAlert,
+} from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { taskClockFrom } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { LiveLine, Skip, Task } from '@/types.ts'
+import type { LiveLine, RunFailure, Skip, Task } from '@/types.ts'
 
 /** 把毫秒时长压成人能扫一眼的形式。 */
 function since(from: number, now: number): string {
@@ -23,6 +25,11 @@ interface Props {
   live?: LiveLine | undefined
   /** 调度器这一轮为什么没派它。 */
   skip?: Skip | undefined
+  /**
+   * 上一轮执行没跑成时的收场。**Review 那一列的卡才有** —— 成败同处一列，
+   * 不写出来的话，"干完了等你验"和"压根没跑起来"在看板上长得一模一样。
+   */
+  failure?: RunFailure | undefined
   /** 所属项目名。只有概览里才给 —— 单项目视图下每张卡都一样，写了是噪音。 */
   projectName?: string | undefined
   /** 挂了几个附件。0 就不显示那枚回形针。 */
@@ -31,7 +38,7 @@ interface Props {
 }
 
 export function TaskCard({
-  task, now, selected, live, skip, projectName, attachments, onSelect,
+  task, now, selected, live, skip, failure, projectName, attachments, onSelect,
 }: Props): React.JSX.Element {
   const t = useT()
   const archived = task.archivedAt !== undefined
@@ -64,7 +71,9 @@ export function TaskCard({
     >
       {/* 正在执行的卡片带一条持续扫描的轨 —— 与 Running 列头那个转圈一起，是界面里仅有的恒动元素。 */}
       {running && !leaseExpired ? <span className="scan-rail" aria-hidden /> : null}
-      {leaseExpired ? <span className="absolute inset-y-0 start-0 w-0.5 bg-lamp-fail" aria-hidden /> : null}
+      {leaseExpired || failure !== undefined
+        ? <span className="absolute inset-y-0 start-0 w-0.5 bg-lamp-fail" aria-hidden />
+        : null}
 
       <div className={cn('flex items-center gap-2', running && 'ps-1.5')}>
         <span className="tag">{task.id}</span>
@@ -109,6 +118,22 @@ export function TaskCard({
           <CircleAlert className="size-3" /> {t('card.leaseExpired')}
         </p>
       ) : null}
+
+      {/* 这一轮跑挂了。诊断挂在 title 上 —— 卡片是扫视用的，一行说清"它没跑成"
+          就够，为什么挂的要去弹窗里读日志。 */}
+      {failure === undefined ? null : (
+        <p
+          title={failure.diagnostic ?? t('card.runFailedHint')}
+          className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-lamp-fail"
+        >
+          <TriangleAlert className="mt-[2px] size-3 flex-none" />
+          <span className="min-w-0 truncate">
+            {failure.status === 'aborted'
+              ? t('card.runAborted', { provider: failure.provider })
+              : t('card.runFailed', { provider: failure.provider })}
+          </span>
+        </p>
+      )}
 
       {/* 「我的卡为什么不动」——调度器跳过它的原因直接写在卡上。 */}
       {skip === undefined ? null : (

@@ -319,6 +319,25 @@ describe('迁移', () => {
   })
 })
 
+describe('项目的启动命令', () => {
+  it('存得住、读得回，空的就是"没配"而不是空串', () => {
+    expect(store.getProject(PROJECT)?.testCommand).toBeUndefined()
+
+    store.updateProject(PROJECT, { testCommand: 'pnpm install && pnpm dev' })
+    expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm install && pnpm dev')
+
+    // 配错了要能退回"没配"，而不是只能塞一条命令进去凑数。
+    store.updateProject(PROJECT, { testCommand: '  ' })
+    expect(store.getProject(PROJECT)?.testCommand).toBeUndefined()
+  })
+
+  it('改名不会顺手把启动命令抹掉 —— 缺席是"这次没提到"', () => {
+    store.updateProject(PROJECT, { testCommand: 'pnpm dev' })
+    store.updateProject(PROJECT, { name: '换个名字' })
+    expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm dev')
+  })
+})
+
 describe('stats', () => {
   beforeEach(() => { store.createTask(task({ id: 't1' })) })
 
@@ -467,5 +486,102 @@ describe('迁移', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+
+  it('加启动命令列：旧库里的项目一律视为"还没配"', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v10 = projects 表还没有 test_command 列的世界。
+      const legacy = seedLegacyDb(file, 10)
+      legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '老项目', '/repo', 'main', T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const migrated = store.getProject(PROJECT)
+      expect(migrated?.name).toBe('老项目')
+      // 缺席，不是空串 —— 界面据此显示"还没配"并把输入框摆出来。
+      expect(migrated?.testCommand).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加完成时间：旧库里已在 Done 的卡用 updated_at 回填，其余的仍然没有', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v11 = 加 done_at 之前的世界。
+      const legacy = seedLegacyDb(file, 11)
+      legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '默认看板', '/repo', 'main', T0)
+      const insert = legacy.prepare(`
+        INSERT INTO tasks (
+          id, project_id, revision, column_name, position, description,
+          acceptance_json, repo_path, base_branch, preferred_provider, model,
+          blocked_by_json, lease_json, archived_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      insert.run('t1', PROJECT, 1, 'done', 1, '早就做完的卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0 + 5_000)
+      insert.run('t2', PROJECT, 1, 'ready', 2, '还没做的卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0 + 9_000)
+      legacy.close()
+
+      const store = Storage.open(file)
+      expect(store.getTask(asTaskId('t1'))?.doneAt).toBe(T0 + 5_000)
+      expect(store.getTask(asTaskId('t2'))?.doneAt).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Pull Request', () => {
+  beforeEach(() => { store.createTask(task({ id: 't1', column: 'review' })) })
+
+  const pr = (patch: Record<string, unknown> = {}) => ({
+    id: 'pr-1', taskId: asTaskId('t1'), number: 7, url: 'https://github.com/acme/demo/pull/7',
+    branch: 'task/t1', baseBranch: 'main', state: 'open' as const, mergeable: 'unknown' as const,
+    createdAt: T0, updatedAt: T0, ...patch,
+  })
+
+  it('同一条 PR 刷多少次都只有一行，状态覆盖成最新的', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ state: 'merged', mergedAt: T0 + 99, updatedAt: T0 + 99 }))
+
+    const found = store.listPullRequests(asTaskId('t1'))
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatchObject({ state: 'merged', mergedAt: T0 + 99 })
+  })
+
+  it('刷新不动 createdAt —— 那是"这条 PR 什么时候进视野"，被推到现在顺序就乱了', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ createdAt: T0 + 5000, updatedAt: T0 + 5000 }))
+    expect(store.listPullRequests(asTaskId('t1'))[0]?.createdAt).toBe(T0)
+  })
+
+  it('一张卡可以有多条，新的排在前面 —— 每一轮合上去的是不同的一条', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ id: 'pr-2', number: 9 }))
+    expect(store.listPullRequests(asTaskId('t1')).map((row) => row.number)).toEqual([9, 7])
+  })
+
+  it('只有还开着的才进巡检，合过的不必再问', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ id: 'pr-2', number: 9, state: 'merged' }))
+    expect(store.listOpenPullRequests().map((row) => row.number)).toEqual([7])
+    expect(store.listAllPullRequests()).toHaveLength(2)
+  })
+
+  it('删卡时 PR 记录跟着走 —— 留着一堆指向空卡的行只是垃圾', () => {
+    store.upsertPullRequest(pr())
+    const current = store.getTask(asTaskId('t1')) as Task
+    store.commitTask({ ...current, column: 'ready', revision: current.revision + 1 })
+    expect(store.deleteTask(asTaskId('t1'), current.revision + 1)).toBe(true)
+    expect(store.listAllPullRequests()).toEqual([])
   })
 })

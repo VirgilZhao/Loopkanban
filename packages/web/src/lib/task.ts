@@ -54,9 +54,21 @@ export function isUntouchedDraft(task: Pick<Task, 'revision' | 'description' | '
  * 那个数字看着像在跑，其实只是在数心跳。`acquiredAt` 在整个 Run 里不变，
  * 打回重做换来新租约时才重新起算，那正是"这一轮跑了多久"。
  */
-export function taskClockFrom(task: Pick<Task, 'column' | 'lease' | 'updatedAt'>): number {
+export function taskClockFrom(task: Pick<Task, 'column' | 'lease' | 'doneAt' | 'updatedAt'>): number {
   if (task.column === 'running' && task.lease !== undefined) return task.lease.acquiredAt
+  if (task.column === 'done') return doneOrder(task)
   return task.updatedAt
+}
+
+/**
+ * Done 列的排序键：这张卡是什么时候做完的。
+ *
+ * 迁移之前完成的卡没有 `doneAt`，退回 `updatedAt` —— 它们不会再被改动，
+ * 那个时刻通常就是当初验收通过的时刻。同一个式子也喂给卡片右下角的计时，
+ * 于是那一列的数字自上而下单调变大，和眼睛看到的顺序对得上。
+ */
+export function doneOrder(task: Pick<Task, 'doneAt' | 'updatedAt'>): number {
+  return task.doneAt ?? task.updatedAt
 }
 
 /**

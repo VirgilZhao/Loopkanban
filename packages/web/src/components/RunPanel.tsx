@@ -4,19 +4,22 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
 import {
-  Archive, ArchiveRestore, Bot, Check, GitMerge, Play, Send, Square, Trash2, TriangleAlert, User, X,
+  Archive, ArchiveRestore, Bot, Check, ExternalLink, GitBranch, GitMerge, GitPullRequest, Play,
+  RefreshCw, Send, Square, Trash2, TriangleAlert, User, X,
 } from 'lucide-react'
 import { api, ApiError, subscribeRun, type NextRound } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
+import { TestEnvPanel } from '@/components/TestEnvPanel.tsx'
 import { summarize } from '@/lib/events.ts'
-import { useT } from '@/lib/i18n.tsx'
+import { maybe, useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
 import { modelOptions, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type {
-  Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskComment, TaskEdit,
+  Agent, DiffView as Diff, PrCapability, Project, PullRequest, Run, StreamEvent, Task, TaskComment,
+  TaskEdit,
 } from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
@@ -53,6 +56,11 @@ export function RunPanel({
   const [diff, setDiff] = useState<Diff | null>(null)
   const [comments, setComments] = useState<TaskComment[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
+  // 这张卡开过的 PR，以及这个仓库到底能不能开 PR。后者决定"通过并合并"
+  // 那颗按钮的行为 —— 开不了就退回本地合并，并把原因写在按钮下面。
+  const [prs, setPrs] = useState<PullRequest[]>([])
+  const [capability, setCapability] = useState<PrCapability | null>(null)
+  const [prNote, setPrNote] = useState<{ tone: 'ok' | 'warn'; text: string } | null>(null)
   // 讨论里点开的那份文档。Agent 写的方案就在它自己的 worktree 里，
   // 链接在浏览器里是死的 —— 这里把它读回来盖在弹窗上。
   const [preview, setPreview] = useState<string | null>(null)
@@ -70,14 +78,28 @@ export function RunPanel({
   // 只有想法池与队列里的卡能删。再往后 Agent 已经动过仓库，该走的是终止 / 废弃。
   const deletable = task.column === 'backlog' || task.column === 'ready'
   /**
-   * 这张卡的讨论里有没有话。没有就没有讨论 tab —— 新建的卡那儿一片空白，
-   * 摆着只会让人以为漏看了什么；要交代什么去规格里写。
+   * 在这张卡上说一句就等于"再改一版"的两列。
    *
-   * 看的是「有没有」而不是「Agent 回没回」：只有 Agent 回过才显示的话，
-   * 一条早于首轮执行的人类留言就成了看不见的东西 —— 而它照样会被塞进
-   * 下一次执行的 prompt 与 TASK.md 里。看不见的输入最难查。
+   * Review 一直如此；Done 也算 —— "合上去才发现还差一条"本来就是同一张卡
+   * 的下一轮，另开一张新卡会把讨论、工作区、已经合过的 PR 全丢掉。所以
+   * 这两列**即使一句话都还没有**也要摆出讨论，那正是触发下一轮的入口。
    */
-  const discussed = comments.length > 0
+  const canTalk = task.column === 'review' || task.column === 'done'
+  /**
+   * 摆不摆讨论这一页。
+   *
+   * 别的列看的是「有没有话」：新建的卡那儿一片空白，摆着只会让人以为漏看了
+   * 什么；要交代什么去规格里写。而「有没有」而不是「Agent 回没回」——
+   * 只有 Agent 回过才显示的话，一条早于首轮执行的人类留言就成了看不见的
+   * 东西，而它照样会被塞进下一次执行的 prompt 与 TASK.md 里。
+   */
+  const discussed = comments.length > 0 || canTalk
+  /** 这张卡还有没有 PR 开着 —— 有的话"刷新状态"才有意义。 */
+  const pending = prs.some((pr) => pr.state === 'open')
+  /** 开着的 PR 里有冲突的：基线在开完之后又往前走了，得再走一遍那条路。 */
+  const stale = prs.some((pr) => pr.state === 'open' && pr.mergeable === 'conflicting')
+  /** 干活的那条分支。没跑过的卡还没有分支可言。 */
+  const branch = latest?.branch
   /** 此刻真正摆出来的分页。 */
   const visible = TABS.filter((value) => value !== 'talk' || discussed)
 
@@ -126,6 +148,26 @@ export function RunPanel({
       .catch(() => { if (!cancelled) setDiff(null) })
     return () => { cancelled = true }
   }, [task.id, task.revision, latest])
+
+  // PR 跟着卡的 revision 走：开完一条、或者巡检把它收进 Done，这里都要跟上。
+  // 顺带问一次"这个仓库能不能开 PR" —— 那是按钮行为的依据，不能等到点下去
+  // 才发现本机没有 gh。
+  useEffect(() => {
+    let cancelled = false
+    void api.prs(task.id)
+      .then(({ prs: list, capability: caps }) => {
+        if (cancelled) return
+        setPrs(list)
+        setCapability(caps)
+      })
+      // 拉失败就留着手上这份：清空会让已经开出去的 PR 从界面上消失，
+      // 而一次网络抖动不是"这张卡没有 PR"。
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [task.id, task.revision])
+
+  // 换了一张卡，上一张的 PR 提示不该跟着漂过来。
+  useEffect(() => { setPrNote(null) }, [task.id])
 
   // 换了一张卡就把"上膛"收回去 —— 上一张卡的危险状态不该跟着漂到下一张。
   // 预览与分页同理：上一张卡的文档不该盖在这一张上面，新卡也该从规格看起。
@@ -220,6 +262,73 @@ export function RunPanel({
     }
   }
 
+  /**
+   * 「通过并合并」：开一条 PR，然后把话说清楚。
+   *
+   * 这里**不关弹窗**，与其他验收动作相反 —— PR 开出来之后还有下一步（去
+   * GitHub 上看、合），那条链接就在下面这块里，关掉等于让人自己再点开一次。
+   */
+  const openPr = (): void => {
+    setBusy(true)
+    setPrNote(null)
+    void api.openPr(task.id)
+      .then(({ pr, created, prs: list }) => {
+        setPrs(list)
+        setPrNote({ tone: 'ok', text: t(created ? 'pr.opened' : 'pr.reused', { n: pr.number }) })
+        onChanged()
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof ApiError)) return
+        if (error.code === 'merge-conflict') {
+          /*
+           * 冲突不关弹窗：卡虽然回了队列，但接下来要看的东西全在这儿 ——
+           * 讨论里那条"怎么解"的留言、以及解完之后再点一次的这颗按钮。
+           * 文件名从响应体里取，不从那句中文 detail 里抠。
+           */
+          const files = error.body['files']
+          const dispatched = typeof error.body['dispatched'] === 'string'
+          // 卡回没回队列由服务端说了算，**不能靠猜**：上一轮的冲突还没解完时
+          // 这条路也会走到，而那种情况下卡一直停在 Review —— 照着"已经回队列了"
+          // 说，人会对着一张明明还在 Review 的卡去队列里找它。
+          const requeued = error.body['requeued'] === true
+          setPrNote({
+            tone: 'warn',
+            text: [
+              Array.isArray(files) && files.length > 0
+                ? t('pr.conflict', { files: (files as string[]).join(t('sidebar.agentsSeparator')) })
+                : null,
+              dispatched ? t('pr.conflictDispatched')
+                : requeued ? t('pr.conflictHandoff')
+                : t('pr.conflictStuck'),
+            ].filter((part) => part !== null).join(' '),
+          })
+          onChanged()
+          return
+        }
+        onError(error.code, error.message)
+        setPrNote({ tone: 'warn', text: error.message })
+      })
+      .finally(() => { setBusy(false) })
+  }
+
+  /** 问一遍 GitHub：合上了没有。合上了的话卡这就进 Done。 */
+  const syncPr = (): void => {
+    setBusy(true)
+    setPrNote(null)
+    void api.syncPrs(task.id)
+      .then(({ prs: list, collected }) => {
+        setPrs(list)
+        setPrNote(collected.includes(task.id)
+          ? { tone: 'ok', text: t('pr.collected') }
+          : { tone: 'warn', text: t('pr.stillOpen') })
+        onChanged()
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) setPrNote({ tone: 'warn', text: error.message })
+      })
+      .finally(() => { setBusy(false) })
+  }
+
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent
@@ -263,9 +372,20 @@ export function RunPanel({
                   {taskTitle(task)}
                 </h2>
               </DialogTitle>
-              <DialogDescription className="mt-1 text-xs text-ink-faint">
-                {project?.name ?? t('panel.unknownProject')} · {t('panel.baseLabel')}{' '}
-                <span className="mono">{task.baseBranch}</span>
+              {/* 基线之外还要标出**自己那条分支** —— 「我的改动到底在哪儿」
+                  是打开这张卡最先想知道的事，而它此前只能去 Diff 页里翻。
+                  没跑过的卡还没有分支，那时只说基线。 */}
+              <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-faint">
+                <span>{project?.name ?? t('panel.unknownProject')}</span>
+                <span className="inline-flex items-center gap-1">
+                  {t('panel.baseLabel')} <span className="mono">{task.baseBranch}</span>
+                </span>
+                {branch === undefined ? null : (
+                  <span className="inline-flex min-w-0 items-center gap-1 text-sodium-deep" title={t('panel.branchHint')}>
+                    <GitBranch className="size-3 flex-none" />
+                    <span className="mono min-w-0 truncate">{branch}</span>
+                  </span>
+                )}
               </DialogDescription>
             </div>
             {/* 三个按钮当一整组换行 —— 拆开换会变成「归档」留在标题那行、
@@ -391,6 +511,13 @@ export function RunPanel({
             </div>
           ) : null}
 
+          {/* 一键试跑：在这张卡自己的 worktree 里把改动跑起来。
+              放在验收动作**上面** —— 先验，再判。反过来的话，按钮的顺序是在
+              暗示可以先盖章再验货。 */}
+          {!archived && task.column === 'review' ? (
+            <TestEnvPanel task={task} project={project} onChanged={onChanged} onError={onError} />
+          ) : null}
+
           {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
           {!archived && task.column === 'review' ? (
             <div className="border-b border-hairline px-4 py-3">
@@ -412,9 +539,18 @@ export function RunPanel({
               <div className="flex flex-wrap items-center gap-2">
                 {/* 验收动作都是"对这张卡的最后一句话"：判完就回看板。
                     失败留在原地，让人看见错误再决定（同保存、同留言）。 */}
+                {/* 主动作：能开 PR 就开 PR（改动推上去、开一条、冲突提前引爆），
+                    开不了才退回本地合并。两种行为都写在下面那句说明里 ——
+                    悄悄换一种做法，是这颗按钮最不该给的惊喜。 */}
                 <Action
-                  icon={<GitMerge />} label={t('panel.acceptMerge')} tone="primary" busy={busy}
-                  onClick={() => { void act(() => api.accept(task.id, true)).then(closeIfOk) }}
+                  icon={capability?.ready === true ? <GitPullRequest /> : <GitMerge />}
+                  label={t('panel.acceptMerge')} tone="primary"
+                  // 能力还没问回来时先按不动：这颗按钮的两种行为差得很远
+                  // （开 PR / 动你的主工作区），抢在答案之前点下去等于抽签。
+                  busy={busy || capability === null}
+                  onClick={capability?.ready === true
+                    ? openPr
+                    : () => { void act(() => api.accept(task.id, true)).then(closeIfOk) }}
                 />
                 <Action
                   icon={<Check />} label={t('panel.accept')} tone="ok" busy={busy}
@@ -427,9 +563,88 @@ export function RunPanel({
                 />
               </div>
 
-              <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+              {capability === null ? null : (
+                <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+                  {capability.ready
+                    ? t('pr.willOpen', { repo: capability.repo ?? '', base: task.baseBranch })
+                    // 原因按码本地化 —— 服务端那句是中文的，直接贴给英文界面
+                    // 就成了半句中文。认不出的码才退回它。
+                    : t('pr.fallback', {
+                        detail: maybe(t, `err.${capability.reason ?? ''}`, capability.detail ?? ''),
+                      })}
+                </p>
+              )}
+              <p className="mt-1 text-xs leading-relaxed text-ink-faint">
                 {t('panel.acceptNote', { branch: latest?.branch ?? '' })}
               </p>
+            </div>
+          ) : null}
+
+          {/* 这张卡开出去的 PR。**Review 与 Done 都摆**：Review 里它是"去合"的
+              入口，Done 里它是"这张卡到底怎么进主干的"那份账 —— 一张卡可以
+              合过好几条（每一轮一条），全列出来才看得出经过。 */}
+          {prs.length > 0 || prNote !== null ? (
+            <div className="border-b border-hairline px-4 py-3">
+              <div className="flex items-center gap-2">
+                <GitPullRequest className="size-3.5 flex-none text-sodium" />
+                <span className="chrome-label">{t('pr.title')}</span>
+                <span className="flex-1" />
+                {pending ? (
+                  <Button size="sm" variant="outline" disabled={busy} onClick={syncPr}>
+                    <RefreshCw />{t('pr.refresh')}
+                  </Button>
+                ) : null}
+              </div>
+
+              <ul className="mt-2 space-y-1.5">
+                {prs.map((pr) => (
+                  <li key={pr.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                    <a
+                      href={pr.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mono inline-flex flex-none items-center gap-1 text-sodium-deep hover:underline"
+                    >
+                      #{pr.number}<ExternalLink className="size-3" />
+                    </a>
+                    <span className={cn(
+                      'chrome-label',
+                      pr.state === 'merged' && '!text-lamp-ok',
+                      pr.state === 'closed' && '!text-ink-faint',
+                    )}>
+                      {t(`pr.state.${pr.state}`)}
+                    </span>
+                    {/* 冲突只在还开着的 PR 上说 —— 合过的那条早就没这回事了。 */}
+                    {pr.state === 'open' && pr.mergeable === 'conflicting' ? (
+                      <span className="text-lamp-fail">{t('pr.conflicting')}</span>
+                    ) : null}
+                    <span className="mono min-w-0 truncate text-ink-faint">
+                      {pr.branch} → {pr.baseBranch}
+                    </span>
+                    {pr.mergedAt === undefined ? null : (
+                      <span className="mono flex-none text-ink-faint">
+                        {new Date(pr.mergedAt).toLocaleString()}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+
+              {prNote === null ? null : (
+                <p className={cn(
+                  'mt-2 text-xs leading-relaxed',
+                  prNote.tone === 'ok' ? 'text-lamp-ok' : 'text-sodium',
+                )}>
+                  {prNote.text}
+                </p>
+              )}
+              {/* 合不合由人在 GitHub 上决定 —— 我们只负责在它真的合上之后
+                  把卡收进 Done。所以这句提示必须摆着。 */}
+              {pending ? (
+                <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+                  {stale ? t('pr.conflictingHint') : t('pr.pendingHint')}
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -479,8 +694,8 @@ export function RunPanel({
                   comments={comments}
                   busy={busy}
                   onOpenFile={setPreview}
-                  /** Review 里留言会把卡送回队列，按钮上得先说清楚。 */
-                  requeues={task.column === 'review'}
+                  /** Review 与 Done 里留言都会把卡送回队列，按钮上得先说清楚。 */
+                  requeues={canTalk}
                   onSend={async (body, edit) => {
                     setBusy(true)
                     try {
@@ -754,7 +969,8 @@ function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend
             // ⌘/Ctrl + Enter 发出去；单独回车留给换行 —— 这里写的是段落，不是聊天。
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send()
           }}
-          className="min-h-20"
+          // 固定高度：这儿贴在面板底上，跟着内容长会把上面的对话挤没了。
+          className="field-sizing-fixed h-24"
         />
 
         {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}

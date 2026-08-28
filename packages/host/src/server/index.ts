@@ -12,7 +12,7 @@ import {
   type IncomingMessage, type Server, type ServerResponse,
 } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
-import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
+import { basename, extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
@@ -31,7 +31,7 @@ import type { TestEnvs } from '../testenv/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
-import { readFilePreview } from './preview.ts'
+import { readFilePreview, resolvePreviewTarget } from './preview.ts'
 import { RunBus } from './bus.ts'
 import { runCommand } from './exec.ts'
 import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
@@ -333,7 +333,69 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * 自己的路径拼接写错 —— 那种 bug 在「只列目录名」时是噪音，在「读文件正文」
      * 和「跑命令」时就是把整台机器摊开。
      */
+    /**
+     * 把一个文件的原始字节直接流给浏览器。
+     *
+     * PDF 与图片是这样出去的，而不是 base64 进 JSON：浏览器自带 PDF 阅读器，
+     * 图片更是给个 URL 就完事，绕一圈 base64 只是凭空胖三分之一再让前端解回来。
+     *
+     * **类型是一份允许清单，不是猜测**：只有图片和 PDF 会内联，别的一律拒绝。
+     * 这些字节和看板同源 —— 一个能内联渲染的 `.html` 就能拿着 cookie 调本机的
+     * 执行接口，那是把「看一眼文件」变成「在你机器上跑任意命令」。`.svg` 同样
+     * 不在清单里，它是能跑脚本的。
+     *
+     * @param path - 已经过围栏校验的绝对路径。
+     * @param name - 下载/内联时报的文件名。
+     */
+    const streamRaw = async (path: string, name: string): Promise<void> => {
+      const mime = mimeOf(name)
+      if (!canInline(mime)) {
+        sendJson(res, 415, { error: 'not-inlineable', detail: `${name} 不是能直接在浏览器里打开的类型` })
+        return
+      }
+      // 先拿 fd 再决定状态码：stat 与 open 之间那道缝里文件可能被删掉，而那时
+      // 头已经发出去了就改不成 404 了。（同附件那条路由，理由见其注释。）
+      const handle = await open(path, 'r').catch(() => null)
+      if (handle === null) {
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${path}` })
+        return
+      }
+      const info = await handle.stat().catch(() => null)
+      if (info?.isFile() !== true) {
+        await handle.close().catch(() => undefined)
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${path}` })
+        return
+      }
+      res.writeHead(200, {
+        'content-type': mime,
+        'content-length': info.size,
+        'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(name)}`,
+        // 不许浏览器自作主张改判类型 —— 上面那份允许清单就白设了。
+        'x-content-type-options': 'nosniff',
+        // 文件随时在被 Agent 改写，缓存住只会让人看到上一版。
+        'cache-control': 'no-store',
+        ...extraHeaders,
+      })
+      const stream = handle.createReadStream()
+      // 读到一半的 I/O 错误改不了状态码，只能掐断连接 —— 但这个监听必须在：
+      // 少了它，一个读错误就是一次 uncaughtException，整个看板跟着没。
+      stream.on('error', (error: unknown) => {
+        console.error(`[loopkanban] 文件读取中断 ${path}:`, error)
+        res.destroy()
+      })
+      res.on('close', () => { stream.destroy() })
+      stream.pipe(res)
+    }
+
     const projectRoots = (): string[] => storage.listProjects().map((project) => project.repoPath)
+
+    /**
+     * 一张卡够得着的目录：它历次执行的 worktree，加上项目仓库。
+     *
+     * 预览与取原始字节两条路由共用它 —— 围栏只算一遍，才不会有一天走岔。
+     */
+    const reachableRoots = (task: Task): string[] =>
+      [...new Set([...storage.listRuns(task.id).map((run) => run.worktreePath), task.repoPath])]
 
     /**
      * 围栏没放行时的应答。
@@ -364,6 +426,23 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 200, { workspaces: await listWorkspaces(project.repoPath) }, extraHeaders)
+      return
+    }
+
+    /**
+     * 某个文件的原始字节。PDF 与图片走这里 —— 正文接口只回文本。
+     *
+     * 围栏与正文接口完全一样，一个字都不放松：能读到正文的地方才能读到字节。
+     */
+    if (method === 'GET' && pathname === '/api/files/raw') {
+      const roots = projectRoots()
+      const askedRoot = url.searchParams.get('root')?.trim() ?? ''
+      const askedPath = url.searchParams.get('path')?.trim() ?? ''
+      const root = await confine(roots, askedRoot)
+      if (root === null) { await refuse(roots, askedRoot, '只能看已登记项目仓库里的文件'); return }
+      const target = await confine([root], askedPath)
+      if (target === null) { await refuse([root], askedPath, '只能看已登记项目仓库里的文件'); return }
+      await streamRaw(target, basename(target))
       return
     }
 
@@ -1094,22 +1173,46 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * 自己的 worktree，浏览器打不开。够得着的范围只有这张卡历次执行的
      * worktree 与项目仓库，越界一律拒绝（细则见 `preview.ts`）。
      */
+    /**
+     * 同一份文件的原始字节。PDF 与图片走这里 —— 预览接口只回文本与文档树。
+     *
+     * 围栏跟预览接口共用 `resolvePreviewTarget`，不是各写一遍：这两条路
+     * 只要有一天走岔，其中一条就是个能读任意文件的洞。
+     */
+    const rawOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file\/raw$/)
+    if (method === 'GET' && rawOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(rawOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      const found = await resolvePreviewTarget(url.searchParams.get('path') ?? '', reachableRoots(task))
+      if (!found.ok) {
+        sendJson(res, found.reason === 'path-outside-workspace' ? 422 : 404, {
+          error: found.reason, detail: found.detail,
+        })
+        return
+      }
+      // 读的是解完符号链接那条（真正的文件），报的名字用原路径的末段。
+      await streamRaw(found.target.real, basename(found.target.path))
+      return
+    }
+
     const fileOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file$/)
     if (method === 'GET' && fileOf !== null) {
       const taskId = asTaskId(decodeURIComponent(fileOf))
       const task = storage.getTask(taskId)
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
 
-      const roots = [...new Set([
-        ...storage.listRuns(taskId).map((run) => run.worktreePath),
-        task.repoPath,
-      ])]
-      const found = await readFilePreview(url.searchParams.get('path') ?? '', roots)
+      const found = await readFilePreview(url.searchParams.get('path') ?? '', reachableRoots(task))
       if (!found.ok) {
         // 越界是「这个请求本身不成立」，不是「东西不在」——分开报，不然
         // 界面只能笼统地说一句打不开。
         const status = found.reason === 'path-outside-workspace' ? 422
           : found.reason === 'not-text' ? 415
+          // 「这是份 Word 但读不出来」跟「这个格式看不了」不是一回事，
+          // 混成同一个码，界面就只能笼统地说一句打不开。
+          : found.reason === 'bad-document' ? 422
+          : found.reason === 'too-large' ? 413
           : found.reason === 'unreadable' ? 403
           : 404
         sendJson(res, status, { error: found.reason, detail: found.detail })

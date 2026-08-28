@@ -86,11 +86,55 @@ describe('readFilePreview', () => {
     expect(found).toMatchObject({ ok: false, reason: 'no-such-file' })
   })
 
-  it('二进制明确说清楚，不给一屏乱码', async () => {
+  it('看不了的二进制明确说清楚，不给一屏乱码', async () => {
+    const file = join(worktree, 'a.out')
+    await writeFile(file, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01]))
+    const found = await readFilePreview(file, roots())
+    expect(found).toMatchObject({ ok: false, reason: 'not-text' })
+  })
+
+  it('扩展名认不出来、正文里又有 NUL —— 仍然是二进制', async () => {
+    const file = join(worktree, 'blob')
+    await writeFile(file, Buffer.from([0x01, 0x00, 0x02]))
+    expect(await readFilePreview(file, roots())).toMatchObject({ ok: false, reason: 'not-text' })
+  })
+
+  it('图片不当二进制拒绝 —— 报成 image，字节留给 raw 那个口子', async () => {
     const file = join(worktree, 'shot.png')
     await writeFile(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]))
     const found = await readFilePreview(file, roots())
-    expect(found).toMatchObject({ ok: false, reason: 'not-text' })
+    expect(found.ok).toBe(true)
+    if (!found.ok) return
+    expect(found.file.kind).toBe('image')
+    // 字节不进 JSON —— 那正是 raw 口子存在的理由。
+    expect(found.file.content).toBe('')
+    expect(found.file.size).toBe(6)
+  })
+
+  it('PDF 同理：认得它，但正文不走 JSON', async () => {
+    const file = join(worktree, '规格.pdf')
+    await writeFile(file, Buffer.from('%PDF-1.4\n\u0000', 'binary'))
+    const found = await readFilePreview(file, roots())
+    expect(found).toMatchObject({ ok: true, file: { kind: 'pdf', content: '' } })
+  })
+
+  it('Markdown 与代码分得开 —— 前端据此决定给不给"原文/预览"那个开关', async () => {
+    await writeFile(join(worktree, '方案.md'), '# 标题')
+    await writeFile(join(worktree, 'main.ts'), 'export const a = 1')
+    await writeFile(join(worktree, 'Makefile'), 'all:\n\techo hi')
+    expect(await readFilePreview(join(worktree, '方案.md'), roots()))
+      .toMatchObject({ ok: true, file: { kind: 'markdown' } })
+    expect(await readFilePreview(join(worktree, 'main.ts'), roots()))
+      .toMatchObject({ ok: true, file: { kind: 'text' } })
+    // 没有扩展名，但正文是文本 —— 那就是文本。
+    expect(await readFilePreview(join(worktree, 'Makefile'), roots()))
+      .toMatchObject({ ok: true, file: { kind: 'text' } })
+  })
+
+  it('扩展名是 .docx 但读不成文档树 —— 说清楚是这一种，不是"文件不在"', async () => {
+    const file = join(worktree, '需求.docx')
+    await writeFile(file, Buffer.from('这根本不是个 zip'))
+    expect(await readFilePreview(file, roots())).toMatchObject({ ok: false, reason: 'bad-document' })
   })
 
   it('过大的文件只给前一段，并如实说它被截了', async () => {

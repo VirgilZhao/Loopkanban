@@ -1090,11 +1090,18 @@ describe('GET /api/tasks/:id/file', () => {
     expect(await res.json()).toMatchObject({ error: 'path-outside-workspace' })
   })
 
-  it('二进制 415，不给一屏乱码', async () => {
-    await writeFile(join(worktree, 'shot.png'), Buffer.from([0x89, 0x50, 0x00, 0x01]))
-    const res = await ask('t1', 'shot.png')
+  it('看不了的二进制 415，不给一屏乱码', async () => {
+    await writeFile(join(worktree, 'a.out'), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00]))
+    const res = await ask('t1', 'a.out')
     expect(res.status).toBe(415)
     expect(await res.json()).toMatchObject({ error: 'not-text' })
+  })
+
+  it('图片报成 image，字节不进 JSON —— 那是 raw 口子的事', async () => {
+    await writeFile(join(worktree, 'shot.png'), Buffer.from([0x89, 0x50, 0x00, 0x01]))
+    const res = await ask('t1', 'shot.png')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ file: { kind: 'image', content: '' } })
   })
 
   it('读不动的文件 403 —— 说清楚是权限，别让它变成一条 500', async () => {
@@ -1126,6 +1133,67 @@ describe('GET /api/tasks/:id/file', () => {
 
     const res = await ask('t1', join(other, 'plan.md'))
     expect(res.status).toBe(422)
+  })
+})
+
+describe('GET /api/tasks/:id/file/raw', () => {
+  let sandbox: string
+  let repo: string
+  let worktree: string
+
+  const raw = (id: string, path: string) =>
+    api(`/api/tasks/${id}/file/raw?path=${encodeURIComponent(path)}`)
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-raw-'))
+    repo = join(sandbox, 'repo')
+    worktree = join(repo, '.loopkanban', 'worktrees', 't-1')
+    await mkdir(join(worktree, 'docs'), { recursive: true })
+
+    store.createTask(task({ id: 't1', column: 'review', repoPath: repo }))
+    store.createRun({
+      id: asRunId('run-1'), taskId: asTaskId('t1'), provider: 'claude', cliVersion: '2.1.247',
+      worktreePath: worktree, branch: 'task/t1', status: 'completed', startedAt: T0,
+    })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('PDF 与图片的字节直接流出去，类型和 nosniff 都带上', async () => {
+    await writeFile(join(worktree, 'docs', '规格.pdf'), Buffer.from('%PDF-1.4'))
+    const res = await raw('t1', join(worktree, 'docs', '规格.pdf'))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/pdf')
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(res.headers.get('content-disposition')).toContain('inline')
+    expect(await res.text()).toBe('%PDF-1.4')
+  })
+
+  /*
+   * 这一条是这个口子存在的全部前提。
+   *
+   * 这些字节和看板同源：一个能内联渲染的 `.html` 就能拿着 cookie 调本机的
+   * 执行接口 —— 「看一眼文件」会变成「在你机器上跑任意命令」。所以类型是
+   * 一份允许清单，不在里面的一律拒绝，哪怕它就在围栏里躺着。
+   */
+  it('只有图片和 PDF 能内联。HTML 与 SVG 一律拒，它们能跑脚本', async () => {
+    for (const name of ['evil.html', 'icon.svg', 'notes.md']) {
+      await writeFile(join(worktree, name), '<script>fetch("/api/state")</script>')
+      const res = await raw('t1', name)
+      expect(res.status).toBe(415)
+      expect(await res.json()).toMatchObject({ error: 'not-inlineable' })
+    }
+  })
+
+  it('围栏跟预览接口一样严 —— 工作区之外 422', async () => {
+    await writeFile(join(sandbox, 'secret.png'), Buffer.from([0x89, 0x50]))
+    const res = await raw('t1', join(sandbox, 'secret.png'))
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'path-outside-workspace' })
+  })
+
+  it('不存在的文件 404', async () => {
+    expect((await raw('t1', 'docs/没有.pdf')).status).toBe(404)
   })
 })
 

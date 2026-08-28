@@ -15,6 +15,8 @@
 
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { DOCX_MAX_BYTES, readDocx, type RichDoc } from '../docs/docx.ts'
+import { kindByName, type FileKind } from '../docs/kind.ts'
 import { WORKTREE_HOME, currentBranch, listWorktrees } from '../worktree/index.ts'
 
 /**
@@ -62,11 +64,20 @@ export interface FileContent {
   readonly path: string
   readonly relative: string
   readonly size: number
+  /**
+   * 这份文件该怎么看：代码、Markdown、PDF、Word、图片、看不了的二进制。
+   *
+   * 与 `binary` 的关系：`binary` 是它的一个特例（`kind === 'binary'`），
+   * 留着是因为它先于这个字段存在，而"有没有正文"这句话本身仍然有用。
+   */
+  readonly kind: FileKind
   /** 超过 {@link MAX_FILE_BYTES} 时只回前一段。 */
   readonly truncated: boolean
   /** 二进制文件不回正文 —— 把它当 UTF-8 解出来只会是一屏乱码。 */
   readonly binary: boolean
   readonly content: string
+  /** `docx` 专有：翻出来的文档树（见 `docs/docx.ts`）。 */
+  readonly doc?: RichDoc
 }
 
 /**
@@ -240,6 +251,10 @@ export async function listFiles(root: string, path: string): Promise<FileListing
  * 只读前 {@link MAX_FILE_BYTES} 字节，且**先判二进制再解码**：把 PNG 按
  * UTF-8 解出来是一屏替换字符，既没用又很慢。
  *
+ * 呈现方式先按扩展名定（见 `docs/kind.ts`）：PDF 与图片不回正文，字节由
+ * `/api/files/raw` 直接流给浏览器；`.docx` 在这里翻成一棵文档树。扩展名
+ * 认不出来的（`Makefile`、`LICENSE`）才退回按内容判文本还是二进制。
+ *
  * @param root - 工作区根，用来算相对路径。
  * @param path - 文件绝对路径，已经过 {@link confine} 校验。
  */
@@ -248,17 +263,47 @@ export async function readFileText(root: string, path: string): Promise<FileCont
   const info = await stat(here)
   if (!info.isFile()) throw new Error(`${here} 不是文件`)
 
+  const at = { path: here, relative: relative(root, here), size: info.size }
+  const named = kindByName(here)
+
+  // 浏览器自己就会渲染 PDF 和图片，只要给它一个 URL —— 把字节 base64 进
+  // JSON 再解回来，除了凭空胖三分之一什么也没换到。
+  if (named === 'pdf' || named === 'image') {
+    return { ...at, kind: named, truncated: false, binary: false, content: '' }
+  }
+  if (named === 'binary') {
+    return { ...at, kind: 'binary', truncated: false, binary: true, content: '' }
+  }
+
   const handle = await open(here, 'r')
   try {
+    if (named === 'docx') {
+      // ZIP 的中央目录在文件末尾，只读开头取不出任何东西 —— 要么整份读进来，
+      // 要么当成看不了的二进制。
+      // `truncated` 是"给了一部分"的意思。这里一个字都没给，写 true 会让
+      // 界面同时说出"看不了"和"只显示了前一部分"两句自相矛盾的话。
+      if (info.size > DOCX_MAX_BYTES) {
+        return { ...at, kind: 'binary', truncated: false, binary: true, content: '' }
+      }
+      const bytes = Buffer.alloc(info.size)
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
+      const doc = readDocx(bytes.subarray(0, bytesRead))
+      // 读不成文档树（坏了、加密了、或者只是别的东西改了扩展名）：退回
+      // 「看不了」，而不是给一份空文档假装读到了。
+      if (doc === null) return { ...at, kind: 'binary', truncated: false, binary: true, content: '' }
+      return { ...at, kind: 'docx', truncated: doc.truncated, binary: false, content: '', doc }
+    }
+
     const buffer = Buffer.alloc(Math.min(info.size, MAX_FILE_BYTES))
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
     const head = buffer.subarray(0, Math.min(bytesRead, SNIFF_BYTES))
     const binary = head.includes(0)
     return {
-      path: here,
-      relative: relative(root, here),
-      size: info.size,
-      truncated: info.size > MAX_FILE_BYTES,
+      ...at,
+      kind: binary ? 'binary' : named ?? 'text',
+      // 二进制不回正文，所以它也没有"被截断"这回事 —— 文件多大，头上那行
+      // 已经写着了。
+      truncated: !binary && info.size > MAX_FILE_BYTES,
       binary,
       content: binary ? '' : buffer.subarray(0, bytesRead).toString('utf8'),
     }

@@ -294,6 +294,21 @@ export const api = {
 }
 
 /**
+ * 一张卡够得着的某个文件的**原始字节**的地址。`<iframe src>` / `<img src>` 用它。
+ *
+ * PDF 与图片不走 JSON：浏览器自带 PDF 阅读器，图片给个 URL 就完事，绕一圈
+ * base64 只是凭空胖三分之一。围栏和预览接口是同一套，一个字都不松。
+ */
+export function taskFileUrl(taskId: string, path: string): string {
+  return `/api/tasks/${encodeURIComponent(taskId)}/file/raw?path=${encodeURIComponent(path)}`
+}
+
+/** 文件浏览页里同一件事：工作区某个文件的原始字节。 */
+export function workspaceFileUrl(root: string, path: string): string {
+  return `/api/files/raw?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`
+}
+
+/**
  * 附件内容的地址。`<img src>`、下载链接都用它。
  *
  * 同源，token 在 httpOnly cookie 里，浏览器自己会带上 —— 不必也不该把

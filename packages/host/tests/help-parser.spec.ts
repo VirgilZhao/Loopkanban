@@ -29,6 +29,25 @@ describe('parseHelp', () => {
     expect(choicesOf(surface, 'sandbox')).toEqual(['read-only', 'workspace-write', 'danger-full-access'])
   })
 
+  it('从 opencode run 的 help 里解析出 yargs 风格的候选值', () => {
+    const surface = parseHelp(fixture('opencode-run-help.txt'))
+
+    for (const flag of ['format', 'auto', 'dir', 'session', 'model', 'continue', 'agent', 'variant']) {
+      expect(hasFlag(surface, flag), `缺少 --${flag}`).toBe(true)
+    }
+    // 候选值写在描述的下一行，块要跨行收集才拿得到。
+    expect(choicesOf(surface, 'format')).toEqual(['default', 'json'])
+    expect(choicesOf(surface, 'log-level')).toEqual(['DEBUG', 'INFO', 'WARN', 'ERROR'])
+  })
+
+  it('yargs 的 [choices:] 不会被 clap 的 [possible values:] 抢走', () => {
+    // 两者都是方括号，先试 clap 再试 yargs，互不干扰。
+    const clap = parseHelp('  -s, --sandbox <M>  x [possible values: read-only, workspace-write]\n')
+    const yargs = parseHelp('  --format  x  [string] [choices: "default", "json"] [default: "default"]\n')
+    expect(choicesOf(clap, 'sandbox')).toEqual(['read-only', 'workspace-write'])
+    expect(choicesOf(yargs, 'format')).toEqual(['default', 'json'])
+  })
+
   it('识别 codex exec resume 的 --last', () => {
     expect(hasFlag(parseHelp(fixture('codex-exec-resume-help.txt')), 'last')).toBe(true)
   })

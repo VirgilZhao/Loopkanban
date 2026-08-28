@@ -4,7 +4,7 @@
  * 判据：命令行能让**本机安装的** CLI 在独立 worktree 分支上做完一张卡，
  * 全程零 API Key，且能随时 kill 干净。
  *
- *   node --experimental-strip-types packages/host/src/bin/m0.ts [--provider claude|codex]
+ *   node --experimental-strip-types packages/host/src/bin/m0.ts [--provider claude|codex|opencode]
  */
 
 import { randomUUID } from 'node:crypto'
@@ -69,6 +69,9 @@ function describeCaps({ provider, caps }: DetectedAgent): void {
   console.log(`    指定会话id  ${caps.canPinSessionId ? '支持' : '不支持（会话 id 从输出里捞）'}`)
   console.log(`    续跑        ${caps.canResume ? '支持' : '不支持（打回只能重开任务）'}`)
   console.log(`    权限档位    ${caps.permissionTiers.join(', ') || '（未探测到）'}`)
+  if (caps.permissionCaveat !== undefined) {
+    console.log(`    ${C.yellow('权限警示')}    ${C.yellow(caps.permissionCaveat.label)} —— ${caps.permissionCaveat.detail}`)
+  }
 }
 
 async function main(): Promise<void> {
@@ -80,7 +83,7 @@ async function main(): Promise<void> {
   log('探测本机 Agent CLI …')
   const detected = await detectAgents()
   if (detected.length === 0) {
-    console.error(C.red('本机没有找到任何可用的 Agent CLI（claude / codex）。请先安装其一。'))
+    console.error(C.red('本机没有找到任何可用的 Agent CLI（claude / codex / opencode）。请先安装其一。'))
     process.exitCode = 1
     return
   }

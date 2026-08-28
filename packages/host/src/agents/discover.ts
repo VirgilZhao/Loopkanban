@@ -21,6 +21,7 @@ function fallbackDirs(): string[] {
     join(home, '.local', 'bin'),
     join(home, '.claude', 'local'),
     join(home, '.codex', 'bin'),
+    join(home, '.opencode', 'bin'),
     join(home, '.bun', 'bin'),
     join(home, '.volta', 'bin'),
     '/opt/homebrew/bin',

@@ -251,6 +251,8 @@ export class Runner {
     const { storage } = this.options
     const rawLines: string[] = []
     let sessionId = run.agentSessionId
+    /** 上一条已广播的 session 事件负载，用来压掉重复上报。 */
+    let lastSessionKey: string | undefined
     let finishedOk: boolean | undefined
     let diagnostic: string | undefined
 
@@ -272,7 +274,16 @@ export class Runner {
       for await (const line of createInterface({ input: handle.stdout })) {
         rawLines.push(line)
         const event = agent.provider.parseLine(line, agent.caps)
-        if (event.kind === 'session') sessionId = event.sessionId
+        if (event.kind === 'session') {
+          // 有的 CLI 每条事件都带会话 id（opencode 就是），逐条广播会把面板刷满。
+          // 只有当这条 session 事件确实带来了新东西（第一次出现，或多了 model /
+          // apiKeySource 这类字段）才放行 —— 按整条负载比对，而不是只比 id，
+          // 免得把 claude 那条含 apiKeySource 的 init 事件误当重复吞掉。
+          const key = JSON.stringify(event)
+          if (key === lastSessionKey) continue
+          lastSessionKey = key
+          sessionId = event.sessionId
+        }
         if (event.kind === 'finished') {
           finishedOk = event.ok
           diagnostic = event.diagnostic

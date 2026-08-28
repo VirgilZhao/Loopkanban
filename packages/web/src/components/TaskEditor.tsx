@@ -121,9 +121,13 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
               key={agent.id}
               active={draft.preferredProvider === agent.id}
               disabled={locked}
+              title={agent.permissionCaveat?.detail}
               onClick={() => { setDraft((d) => ({ ...d, preferredProvider: agent.id })) }}
             >
               {agent.id}
+              {agent.permissionCaveat === undefined ? null : (
+                <span className="ms-1 !text-sodium">{agent.permissionCaveat.label}</span>
+              )}
             </Chip>
           ))}
         </div>
@@ -208,16 +212,18 @@ function IconButton({ children, onClick, disabled, label, wide }: {
   )
 }
 
-function Chip({ children, active, disabled, onClick }: {
+function Chip({ children, active, disabled, onClick, title }: {
   children: React.ReactNode
   active: boolean
   disabled: boolean
   onClick: () => void
+  title?: string
 }): React.JSX.Element {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
+      title={title}
       className={cn(
         'chrome-label rounded-md border px-2 py-1 transition-colors disabled:opacity-40',
         active ? 'border-sodium !text-sodium' : 'border-hairline hover:border-hairline-bright hover:!text-ink-dim',

@@ -55,6 +55,52 @@ afterEach(async () => {
   store.close()
 })
 
+describe('GET /api/agents', () => {
+  /** 造一个探测结果，只填这条测试关心的字段。 */
+  const detected = (id: string, caveat?: { label: string; detail: string }) => ({
+    provider: { id } as never,
+    caps: {
+      id, bin: `/fake/${id}`, version: '1.0.0',
+      streaming: true, canPinSessionId: false, canResume: true,
+      permissionTiers: ['standard'],
+      ...(caveat === undefined ? {} : { permissionCaveat: caveat }),
+      help: { flags: new Set<string>(), choices: new Map<string, readonly string[]>() },
+    } as never,
+  })
+
+  const CAVEAT = { label: '无沙箱', detail: 'Agent 可以改 worktree 之外的文件。' }
+
+  it('把权限警示如实传给界面 —— 只报档位名字会让人按别家的经验理解它', async () => {
+    const withCaveat = await startServer({
+      storage: store, token: TOKEN, agents: [detected('opencode', CAVEAT)],
+    })
+    try {
+      const body = await fetch(`http://127.0.0.1:${String(withCaveat.port)}/api/agents`, {
+        headers: { cookie: `openkanban_token=${TOKEN}` },
+      }).then((r) => r.json() as Promise<{ agents: { id: string; permissionCaveat?: typeof CAVEAT }[] }>)
+      expect(body.agents[0]?.permissionCaveat).toEqual(CAVEAT)
+    } finally {
+      await withCaveat.close()
+    }
+  })
+
+  it('没有警示的 CLI 不会凭空多出这个字段', async () => {
+    const plain = await startServer({
+      storage: store, token: TOKEN, agents: [detected('codex')],
+    })
+    try {
+      const body = await fetch(`http://127.0.0.1:${String(plain.port)}/api/agents`, {
+        headers: { cookie: `openkanban_token=${TOKEN}` },
+      }).then((r) => r.json() as Promise<{ agents: Record<string, unknown>[] }>)
+      expect(body.agents[0]).not.toHaveProperty('permissionCaveat')
+      // help 原文这类噪音也不该漏出去。
+      expect(body.agents[0]).not.toHaveProperty('help')
+    } finally {
+      await plain.close()
+    }
+  })
+})
+
 describe('监听与访问入口', () => {
   it('只监听回环地址，随机端口', () => {
     expect(server.port).toBeGreaterThan(0)

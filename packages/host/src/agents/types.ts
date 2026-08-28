@@ -4,6 +4,20 @@ import type { HelpSurface } from './help-parser.ts'
 /** OpenKanban 的三档权限，映射到各 CLI 自己的说法。 */
 export type PermissionTier = 'strict' | 'standard' | 'yolo'
 
+/**
+ * 档位名字对不上实际约束时，provider 必须说出来的那句话。
+ *
+ * 同一个 `standard`，codex 会被关进 workspace-write 沙箱，opencode 什么都不关 ——
+ * 只显示档位名字等于让用户以为各家一样严。有话要说的 provider 才填，
+ * UI 有义务如实展示，不能吞掉。
+ */
+export interface PermissionCaveat {
+  /** 短标签，直接显示在 Agent 旁边，例如「无沙箱」。 */
+  readonly label: string
+  /** 展开说明，鼠标悬停时给出完整事实。 */
+  readonly detail: string
+}
+
 /** 一个 CLI 被探测出来的事实。 */
 export interface AgentCaps {
   readonly id: string
@@ -19,6 +33,13 @@ export interface AgentCaps {
   readonly canResume: boolean
   /** 这个版本真正支持的权限档位。UI 只应展示这些。 */
   readonly permissionTiers: readonly PermissionTier[]
+  /**
+   * 档位语义与别家不一致时的警示；不需要提醒的 provider 不填。
+   *
+   * 「支持哪些档位」和「这些档位到底关不关得住」是两件事，后者藏在文档里
+   * 等于没说。见 {@link PermissionCaveat}。
+   */
+  readonly permissionCaveat?: PermissionCaveat
   /** 原始解析结果，供 provider 自己拼参数时查。 */
   readonly help: HelpSurface
   /**

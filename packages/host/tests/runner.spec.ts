@@ -144,7 +144,7 @@ describe('start — 认领与副作用顺序', () => {
     expect(store.getRun(started.run.id)).toMatchObject({ status: 'completed', exitCode: 0 })
   })
 
-  it('CLI 报告失败时卡片进 Failed，并带上结构化诊断', async () => {
+  it('CLI 报告失败时卡片也进 Review，并带上结构化诊断', async () => {
     store.createTask(task({ id: 't1' }))
     const r = runner(scriptedProvider([
       JSON.stringify({ kind: 'finished', ok: false, diagnostic: 'terminal=api_error api_status=401' }),
@@ -154,7 +154,7 @@ describe('start — 认领与副作用顺序', () => {
     if (!started.ok) throw new Error(started.detail)
     await settle(started.run.id)
 
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
     expect(store.getRun(started.run.id)?.diagnostic).toContain('api_status=401')
   })
 
@@ -166,7 +166,7 @@ describe('start — 认领与副作用顺序', () => {
     await settle(started.run.id)
 
     expect(store.getRun(started.run.id)).toMatchObject({ status: 'failed', exitCode: 3 })
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
   })
 
   it('不在 ready 列的卡片认领失败，且不产生任何副作用', async () => {
@@ -258,7 +258,7 @@ describe('评审意见的生命周期', () => {
     if (!started.ok) throw new Error(started.detail)
     await settle(started.run.id)
 
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
     expect(store.getTask(asTaskId('t1'))?.feedback).toBe('连字符后面的字母也要大写')
   })
 
@@ -348,7 +348,7 @@ describe('异常路径的收尾（回归）', () => {
     while (Date.now() < deadline && store.getTask(asTaskId('t1'))?.column === 'running') {
       await new Promise((resolve) => setTimeout(resolve, 30))
     }
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
     expect(store.getRun(started.run.id)?.status).toBe('failed')
     expect(store.getRun(started.run.id)?.diagnostic).toContain('事件流中断')
 
@@ -389,7 +389,7 @@ describe('异常路径的收尾（回归）', () => {
 
     const result = await r.start(asTaskId('t1'))
     expect(result).toMatchObject({ ok: false, reason: 'launch-failed' })
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
 
     const runs = store.listRuns(asTaskId('t1'))
     // 记录可以存在，但绝不能停在 running —— 否则统计与孤儿对账都被带偏。

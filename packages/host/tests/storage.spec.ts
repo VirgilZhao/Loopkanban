@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import {
   acquireLease, asBoardId, asRunId, asTaskId, moveTask, type Task,
 } from '@openkanban/core'
 import { Storage, type Board, type Run } from '../src/storage/index.ts'
+import { MIGRATIONS } from '../src/storage/schema.ts'
 
 const T0 = 1_000_000
 const BOARD = asBoardId('b1')
@@ -272,5 +277,73 @@ describe('stats', () => {
     store.appendEvent(asRunId('a'), 'usage', 'not-an-object', T0)
     expect(() => store.stats()).not.toThrow()
     expect(store.stats().costUsd).toBe(1)
+  })
+})
+
+describe('迁移', () => {
+  /**
+   * 造一个停在 `version` 版本上的真实旧库：只跑前 version 条迁移。
+   * 不抄旧 schema，所以往后再加迁移这个测试也不会悄悄失效。
+   */
+  function seedLegacyDb(file: string, version: number): DatabaseSync {
+    const db = new DatabaseSync(file)
+    db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    for (const sql of MIGRATIONS.slice(0, version)) db.exec(sql)
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(version))
+    return db
+  }
+
+  it('取消 Failed 列：旧库里 failed 的卡就地搬进 review', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v2 = 建表 + feedback 列，也就是 Failed 列还存在的那个世界。
+      const legacy = seedLegacyDb(file, 2)
+      legacy.prepare('INSERT INTO boards VALUES (?, ?, ?, ?, ?)')
+        .run(BOARD, '默认看板', '/repo', 'main', T0)
+      legacy.prepare(`
+        INSERT INTO tasks (
+          id, board_id, revision, column_name, position, subject, description,
+          acceptance_json, repo_path, base_branch, preferred_provider,
+          blocked_by_json, write_scopes_json, lease_json, feedback, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('t1', BOARD, 1, 'failed', 1, '跑挂了的卡', '', '[]', '/repo', 'main',
+        null, '[]', '[]', null, null, T0, T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const migrated = store.getTask(asTaskId('t1'))
+      expect(migrated?.column).toBe('review')
+      // 搬列而已，内容一个字都不该动。
+      expect(migrated?.subject).toBe('跑挂了的卡')
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加归档列：旧库里的卡一律视为未归档', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      const legacy = seedLegacyDb(file, 3)
+      legacy.prepare('INSERT INTO boards VALUES (?, ?, ?, ?, ?)')
+        .run(BOARD, '默认看板', '/repo', 'main', T0)
+      legacy.prepare(`
+        INSERT INTO tasks (
+          id, board_id, revision, column_name, position, subject, description,
+          acceptance_json, repo_path, base_branch, preferred_provider,
+          blocked_by_json, write_scopes_json, lease_json, feedback, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('t1', BOARD, 1, 'ready', 1, '老卡', '', '["有测试"]', '/repo', 'main',
+        null, '[]', '[]', null, null, T0, T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      expect(store.getTask(asTaskId('t1'))?.archivedAt).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

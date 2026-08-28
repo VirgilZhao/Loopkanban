@@ -1,6 +1,6 @@
 /** 与 `@openkanban/core` 对应的线上形状。前端不直接依赖后端包，只依赖这份契约。 */
 
-export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done', 'failed'] as const
+export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
 export type Column = (typeof COLUMNS)[number]
 
 export interface Lease {
@@ -35,6 +35,8 @@ export interface Task {
   writeScopes: string[]
   lease?: Lease
   feedback?: string
+  /** 归档时间；缺席表示没归档。归档正交于 column，不改变卡在哪一列。 */
+  archivedAt?: number
   createdAt: number
   updatedAt: number
 }
@@ -139,7 +141,6 @@ export const COLUMN_META: Record<Column, { label: string; hint: string; lamp: st
   backlog: { label: 'Backlog', hint: '想法池 · Agent 不可领', lamp: 'idle' },
   ready:   { label: 'Ready',   hint: '队列 · 等待认领', lamp: 'idle' },
   running: { label: 'Running', hint: 'Agent 执行中', lamp: 'running' },
-  review:  { label: 'Review',  hint: '等待人工验收', lamp: 'review' },
+  review:  { label: 'Review',  hint: '等待人工验收 · 成败都在这儿', lamp: 'review' },
   done:    { label: 'Done',    hint: '已合并', lamp: 'done' },
-  failed:  { label: 'Failed',  hint: '可改需求后重排', lamp: 'failed' },
 }

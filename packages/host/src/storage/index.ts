@@ -84,6 +84,7 @@ interface TaskRow {
   write_scopes_json: string
   lease_json: string | null
   feedback: string | null
+  archived_at: number | null
   created_at: number
   updated_at: number
 }
@@ -122,6 +123,7 @@ function toTask(row: TaskRow): Task {
     writeScopes: JSON.parse(row.write_scopes_json) as string[],
     ...(lease === undefined ? {} : { lease }),
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
+    ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -193,8 +195,9 @@ export class Storage {
       INSERT INTO tasks (
         id, board_id, revision, column_name, position, subject, description,
         acceptance_json, repo_path, base_branch, preferred_provider,
-        blocked_by_json, write_scopes_json, lease_json, feedback, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        blocked_by_json, write_scopes_json, lease_json, feedback, archived_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.boardId, task.revision, task.column, task.position,
       task.subject, task.description, JSON.stringify(task.acceptance),
@@ -202,6 +205,7 @@ export class Storage {
       JSON.stringify(task.blockedBy), JSON.stringify(task.writeScopes),
       task.lease === undefined ? null : JSON.stringify(task.lease),
       task.feedback ?? null,
+      task.archivedAt ?? null,
       task.createdAt, task.updatedAt,
     )
   }
@@ -233,7 +237,8 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, subject = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?,
-        blocked_by_json = ?, write_scopes_json = ?, lease_json = ?, feedback = ?, updated_at = ?
+        blocked_by_json = ?, write_scopes_json = ?, lease_json = ?, feedback = ?,
+        archived_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.subject, next.description,
@@ -242,6 +247,7 @@ export class Storage {
       JSON.stringify(next.blockedBy), JSON.stringify(next.writeScopes),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.feedback ?? null,
+      next.archivedAt ?? null,
       next.updatedAt,
       next.id, next.revision - 1,
     )

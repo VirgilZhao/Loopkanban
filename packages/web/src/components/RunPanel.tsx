@@ -10,6 +10,7 @@ import { api, ApiError, subscribeRun, type NextRound } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
+import { TestEnvPanel } from '@/components/TestEnvPanel.tsx'
 import { summarize } from '@/lib/events.ts'
 import { useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
@@ -389,6 +390,13 @@ export function RunPanel({
                 </Button>
               )}
             </div>
+          ) : null}
+
+          {/* 一键试跑：在这张卡自己的 worktree 里把改动跑起来。
+              放在验收动作**上面** —— 先验，再判。反过来的话，按钮的顺序是在
+              暗示可以先盖章再验货。 */}
+          {!archived && task.column === 'review' ? (
+            <TestEnvPanel task={task} project={project} onChanged={onChanged} onError={onError} />
           ) : null}
 
           {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}

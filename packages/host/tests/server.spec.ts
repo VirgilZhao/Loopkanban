@@ -9,6 +9,7 @@ import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
 import { AttachmentStore } from '../src/attachments/index.ts'
 import { Storage } from '../src/storage/index.ts'
+import { TestEnvs } from '../src/testenv/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
 const T0 = 1_000_000
@@ -1507,5 +1508,104 @@ describe('静态资源路径（回归）', () => {
       await nested.close()
       await rm(sandbox, { recursive: true, force: true })
     }
+  })
+})
+
+
+describe('一键测试环境', () => {
+  let sandbox: string
+  let envs: TestEnvs
+  let host: RunningServer
+
+  /** 带 cookie 打这台临时 server。 */
+  const call = (path: string, init: RequestInit = {}): Promise<Response> =>
+    fetch(`http://127.0.0.1:${String(host.port)}${path}`, {
+      ...init,
+      headers: { cookie: `loopkanban_token=${TOKEN}`, ...init.headers },
+    })
+
+  async function boot(testCommand?: string): Promise<void> {
+    store.createTask(task({ id: 'te-1', column: 'review' }))
+    store.createRun({
+      id: asRunId('te-run'), taskId: asTaskId('te-1'), provider: 'claude', cliVersion: '1',
+      worktreePath: sandbox, branch: 'task/te-1', status: 'completed', startedAt: T0, endedAt: T0,
+    })
+    if (testCommand !== undefined) store.updateProject(PROJECT, { testCommand })
+    envs = new TestEnvs({ storage: store })
+    host = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50, testEnvs: envs })
+  }
+
+  beforeEach(async () => { sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-http-env-')) })
+
+  afterEach(async () => {
+    await host.close()
+    await rm(sandbox, { recursive: true, force: true })
+  })
+
+  it('没配启动命令时明确拒绝，并说清楚缺的是什么', async () => {
+    await boot()
+    const res = await call('/api/tasks/te-1/testenv', { method: 'POST' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('no-test-command')
+  })
+
+  it('起 → 查 → 停，停完端口就还回去了', async () => {
+    await boot('sleep 30')
+    const started = await call('/api/tasks/te-1/testenv', { method: 'POST' })
+    expect(started.status).toBe(201)
+    const { env } = await started.json() as { env: { port: number; cwd: string } }
+    expect(env.cwd).toBe(sandbox)
+
+    const looked = await (await call('/api/tasks/te-1/testenv')).json() as { env: { status: string } | null }
+    expect(looked.env?.status).not.toBe('exited')
+
+    const stopped = await call('/api/tasks/te-1/testenv', { method: 'DELETE' })
+    expect(stopped.status).toBe(200)
+    expect(envs.view(asTaskId('te-1'))?.status).toBe('exited')
+  })
+
+  it('没起过环境不是错 —— 界面据此显示"未启动"', async () => {
+    await boot('sleep 30')
+    const res = await call('/api/tasks/te-1/testenv')
+    expect(res.status).toBe(200)
+    expect((await res.json() as { env: unknown }).env).toBeNull()
+  })
+
+  it('停一个本来就没有的环境不是错 —— 回 200，不回一个没有 error 字段的 404', async () => {
+    await boot('sleep 30')
+    const res = await call('/api/tasks/te-1/testenv', { method: 'DELETE' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ stopped: false, env: null })
+  })
+
+  it('把卡拖出 Review 就等于判完了，环境跟着收掉', async () => {
+    await boot('sleep 30')
+    await call('/api/tasks/te-1/testenv', { method: 'POST' })
+    expect(envs.view(asTaskId('te-1'))?.status).not.toBe('exited')
+
+    const moved = await call('/api/tasks/te-1/move', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 1, to: 'done' }),
+    })
+    expect(moved.status).toBe(200)
+    expect(envs.view(asTaskId('te-1'))?.stoppedBy).toBe('verdict')
+  })
+
+  it('server 关掉时把环境一起收掉 —— 不然那个进程就没人认识了', async () => {
+    await boot('sleep 30')
+    await call('/api/tasks/te-1/testenv', { method: 'POST' })
+    await host.close()
+    expect(envs.view(asTaskId('te-1'))?.stoppedBy).toBe('shutdown')
+    // afterEach 会再关一次；close 幂等，这里先把它变成一次无害的重复调用。
+    host = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50 })
+  })
+})
+
+describe('测试环境未启用时', () => {
+  it('那几条接口一律 503，界面据此把按钮收起来', async () => {
+    const res = await api('/api/tasks/whatever/testenv', { method: 'POST' })
+    expect(res.status).toBe(503)
+    expect((await res.json() as { error: string }).error).toBe('no-testenv')
   })
 })

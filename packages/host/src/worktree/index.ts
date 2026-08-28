@@ -214,11 +214,16 @@ export type MergeRefusal = 'dirty-worktree' | 'wrong-branch'
  * @param baseBranch - 目标基线分支。
  * @returns 成功，或拒绝的原因。
  */
-export async function mergeBranch(
-  repoPath: string,
-  branch: string,
-  baseBranch: string,
-): Promise<{ ok: true } | { ok: false; reason: MergeRefusal; detail: string }> {
+export type MergeCheck = { ok: true } | { ok: false; reason: MergeRefusal; detail: string }
+
+/**
+ * 合并的前置条件：主工作区干净、且停在基线分支上。**只读，什么都不动。**
+ *
+ * 单独拎出来是为了让调用方能"先问再做"：合并失败的两种原因都出在用户的主
+ * 工作区上，跟这次成果没有一点关系，而它们能在任何副作用发生之前就查出来。
+ * 早查一次，被拒时就不必留下一个已经提交过、甚至已经被收拾过场地的半截状态。
+ */
+export async function mergePreflight(repoPath: string, baseBranch: string): Promise<MergeCheck> {
   if (!(await isClean(repoPath))) {
     return { ok: false, reason: 'dirty-worktree', detail: '主工作区有未提交改动，先处理干净再合并' }
   }
@@ -230,6 +235,17 @@ export async function mergeBranch(
       detail: `主工作区当前在 ${branchNow ?? 'detached HEAD'}，不是基线分支 ${baseBranch}`,
     }
   }
+  return { ok: true }
+}
+
+export async function mergeBranch(
+  repoPath: string,
+  branch: string,
+  baseBranch: string,
+): Promise<MergeCheck> {
+  // 仍然自己查一遍：调用方查过不代表这一刻还成立，而这是真正动手的地方。
+  const ready = await mergePreflight(repoPath, baseBranch)
+  if (!ready.ok) return ready
   await git(repoPath, ['merge', '--no-ff', '-m', `Merge ${branch}`, branch])
   return { ok: true }
 }

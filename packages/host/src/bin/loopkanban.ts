@@ -24,6 +24,7 @@ import { Runner } from '../runner/index.ts'
 import { Scheduler } from '../scheduler/index.ts'
 import { installService, planService, uninstallService, type ServicePlan } from '../service/index.ts'
 import { Storage } from '../storage/index.ts'
+import { TestEnvs } from '../testenv/index.ts'
 import { loadModelCatalog, mergeModels } from '../agents/models-dev.ts'
 import { detectBaseBranch } from '../worktree/index.ts'
 
@@ -284,7 +285,14 @@ async function main(): Promise<void> {
     storage, bus, agents: pool,
     artifactsRoot: join(dir, 'runs'),
   })
-  const review = new Review({ storage })
+  // 一键测试环境。进程只活在这个 host 里，不落库 —— 重启之后它们就不在了。
+  const testEnvs = new TestEnvs({ storage })
+  const review = new Review({
+    storage,
+    // 动这张卡的 worktree 之前，先把跑在里面的测试环境收掉。挂在这儿而不是
+    // 路由上：位置很重要，它得在所有会被拒绝的校验都过完之后才开枪。
+    beforeMutate: (taskId) => testEnvs.stop(taskId, 'verdict'),
+  })
   // 附件的字节落在数据目录里，跟数据库同处一个信任级别。
   const attachments = new AttachmentStore(join(dir, 'attachments'))
   const scheduler = new Scheduler({ storage, runner, agents: pool })
@@ -317,6 +325,7 @@ async function main(): Promise<void> {
     review,
     attachments,
     scheduler,
+    testEnvs,
     bus,
     token,
     ...(webDev === undefined ? {} : { devServer: webDev }),

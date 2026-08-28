@@ -319,6 +319,25 @@ describe('迁移', () => {
   })
 })
 
+describe('项目的启动命令', () => {
+  it('存得住、读得回，空的就是"没配"而不是空串', () => {
+    expect(store.getProject(PROJECT)?.testCommand).toBeUndefined()
+
+    store.updateProject(PROJECT, { testCommand: 'pnpm install && pnpm dev' })
+    expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm install && pnpm dev')
+
+    // 配错了要能退回"没配"，而不是只能塞一条命令进去凑数。
+    store.updateProject(PROJECT, { testCommand: '  ' })
+    expect(store.getProject(PROJECT)?.testCommand).toBeUndefined()
+  })
+
+  it('改名不会顺手把启动命令抹掉 —— 缺席是"这次没提到"', () => {
+    store.updateProject(PROJECT, { testCommand: 'pnpm dev' })
+    store.updateProject(PROJECT, { name: '换个名字' })
+    expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm dev')
+  })
+})
+
 describe('stats', () => {
   beforeEach(() => { store.createTask(task({ id: 't1' })) })
 
@@ -463,6 +482,27 @@ describe('迁移', () => {
 
       const store = Storage.open(file)
       expect(store.getTask(asTaskId('t1'))?.archivedAt).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加启动命令列：旧库里的项目一律视为"还没配"', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // 这条迁移之前的世界：projects 表还没有 test_command 列。
+      const legacy = seedLegacyDb(file, MIGRATIONS.length - 1)
+      legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '老项目', '/repo', 'main', T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const migrated = store.getProject(PROJECT)
+      expect(migrated?.name).toBe('老项目')
+      // 缺席，不是空串 —— 界面据此显示"还没配"并把输入框摆出来。
+      expect(migrated?.testCommand).toBeUndefined()
       store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })

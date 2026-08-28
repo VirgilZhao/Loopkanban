@@ -30,6 +30,12 @@ loopkanban service install   # 确认无误再装
 - **不绑定 CLI 版本**。启动时解析 `--help` 得出能力矩阵，装的是什么版本就用
   什么版本；不支持的能力在界面上直接灰掉，不会等到运行时才失败。
 - **worktree 隔离**。Agent 不碰你的主工作区，跑飞了删掉分支即可。
+- **一键测试环境**。Review 里的卡上有个按钮：把这次改动在**它自己的 worktree
+  里跑起来**，端口由看板分配（命令里写 `{{port}}` 或读 `PORT`），起来了就给你
+  一条 `127.0.0.1` 的链接，日志实时贴在下面。验完关掉面板就行 —— 一分钟后它
+  自己收掉整棵进程树；验收、打回、废弃时立刻收（那一刻 worktree 正要被删）；
+  最长跑 30 分钟。启动命令配在项目上，比如 `pnpm install && pnpm dev` ——
+  worktree 是一份干净的源码副本，装依赖也归这条命令管。
 - **卡片可以带附件**。截图、PDF、Word 拖进卡里，派活时它们会被拷进工作区并在
   TASK.md 里点名交给 CLI —— 说不清楚的需求，给它看。
 - **只监听 `127.0.0.1`**。远程访问走 SSH 端口转发。
@@ -51,7 +57,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 433 个测试
+pnpm test            # 541 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

@@ -142,6 +142,10 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX idx_attachments_task ON task_attachments(task_id, at);
   `,
+  // 一键测试环境的启动命令。**记在项目上而不是卡上**：同一个仓库怎么跑起来是
+  // 仓库的事实，不是某张卡的；每张卡各配一遍，等于让人在验收前先做一次配置。
+  // 留空表示这个项目没配，界面上那个按钮会引导他填一条。
+  `ALTER TABLE projects ADD COLUMN test_command TEXT;`,
 ]
 
 /** 当前代码期望的结构版本。 */

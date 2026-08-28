@@ -27,6 +27,7 @@ import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
 import type { Attachment, Storage } from '../storage/index.ts'
+import type { TestEnvs } from '../testenv/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
@@ -65,6 +66,11 @@ export interface ServerOptions {
   readonly attachments?: AttachmentStore
   /** 自动认领调度器。不给则界面上没有自动驾驶开关。 */
   readonly scheduler?: Scheduler
+  /**
+   * 一键测试环境。不给则那几条接口一律 503 —— 界面据此把按钮收起来，
+   * 而不是给一个按下去永远失败的按钮。
+   */
+  readonly testEnvs?: TestEnvs
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -221,6 +227,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const runner = options.runner
   const review = options.review
   const scheduler = options.scheduler
+  const testEnvs = options.testEnvs
   const attachmentStore = options.attachments
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
   const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
@@ -530,9 +537,16 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const project = storage.getProject(target)
       if (project === null) { sendJson(res, 404, { error: 'project-not-found' }); return }
 
-      const body = await readJsonBody(req) as Partial<{ name: string; baseBranch: string }> | undefined
+      const body = await readJsonBody(req) as
+        (Partial<{ name: string; baseBranch: string; testCommand: string | null }> & Record<string, unknown>)
+        | undefined
       const name = body?.name?.trim()
       const baseBranch = body?.baseBranch?.trim()
+      // 同 PATCH 卡片：缺席是"这次没提到"，显式 null / 空串才是"清空"。
+      // 两者必须分得开，否则改个项目名就会顺手把启动命令抹掉。
+      const testCommand = body !== undefined && 'testCommand' in body
+        ? (body['testCommand'] as string | null) ?? ''
+        : undefined
       if (name !== undefined && name.length === 0) {
         sendJson(res, 400, { error: 'bad-request', detail: '项目名不能为空' })
         return
@@ -555,6 +569,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!storage.updateProject(target, {
         ...(name === undefined ? {} : { name }),
         ...(baseBranch === undefined ? {} : { baseBranch }),
+        ...(testCommand === undefined ? {} : { testCommand }),
       })) {
         sendJson(res, 404, { error: 'project-not-found' })
         return
@@ -591,6 +606,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       // 同 accept / discard / 删卡：状态先落定，不可逆的删除在后。
       // 收拾的只是我们自己建的 worktree 与任务分支，仓库本身一个字不动。
+      for (const task of tasks) await testEnvs?.stop(task.id, 'verdict')
       if (review !== undefined) {
         for (const task of tasks) await review.purge(task, runsOfTask.get(task.id) ?? [])
       }
@@ -701,6 +717,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
             expectedRevision: current.revision, to: 'ready', now: Date.now(),
           })
           if (next.ok) moved = storage.commitTask(next.value)
+          // 打回就是"这一版不要了，接着改"。那个还开着的测试环境跑的是上一版，
+          // 留着它只会让人对着一个马上就要被改掉的页面继续验。
+          if (moved) await testEnvs?.stop(taskId, 'verdict')
         }
         sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)
         return
@@ -964,6 +983,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       // 同 accept / discard：状态先落定，不可逆的删除在后。反过来的话一次
       // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
+      // purge 会删掉 worktree，所以跑在里面的测试环境必须先停。
+      await testEnvs?.stop(task.id, 'verdict')
       if (review !== undefined) await review.purge(task, runs)
       // 附件的字节也跟着卡一起走。库里的记录已经在事务里删掉了。
       if (attachmentStore !== undefined) await attachmentStore.removeTask(task.id)
@@ -999,6 +1020,11 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!storage.commitTask(moved.value)) {
         sendJson(res, 409, { error: 'revision-conflict', detail: '提交时已被他人改动，请重读后重试' })
         return
+      }
+      // 用拖的把卡挪出 Review，跟按下验收按钮是同一个意思：这张卡判完了。
+      // 只认"离开 Review"，列内换位置不动它 —— 那只是在排序。
+      if (task.column === 'review' && moved.value.column !== 'review') {
+        await testEnvs?.stop(task.id, 'verdict')
       }
       sendJson(res, 200, { task: moved.value }, extraHeaders)
       return
@@ -1093,6 +1119,52 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    /*
+     * ── 一键测试环境：起 / 看 / 停 ───────────────────────────
+     *
+     * 起在这张卡自己的 worktree 里，端口由 host 分配。**事件流那条连接就是
+     * 心跳** —— 关掉面板、关掉标签页之后没人再订阅，环境会自己被收掉，
+     * 不必让人记得回来按停止。
+     */
+    const envOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/testenv$/)
+    if (envOf !== null) {
+      if (testEnvs === undefined) { sendJson(res, 503, { error: 'no-testenv' }); return }
+      const taskId = asTaskId(decodeURIComponent(envOf))
+
+      if (method === 'GET') {
+        // 没有环境不是错：界面据此显示"未启动"。给 404 会逼前端把正常状态
+        // 当成异常来处理。
+        sendJson(res, 200, { env: testEnvs.view(taskId) }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const started = await testEnvs.start(taskId)
+        if (!started.ok) {
+          sendJson(res, started.reason === 'task-not-found' ? 404 : 422, {
+            error: started.reason, detail: started.detail,
+          })
+          return
+        }
+        sendJson(res, 201, { env: started.env }, extraHeaders)
+        return
+      }
+      if (method === 'DELETE') {
+        // 本来就没有环境也是 200：那是"它已经停了"这个完全正常的结果，同上面的
+        // GET。回 404 的话前端只能把它当异常抛出来，而 404 的响应体里没有
+        // `error` 字段，界面最后显示的是一句没有对应文案的 "unknown"。
+        const stopped = await testEnvs.stop(taskId, 'manual')
+        sendJson(res, 200, { stopped, env: testEnvs.view(taskId) }, extraHeaders)
+        return
+      }
+    }
+
+    const envStream = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/testenv\/events$/)
+    if (method === 'GET' && envStream !== null) {
+      if (testEnvs === undefined) { sendJson(res, 503, { error: 'no-testenv' }); return }
+      streamTestEnv(req, res, asTaskId(decodeURIComponent(envStream)), testEnvs)
+      return
+    }
+
     // ── 验收：通过 / 废弃 ───────────────────────────────────
     const verdict = /^\/api\/tasks\/([^/]+)\/(accept|discard)$/.exec(pathname)
     if (method === 'POST' && verdict !== null) {
@@ -1100,6 +1172,12 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const taskId = asTaskId(decodeURIComponent(verdict[1] as string))
       const body = await readJsonBody(req) as { merge?: boolean } | undefined
 
+      /*
+       * 测试环境由 Review 自己在动 worktree 之前收掉（`ReviewOptions.beforeMutate`）。
+       * **不在这儿先斩后奏**：验收会因为主工作区脏、卡被人改过这些原因被拒，
+       * 而在门口就把环境杀掉的话，一次被拒的验收会顺手弄没人正在用的试跑环境，
+       * 让他重新装一遍依赖 —— 明明这张卡一个字都没动过。
+       */
       const result = verdict[2] === 'accept'
         ? await review.accept(taskId, body?.merge === true)
         : await review.discard(taskId)
@@ -1256,6 +1334,44 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     return true
   }
 
+  /**
+   * 测试环境的事件流：状态变化与日志。
+   *
+   * 与 Run 的事件流有一处根本不同：**这条连接是有副作用的**。它是"还有人在看"
+   * 的唯一凭据，断开即开始收尸倒计时（见 `TestEnvs.subscribe`）。所以这里
+   * 一定要把 `close` 接好 —— 漏掉的话，那个环境会一直以为有人看着。
+   */
+  function streamTestEnv(
+    req: IncomingMessage,
+    res: ServerResponse,
+    taskId: ReturnType<typeof asTaskId>,
+    envs: TestEnvs,
+  ): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+
+    const lastHeader = req.headers['last-event-id']
+    const lastSeq = typeof lastHeader === 'string' ? Number.parseInt(lastHeader, 10) : 0
+    const from = Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0
+
+    const unsubscribe = envs.subscribe(taskId, from, (event) => {
+      res.write(`id: ${String(event.seq)}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`)
+    })
+
+    const heartbeat = setInterval(() => { res.write(': ping\n\n') }, heartbeatMs)
+    heartbeat.unref()
+    const cleanup = (): void => {
+      clearInterval(heartbeat)
+      unsubscribe()
+    }
+    req.on('close', cleanup)
+    res.on('close', cleanup)
+  }
+
   function streamRunEvents(req: IncomingMessage, res: ServerResponse, id: ReturnType<typeof asRunId>): void {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -1301,10 +1417,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     token,
     port,
     bus,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => { error === undefined ? resolve() : reject(error) })
-      server.closeAllConnections()
-    }),
+    close: async () => {
+      // 端口是全局资源，进程树是真金白银的 CPU。server 一关就没有任何界面能
+      // 再找到这些环境了，留着它们等于制造孤儿。
+      await testEnvs?.stopAll('shutdown')
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { error === undefined ? resolve() : reject(error) })
+        server.closeAllConnections()
+      })
+    },
   }
 }
 

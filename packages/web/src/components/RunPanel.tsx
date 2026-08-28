@@ -136,6 +136,9 @@ export function RunPanel({
       .finally(() => { setBusy(false); setConfirmDelete(false) })
   }
 
+  /** 动作成功就收工回看板；失败留在原地。 */
+  const closeIfOk = (ok: boolean): void => { if (ok) onClose() }
+
   /** 把这张卡派给某个执行器。 */
   const dispatch = (provider: string): void => {
     setBusy(true)
@@ -326,18 +329,20 @@ export function RunPanel({
             ) : null}
 
             <div className="flex flex-wrap items-center gap-2">
+              {/* 验收动作都是"对这张卡的最后一句话"：判完就回看板。
+                  失败留在原地，让人看见错误再决定（同保存、同留言）。 */}
               <Action
                 icon={<GitMerge />} label="通过并合并" tone="primary" busy={busy}
-                onClick={() => { void act(() => api.accept(task.id, true)) }}
+                onClick={() => { void act(() => api.accept(task.id, true)).then(closeIfOk) }}
               />
               <Action
                 icon={<Check />} label="通过" tone="ok" busy={busy}
-                onClick={() => { void act(() => api.accept(task.id, false)) }}
+                onClick={() => { void act(() => api.accept(task.id, false)).then(closeIfOk) }}
               />
               <span className="flex-1" />
               <Action
                 icon={<Trash2 />} label="废弃" tone="fail" busy={busy}
-                onClick={() => { void act(() => api.discard(task.id)) }}
+                onClick={() => { void act(() => api.discard(task.id)).then(closeIfOk) }}
               />
             </div>
 

@@ -4,9 +4,10 @@
  * 为什么不按版本号判断：我们不绑定 CLI 版本，用户装的是什么版本就用什么版本。
  * 版本号到能力的映射表会立刻过期，而 `--help` 是 CLI 自己吐出的当前事实。
  *
- * 支持两种候选值写法：
- *   - commander / yargs 风格（claude）：`(choices: "acceptEdits", "auto", ...)`
+ * 支持三种候选值写法：
+ *   - commander 风格（claude）：`(choices: "acceptEdits", "auto", ...)`
  *   - clap 风格（codex）：`[possible values: read-only, workspace-write, ...]`
+ *   - yargs 风格（opencode）：`[choices: "default", "json"]`
  */
 
 /** 一次 help 解析的结果。 */
@@ -23,6 +24,13 @@ const BLOCK_START = /^\s{0,10}(?:-[A-Za-z0-9], )?--[A-Za-z0-9][\w-]*/
 const LONG_FLAG = /--([A-Za-z0-9][\w-]*)/g
 const COMMANDER_CHOICES = /\(choices:\s*([^)]*)\)/s
 const CLAP_CHOICES = /\[possible values:\s*([^\]]*)\]/s
+/**
+ * yargs 把候选值放在方括号里：`[string] [choices: "default", "json"]`。
+ *
+ * 必须排在 clap 之后再试：两者都是方括号，但 clap 的关键字是
+ * `possible values`，先匹配它不会误伤。
+ */
+const YARGS_CHOICES = /\[choices:\s*([^\]]*)\]/s
 
 /** 把候选值列表拆开并去掉引号与空白。 */
 function splitChoices(raw: string): string[] {
@@ -53,7 +61,9 @@ export function parseHelp(helpText: string): HelpSurface {
   const flush = (): void => {
     if (currentFlags.length === 0) return
     const block = buffer.join('\n')
-    const raw = COMMANDER_CHOICES.exec(block)?.[1] ?? CLAP_CHOICES.exec(block)?.[1]
+    const raw = COMMANDER_CHOICES.exec(block)?.[1]
+      ?? CLAP_CHOICES.exec(block)?.[1]
+      ?? YARGS_CHOICES.exec(block)?.[1]
     if (raw !== undefined) {
       const values = splitChoices(raw)
       // 一个块可能同时声明短参数与长参数，候选值对每个长参数都成立。

@@ -58,6 +58,11 @@ export interface Board {
   createdAt: number
 }
 
+export interface PermissionCaveat {
+  label: string
+  detail: string
+}
+
 export interface Agent {
   id: string
   bin: string
@@ -66,6 +71,8 @@ export interface Agent {
   canPinSessionId: boolean
   canResume: boolean
   permissionTiers: string[]
+  /** 档位语义与别家不一致时的警示；有就必须显示出来。 */
+  permissionCaveat?: PermissionCaveat
 }
 
 export interface Run {

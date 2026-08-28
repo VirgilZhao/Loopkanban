@@ -183,6 +183,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           canPinSessionId: caps.canPinSessionId,
           canResume: caps.canResume,
           permissionTiers: caps.permissionTiers,
+          // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
+          ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
         })),
       }, extraHeaders)
       return

@@ -4,7 +4,7 @@
  *   node --experimental-strip-types packages/host/src/bin/openkanban.ts [--port N] [--no-open]
  *
  * 起本地 server、探测本机 Agent CLI、打开浏览器。全程零 API Key ——
- * 所有模型访问都发生在 claude / codex 子进程内部，用你自己的登录态。
+ * 所有模型访问都发生在 claude / codex / opencode 子进程内部，用你自己的登录态。
  */
 
 import { spawn } from 'node:child_process'
@@ -226,13 +226,15 @@ async function main(): Promise<void> {
   // ── 探测本机 CLI ─────────────────────────────────────────
   const agents = await detectAgents()
   if (agents.length === 0) {
-    console.log(`  ${C.red('✗')} 未探测到任何 Agent CLI（claude / codex）`)
+    console.log(`  ${C.red('✗')} 未探测到任何 Agent CLI（claude / codex / opencode）`)
     console.log(C.dim('    装好其中之一再来，任务需要它们来执行。\n'))
   }
   for (const { provider, caps } of agents) {
     const missing = [
       caps.streaming ? null : '无流式',
       caps.canResume ? null : '无续跑',
+      // 档位语义的警示和「少了个能力」同样重要 —— 它关系到 Agent 能动多少东西。
+      caps.permissionCaveat?.label ?? null,
     ].filter((x) => x !== null)
     console.log(
       `  ${C.green('●')} ${C.bold(provider.id.padEnd(8))} ${caps.version.padEnd(24)}`

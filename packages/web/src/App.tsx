@@ -239,7 +239,11 @@ export default function App(): React.JSX.Element {
           {agents.length === 0 ? (
             <span className="cjk-label !text-lamp-fail">未探测到 Agent CLI</span>
           ) : agents.map((agent) => (
-            <div key={agent.id} className="flex items-center gap-1.5" title={`${agent.bin}\n${agent.version}`}>
+            <div
+              key={agent.id}
+              className="flex items-center gap-1.5"
+              title={[agent.bin, agent.version, agent.permissionCaveat?.detail].filter(Boolean).join('\n')}
+            >
               <span className="lamp" data-state="done" />
               <span className="chrome-label !text-ink-dim">{agent.id}</span>
               <span className="mono text-[10px] text-ink-faint">
@@ -247,6 +251,10 @@ export default function App(): React.JSX.Element {
               </span>
               {agent.canResume ? null : (
                 <span className="cjk-label !text-[10px] !text-lamp-fail">无续跑</span>
+              )}
+              {/* 档位名字对不上实际约束时的警示。悬停看完整说明。 */}
+              {agent.permissionCaveat === undefined ? null : (
+                <span className="cjk-label !text-[10px] !text-sodium">{agent.permissionCaveat.label}</span>
               )}
             </div>
           ))}

@@ -144,6 +144,44 @@ describe('start — 认领与副作用顺序', () => {
     expect(store.getRun(started.run.id)).toMatchObject({ status: 'completed', exitCode: 0 })
   })
 
+  it('同一个会话 id 反复上报只广播一次 —— opencode 每条事件都带 sessionID', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'session', sessionId: 'ses_a' }),
+      JSON.stringify({ kind: 'text', text: '第一步' }),
+      JSON.stringify({ kind: 'session', sessionId: 'ses_a' }),
+      JSON.stringify({ kind: 'session', sessionId: 'ses_a' }),
+      JSON.stringify({ kind: 'text', text: '第二步' }),
+    ]))
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const sessions = store.readEvents(started.run.id).filter((e) => e.kind === 'session')
+    expect(sessions).toHaveLength(1)
+    // 去重不能把会话 id 本身弄丢，续跑还要靠它。
+    expect(store.getRun(started.run.id)?.agentSessionId).toBe('ses_a')
+    // 其它事件一条都不能被顺手吞掉。
+    expect(store.readEvents(started.run.id).filter((e) => e.kind === 'text')).toHaveLength(2)
+  })
+
+  it('带上新字段的 session 事件不算重复 —— claude 的 apiKeySource 不能被吞掉', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'session', sessionId: 'sess-1' }),
+      JSON.stringify({ kind: 'session', sessionId: 'sess-1', apiKeySource: 'none' }),
+    ]))
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const sessions = store.readEvents(started.run.id).filter((e) => e.kind === 'session')
+    expect(sessions).toHaveLength(2)
+    expect(sessions.at(-1)?.payload).toMatchObject({ apiKeySource: 'none' })
+  })
+
   it('CLI 报告失败时卡片进 Failed，并带上结构化诊断', async () => {
     store.createTask(task({ id: 't1' }))
     const r = runner(scriptedProvider([

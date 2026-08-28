@@ -170,6 +170,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                 <button
                   key={agent.id}
                   disabled={busy}
+                  title={agent.permissionCaveat?.detail}
                   onClick={() => {
                     setBusy(true)
                     void api.run(task.id, agent.id)
@@ -186,6 +187,9 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                   )}
                 >
                   <Play className="size-2.5" />{agent.id}
+                  {agent.permissionCaveat === undefined ? null : (
+                    <span className="cjk-label !text-[10px] !text-sodium">{agent.permissionCaveat.label}</span>
+                  )}
                 </button>
               ))}
             </>

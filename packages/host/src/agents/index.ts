@@ -7,9 +7,10 @@
 
 import { claudeCliProvider } from './providers/claude-cli.ts'
 import { codexCliProvider } from './providers/codex-cli.ts'
+import { opencodeCliProvider } from './providers/opencode-cli.ts'
 import type { AgentCaps, AgentProvider } from './types.ts'
 
-export const ALL_PROVIDERS: readonly AgentProvider[] = [claudeCliProvider, codexCliProvider]
+export const ALL_PROVIDERS: readonly AgentProvider[] = [claudeCliProvider, codexCliProvider, opencodeCliProvider]
 
 export interface DetectedAgent {
   readonly provider: AgentProvider
@@ -38,5 +39,5 @@ export async function detectAgents(
   return results.filter((r): r is DetectedAgent => r !== null)
 }
 
-export { claudeCliProvider, codexCliProvider }
+export { claudeCliProvider, codexCliProvider, opencodeCliProvider }
 export * from './types.ts'

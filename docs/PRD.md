@@ -1,6 +1,6 @@
 # OpenKanban 需求规划
 
-> 一个看板：任务可以被**本机已安装的** Claude Code / Codex CLI 「认领」并自动完成，人类只做定义和验收。
+> 一个看板：任务可以被**本机已安装的** Claude Code / Codex / opencode CLI 「认领」并自动完成，人类只做定义和验收。
 > `npx openkanban` 启动本地 server + 浏览器 Web UI。**自主实现，借鉴 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的架构思想，不依赖其代码。**
 
 ---
@@ -12,7 +12,7 @@
 | 运行形态 | `npx openkanban` 启动本地 server + 浏览器 Web UI |
 | Agent 隔离 | git worktree，每任务一分支 |
 | 自动认领调度器 | 核心卖点，优先做 |
-| Agent 执行方式 | 起本机已装的 `claude` / `codex` CLI 子进程 |
+| Agent 执行方式 | 起本机已装的 `claude` / `codex` / `opencode` CLI 子进程 |
 | CLI 版本 | **不绑定**。启动探测本机有哪些、支持哪些能力，有哪个用哪个 |
 | API Key | **全程零 API Key**。所有模型访问都在 CLI 子进程内部，用本机登录态 |
 | **框架** | **自己实现，借鉴 dsh 架构，不依赖 dsh** |
@@ -27,7 +27,7 @@
 
 | # | 借的东西 | 用在哪 |
 |---|---|---|
-| 1 | **Capability seam**：一个能力拆成「服务定义 / 提供方 / 消费方」三个角色，提供方可换 | `AgentProvider`（claude-cli / codex-cli / 将来别的）、`Subprocess`、`Storage` 三条缝。这是「有哪个用哪个」能干净落地的根本原因 |
+| 1 | **Capability seam**：一个能力拆成「服务定义 / 提供方 / 消费方」三个角色，提供方可换 | `AgentProvider`（claude-cli / codex-cli / opencode-cli / 将来别的）、`Subprocess`、`Storage` 三条缝。这是「有哪个用哪个」能干净落地的根本原因 |
 | 2 | **提供方能力描述符 + 派发前检查** | CLI 探测出的能力矩阵在派发前校验；不支持就明确拒绝 |
 | 3 | **Fail loud, no silent degradation**：需要某能力而提供方没有 → 直接报错，绝不「接受了但静默忽略」 | 不支持的权限档位在 UI 上就是灰的，不能等运行时才失败 |
 | 4 | **Append-only 事件日志 + 投影**：日志是唯一真相，UI 从投影渲染，重启靠回放恢复 | `run_event` 表；SSE 用 `seq` 做 `Last-Event-ID` 续传；崩溃后 UI 能完整重建 |
@@ -67,7 +67,7 @@ npx openkanban
        │    └─ SSE       /api/runs/:id/stream
        ├─ 内嵌前端静态资源
        ├─ dispatcher     常驻调度器：从 Ready 派活
-       ├─ agents         AgentProvider seam：探测 + claude-cli / codex-cli
+       ├─ agents         AgentProvider seam：探测 + claude-cli / codex-cli / opencode-cli
        ├─ worktree       git worktree 生命周期
        ├─ subprocess     进程组 spawn + 分级终止
        └─ storage        SQLite
@@ -176,14 +176,14 @@ Backlog ──▶ Ready ──▶ Running ──▶ Review ──▶ Done
 按序尝试，第一个命中即用：
 
 1. 设置页填的显式绝对路径
-2. `PATH` 上的 `claude` / `codex`
-3. 常见安装位置兜底：`~/.local/bin`、`~/.claude/local`、Homebrew 前缀、`~/.codex/bin`
+2. `PATH` 上的 `claude` / `codex` / `opencode`
+3. 常见安装位置兜底：`~/.local/bin`、`~/.claude/local`、Homebrew 前缀、`~/.codex/bin`、`~/.opencode/bin`
 
 > 兜底不是多余：本机的 `claude` 就在 `~/.local/bin/claude`，而 macOS 上从桌面启动器（非终端）拉起的进程往往拿不到这个 `PATH`。
 
 #### 探测能力矩阵
 
-对命中的可执行文件跑 `--version` 和 `--help`，解析出能力，**不做版本号判断**。`--help` 是可解析的：`claude` 打印 `--permission-mode ... (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")`，`codex` 打印 `-s, --sandbox ... [possible values: read-only, workspace-write, danger-full-access]`。
+对命中的可执行文件跑 `--version` 和 `--help`，解析出能力，**不做版本号判断**。`--help` 是可解析的：`claude` 打印 `--permission-mode ... (choices: "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")`，`codex` 打印 `-s, --sandbox ... [possible values: read-only, workspace-write, danger-full-access]`，`opencode` 打印 `--format ... [choices: "default", "json"]`（yargs 又是第三种写法，三种都要认）。
 
 | 能力 | 探测方式 | 有 | 无 → 降级 |
 |---|---|---|---|
@@ -230,11 +230,24 @@ codex exec
 
 续跑：`codex exec resume <session-id> --json -C <worktree> "<评审意见>"`（另有 `codex exec fork <id>`）
 
-**两个都不要加 `--no-session-persistence` / `--ephemeral`** —— 会话必须落盘才能续跑。
+`opencode-cli` 首次执行：
+
+```
+opencode run
+  --format json                          # 事件以 JSONL 打到 stdout
+  --auto                                 # 硬性前提：不给它，写文件的权限询问会把整个 Run 挂死
+  --dir <worktree>
+  [-m <provider/model>]
+  -- <prompt>                            # 位置参数，必须用 -- 隔开
+```
+
+续跑：`opencode run --format json --auto --dir <worktree> -s <session-id> -- "<评审意见>"` —— 和首次执行是**同一条命令**，只多一个 `-s`，所以不像 codex 那样要单独探测续跑的参数面。
+
+**三个都不要加 `--no-session-persistence` / `--ephemeral`** —— 会话必须落盘才能续跑。
 
 ### 3.3 续跑是个真收益
 
-`claude --session-id` 让我们**预先掌握会话 UUID**，不用解析输出去捞；`codex exec resume/fork` 直接按 id 续。Review 里的「打回重做」是真正的会话延续，不是重新拼 prompt。
+`claude --session-id` 让我们**预先掌握会话 UUID**，不用解析输出去捞；`codex exec resume/fork` 直接按 id 续；`opencode run -s <id>` 同理，会话 id 从事件里捞（它的 `sessionID` 每条事件都带）。Review 里的「打回重做」是真正的会话延续，不是重新拼 prompt。
 
 ### 3.4 进程树持有与分级终止（照抄 dsh 手法）
 
@@ -256,14 +269,24 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 
 ### 权限档位映射
 
-| OpenKanban 档位 | `claude` | `codex` |
-|---|---|---|
-| `strict` | `--permission-mode dontAsk` | `-s read-only` |
-| `standard`（默认） | `--permission-mode auto` | `--approve-for-me`（隐含 workspace-write，**不可同时传 `-s`**） |
-| `yolo`（二次确认 + 常驻警告横幅） | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+| OpenKanban 档位 | `claude` | `codex` | `opencode` |
+|---|---|---|---|
+| `strict` | `--permission-mode dontAsk` | `-s read-only` | **不支持**：不上报该档，真被要求时**拒绝执行** |
+| `standard`（默认） | `--permission-mode auto` | `--approve-for-me`（隐含 workspace-write，**不可同时传 `-s`**） | `--auto` |
+| `yolo`（二次确认 + 常驻警告横幅） | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `--auto`（它只有这一个开关） |
 
 > **已实测定稿**：`standard` 必须用 `auto` 而不是 `acceptEdits` —— 后者只放行文件编辑，Bash 一律 `permission_denied`，Agent 写完代码跑不了测试也跑不了构建，等于交出一份没验证过的活。`auto` 走 CLI 原生分类器，语义上才对得上 codex 的 `--approve-for-me`。`manual` 会挂起等人，不适合无人值守。
 > 每档按偏好列表取该版本支持的第一个（`standard` = `auto` → `acceptEdits`），**只显示探测到确实支持的档位**。
+
+> **档位不支持时怎么办，opencode 逼出了一条新规矩。** 另外两家的降级方式是「探测不到就不传这个参数，交给 CLI 自己的默认值」——
+> 对它们成立，因为默认值只会更严。opencode 不行：少了 `--auto` 不是变严格，而是**永远挂住**。于是只剩两条路，要么按
+> `--auto` 跑（`strict` 就成了它的反面，而且没人知道），要么明确失败。**悄悄升权比一次看得见的失败糟糕得多**，所以
+> `buildStart` / `buildResume` 在档位不受支持时直接抛错：卡片进 Failed，诊断里写清楚为什么、该改派给谁。
+>
+> **「支持某档」和「这档到底关不关得住」是两件事。** 同样是 `standard`，codex 被关进 workspace-write 沙箱、claude 走权限
+> 分类器，而 opencode 两者都没有 —— 只报档位名字，用户就会按别家的经验去理解它。为此 `AgentCaps` 多了一个
+> `permissionCaveat`（短标签 + 展开说明），由 provider 声明、经 `/api/agents` 原样传到界面：启动横幅、顶部 CLI 条、
+> 派活按钮、「指定执行器」选择器四处都会显示「无沙箱」并在悬停时给出完整事实。藏在文档里的警告等于没有警告。
 
 ### 其他
 
@@ -311,7 +334,7 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 
 claude 在 `init` 事件里自报 **`apiKeySource: "none"`**，全靠 OAuth 登录态。已做成 `session` 事件字段，不是 `none` 就告警。
 
-### 实测踩出来的四个坑（文档里都没有）
+### 实测踩出来的坑（文档里都没有）
 
 1. **进程树终止只等组长是不够的**。组长可能秒退却留下孙进程（Agent 跑完但 dev server 还在）。算法改为 SIGTERM → 等**整棵树**(grace) → SIGKILL → 再等树。
 2. **claude 的 `subtype: "success"` 可以伴随 `is_error: true`**（鉴权失败时实测到）。完成判定只能看 `is_error`，信 subtype 会把失败误判成成功。
@@ -321,6 +344,16 @@ claude 在 `init` 事件里自报 **`apiKeySource: "none"`**，全靠 OAuth 登�
 第 4 条还暴露出一个工程教训：**stderr 必须有人读**。当时 stderr 设了 `pipe` 却没人消费，一个 exit=2 的硬失败在界面上完全看不见，只看到"10ms 就结束了"。
 
 5. **`claude auth status` 的 `loggedIn: true` 不代表凭证还新鲜**。它只说明磁盘上存在凭证。用桌面版 Claude Code 的用户，宿主在内存里持有并刷新 token，而 CLI 独立跑时用的磁盘凭证可能早已过期且自己刷新不了 —— 表现为 401 `OAuth access token has expired`。**OpenKanban 必须在探测阶段做一次真实的轻量调用来验活，不能只信 `auth status`**，否则用户会看着"已登录"却每张卡都失败。
+
+6. **opencode 不给 `--auto` 会永远挂住**。`opencode run` 在非交互模式下遇到写文件仍然发出权限询问，没人回答就一直等 —— 实测跑满 7 分钟，stdout 一个字节都没有（同一条命令换成只读提示词则 10 秒内正常收尾，证明不是模型慢）。无人值守场景下这是最坏的结局：卡片停在 Running 直到 30 分钟超时。所以 `--auto` 被当成**探测期的硬性前提**，`opencode run --help` 里没有它就当这个 CLI 没装，让它在探测期失败而不是运行期挂死。这也是「不支持的能力当场灰掉」这条原则第一次救了一个**会挂住**而不只是会报错的场景。
+
+7. **opencode 的 `sessionID` 挂在每一条事件上**，没有 codex `thread.started` 那种"会话已建立"的独立事件。照直上报会把面板刷满同一个 id（实测一次三步的任务就重复三次）。去重放在 Runner 而不是 provider 里 —— provider 是跨 Run 共享的单例，存不了状态；而且按**整条负载**比对而不是只比 id，免得把 claude 那条额外带 `apiKeySource` 的 `init` 事件误当重复吞掉。
+
+8. **opencode 成功那条路径上没有终态事件**。最后只有 `step_finish`，完成与否只能靠退出码（失败则有独立的 `error` 事件可给结构化诊断）。Runner 本来就是 `finished ?? exit === 0`，正好接得住 —— 这条 seam 当初留对了。
+
+9. **提示词必须用 `--` 隔开**。opencode 的提示词是 yargs 的位置参数，以 `-` 开头的一行（评审意见里很常见）会被当成参数解析掉。
+
+10. **opencode 没有"工具进行中"事件**。实测 1.18.23 只在 `completed` 时报一次 `tool_use`，跑 12 秒的 `bash` 也一样 —— 不像 codex 有 `item.started`。所以长命令期间事件流是静的，界面上会有一段看着像卡死的空窗。provider 里留了处理进行中状态的分支，但那是前向兼容，今天不会触发。
 
 ### 环境清洗（`agents/env.ts`，P0）
 

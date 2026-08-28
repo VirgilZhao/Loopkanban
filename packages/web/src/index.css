@@ -361,6 +361,14 @@
     box-shadow: 0 0 6px var(--color-lamp-live);
     animation: breathe 1.8s ease-in-out infinite;
   }
+  /* "排着队等执行位"：也在动，但慢半拍、不发光 —— 一眼分得出"已经在跑"
+     和"还在等"。颜色沿用 idle，与看板上 Ready 那列的灯一致。
+     叫 queued 而不是 ready，是因为卡片的灯直接拿列名当 state：占用 ready
+     就等于让看板上每张待命的卡都开始呼吸，那一屏就没有安静的地方了。 */
+  .lamp[data-state="queued"] {
+    background: var(--color-lamp-idle);
+    animation: breathe 3s ease-in-out infinite;
+  }
   .lamp[data-state="done"]   { background: var(--color-lamp-ok); }
   .lamp[data-state="failed"] { background: var(--color-lamp-fail); box-shadow: 0 0 6px var(--color-lamp-fail); }
   .lamp[data-state="review"] { background: var(--color-lamp-review); }

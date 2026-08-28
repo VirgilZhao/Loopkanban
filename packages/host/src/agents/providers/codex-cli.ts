@@ -6,9 +6,11 @@
  * 与 claude 的两点结构性差异：
  *   1. 会话 id 由 codex 自己生成（`thread.started` 事件里的 `thread_id`），
  *      我们无法预先指定，只能从输出里捞 —— 所以 `canPinSessionId` 为 false。
- *   2. 最终回答可以用 `-o` 直接落文件，完成判定不必靠猜进程退出码。
+ *   2. 最终回答可以用 `-o` 直接落文件，完成判定不必靠猜进程退出码 ——
+ *      `turn.completed` 既报这一轮的用量，也就是"这一轮成了"，两件事一起给出。
  */
 
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { SpawnSpec } from '../../subprocess/index.ts'
 import { capture, findExecutable, probeVersion } from '../discover.ts'
@@ -99,11 +101,21 @@ function summarizeChanges(item: unknown): string | undefined {
     .join(', ')
 }
 
+/** 可执行文件名。宿主也要用它来说"我找过谁"，所以是 provider 声明的事实。 */
+const COMMAND = 'codex'
+
+/** `PATH` 之外还该看一眼的地方 —— 见 claude-cli.ts 里同名常量的说明。 */
+const EXTRA_DIRS: readonly string[] = [join(homedir(), '.codex', 'bin')]
+
 export const codexCliProvider: AgentProvider = {
   id: 'codex',
+  command: COMMAND,
+  extraDirs: EXTRA_DIRS,
+  // codex 既没有 models 子命令，help 里也没写候选，只能靠 models.dev 补。
+  catalogSource: 'openai',
 
   async probe(explicitPath?: string): Promise<AgentCaps | null> {
-    const bin = findExecutable('codex', explicitPath)
+    const bin = findExecutable(COMMAND, explicitPath, EXTRA_DIRS)
     if (bin === null) return null
     const version = await probeVersion(bin)
     if (version === null) return null
@@ -152,42 +164,47 @@ export const codexCliProvider: AgentProvider = {
     return { argv, cwd: run.worktreePath, env: scrubEnv(process.env, run.envOverrides).env, stdin: 'ignore', stderr: 'pipe' }
   },
 
-  parseLine(line: string, _caps: AgentCaps): AgentEvent {
+  parseLine(line: string, _caps: AgentCaps): readonly AgentEvent[] {
     const trimmed = line.trim()
-    if (trimmed.length === 0) return { kind: 'raw', line }
+    if (trimmed.length === 0) return [{ kind: 'raw', line }]
 
     let event: unknown
     try {
       event = JSON.parse(trimmed)
     } catch {
-      return { kind: 'raw', line }
+      return [{ kind: 'raw', line }]
     }
 
     const type = str(event, 'type')
 
     if (type === 'thread.started') {
       const sessionId = str(event, 'thread_id')
-      return sessionId === undefined ? { kind: 'raw', line } : { kind: 'session', sessionId }
+      return sessionId === undefined ? [{ kind: 'raw', line }] : [{ kind: 'session', sessionId }]
     }
 
     if (type === 'turn.completed') {
+      // 这一行既是这一轮的用量，也是"这一轮成了"。此前只能二选一，报了用量
+      // 就报不成结束，完成判定于是悄悄退回退出码 —— 而退出码说不清是谁的错。
       const usage = (event as Record<string, unknown>)['usage']
       const inputTokens = num(usage, 'input_tokens')
       const outputTokens = num(usage, 'output_tokens')
-      if (inputTokens !== undefined || outputTokens !== undefined) {
-        return {
-          kind: 'usage',
-          ...(inputTokens === undefined ? {} : { inputTokens }),
-          ...(outputTokens === undefined ? {} : { outputTokens }),
-        }
-      }
-      return { kind: 'finished', ok: true }
+      const reported = inputTokens !== undefined || outputTokens !== undefined
+      return [
+        ...(reported
+          ? [{
+              kind: 'usage' as const,
+              ...(inputTokens === undefined ? {} : { inputTokens }),
+              ...(outputTokens === undefined ? {} : { outputTokens }),
+            }]
+          : []),
+        { kind: 'finished', ok: true },
+      ]
     }
 
     if (type === 'turn.failed' || type === 'error') {
       const error = (event as Record<string, unknown>)['error']
       const message = str(error, 'message') ?? str(event, 'message') ?? str(error, 'type') ?? 'unknown'
-      return { kind: 'finished', ok: false, diagnostic: `codex ${type}: ${message}`.slice(0, DIAGNOSTIC_MAX) }
+      return [{ kind: 'finished', ok: false, diagnostic: `codex ${type}: ${message}`.slice(0, DIAGNOSTIC_MAX) }]
     }
 
     if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
@@ -197,41 +214,27 @@ export const codexCliProvider: AgentProvider = {
       if (itemType === 'agent_message') {
         const text = str(item, 'text')
         return text === undefined || text.trim().length === 0
-          ? { kind: 'raw', line }
-          : { kind: 'text', text }
+          ? [{ kind: 'raw', line }]
+          : [{ kind: 'text', text }]
       }
       // 只在 completed 时上报为工具调用，避免同一个动作被计两次。
       if (itemType !== undefined && type === 'item.completed') {
-        return { kind: 'tool', name: itemType, input: item }
+        return [{ kind: 'tool', name: itemType, input: item }]
       }
       // started 不能直接丢：长命令跑起来后界面会长时间没动静，让人以为卡死。
       // 但也不能把整条 JSON 倒出去，所以压成一行可读的提示。
       if (type === 'item.started' && itemType !== undefined) {
         const command = str(item, 'command')
         const detail = command ?? summarizeChanges(item) ?? ''
-        return {
+        return [{
           kind: 'notice',
           level: 'info',
           text: `${itemType}${detail === '' ? '' : ` ${detail.slice(0, 160)}`}`,
-        }
+        }]
       }
-      return { kind: 'raw', line }
+      return [{ kind: 'raw', line }]
     }
 
-    return { kind: 'raw', line }
+    return [{ kind: 'raw', line }]
   },
-}
-
-/**
- * `turn.completed` 之后并没有独立的「结束」事件，完成信号由调用方结合
- * 进程退出码与 `-o` 落盘的最终回答给出。
- * @param line - 一行 JSONL。
- * @returns 该行是否表示这一轮已正常收尾。
- */
-export function codexTurnCompleted(line: string): boolean {
-  try {
-    return str(JSON.parse(line.trim()), 'type') === 'turn.completed'
-  } catch {
-    return false
-  }
 }

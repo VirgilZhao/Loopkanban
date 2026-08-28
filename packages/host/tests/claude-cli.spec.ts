@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { parseHelp } from '../src/agents/help-parser.ts'
-import { claudeCliProvider, claudeUsage, modelsFromHelp } from '../src/agents/providers/claude-cli.ts'
+import { claudeCliProvider, modelsFromHelp } from '../src/agents/providers/claude-cli.ts'
 import type { AgentCaps, RunContext } from '../src/agents/types.ts'
 
 const fixture = (name: string): string =>
@@ -94,7 +94,7 @@ describe('claudeCliProvider.buildResume', () => {
 describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
   it('只把 system/init 当作会话建立，不重复上报', () => {
     const sessions = streamLines()
-      .map((l) => claudeCliProvider.parseLine(l, CAPS))
+      .flatMap((l) => claudeCliProvider.parseLine(l, CAPS))
       .filter((e) => e.kind === 'session')
     expect(sessions).toHaveLength(1)
     expect(sessions[0]).toMatchObject({
@@ -107,7 +107,7 @@ describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
 
   it('把 API 重试上报为 notice', () => {
     const notices = streamLines()
-      .map((l) => claudeCliProvider.parseLine(l, CAPS))
+      .flatMap((l) => claudeCliProvider.parseLine(l, CAPS))
       .filter((e) => e.kind === 'notice')
     expect(notices).toHaveLength(1)
     expect(notices[0]).toMatchObject({ level: 'warn' })
@@ -116,7 +116,7 @@ describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
 
   it('subtype 仍是 success 但 is_error 为真时，判为失败并给出结构化诊断', () => {
     const finished = streamLines()
-      .map((l) => claudeCliProvider.parseLine(l, CAPS))
+      .flatMap((l) => claudeCliProvider.parseLine(l, CAPS))
       .find((e) => e.kind === 'finished')
     expect(finished).toBeDefined()
     expect(finished).toMatchObject({ ok: false })
@@ -127,7 +127,7 @@ describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
   })
 
   it('把权限拒绝上报为 notice —— 这是「Agent 为什么没干完」的关键线索', () => {
-    const event = claudeCliProvider.parseLine(JSON.stringify({
+    const [event] = claudeCliProvider.parseLine(JSON.stringify({
       type: 'system', subtype: 'permission_denied',
       tool_name: 'Bash', decision_reason_type: 'other',
     }), CAPS)
@@ -136,7 +136,7 @@ describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
   })
 
   it('额度事件上报为 notice，allowed 不当成警告', () => {
-    const event = claudeCliProvider.parseLine(JSON.stringify({
+    const [event] = claudeCliProvider.parseLine(JSON.stringify({
       type: 'rate_limit_event',
       rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', resetsAt: 1787849400 },
     }), CAPS)
@@ -148,12 +148,16 @@ describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
     for (const line of ['{"type":"未知"}', '不是 JSON', '', '{"broken":']) {
       expect(() => claudeCliProvider.parseLine(line, CAPS)).not.toThrow()
     }
-    expect(claudeCliProvider.parseLine('不是 JSON', CAPS).kind).toBe('raw')
+    expect(claudeCliProvider.parseLine('不是 JSON', CAPS)[0]?.kind).toBe('raw')
   })
 
-  it('从 result 行取出用量', () => {
-    const usage = streamLines().map(claudeUsage).find((u) => u !== null)
+  it('result 那一行同时给出用量与结束 —— 成本不该在 finished 手里输掉', () => {
+    const events = streamLines().flatMap((l) => claudeCliProvider.parseLine(l, CAPS))
+    const usage = events.find((e) => e.kind === 'usage')
     expect(usage).toMatchObject({ kind: 'usage', inputTokens: 0, outputTokens: 0, costUsd: 0 })
+    // 用量排在结束之前：消费方看到 finished 往往就开始收尾了。
+    expect(events.findIndex((e) => e.kind === 'usage'))
+      .toBeLessThan(events.findIndex((e) => e.kind === 'finished'))
   })
 })
 

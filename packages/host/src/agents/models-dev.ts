@@ -1,10 +1,13 @@
 /**
  * 从 models.dev 取模型清单，落盘缓存。
  *
- * 为什么需要它：三个 CLI 里只有 opencode 有 `models` 子命令；claude 只能从
- * `--help` 的描述里捞几个别名；codex 两样都没有。models.dev 是一份公开的、
- * 一直在更新的模型目录（opencode 自己也用它），拿它给 claude 与 codex 补上
- * 可选项。
+ * 为什么需要它：有的 CLI 自己就有 `models` 子命令（opencode），有的只能从
+ * `--help` 的描述里捞几个别名（claude），有的两样都没有（codex）。models.dev
+ * 是一份公开的、一直在更新的模型目录（opencode 自己也用它），拿它给后两类
+ * 补上可选项。
+ *
+ * **补给谁不写在这里**：由 provider 自己用 `catalogSource` 声明它在 models.dev
+ * 上叫什么，不填就是不需要补。这个模块因此不认识任何一个具体的 CLI。
  *
  * 三条底线：
  *
@@ -17,16 +20,28 @@
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { ALL_PROVIDERS } from './index.ts'
+import type { AgentProvider } from './types.ts'
 
 export const MODELS_DEV_URL = 'https://models.dev/api.json'
 
 /** 缓存有效期。模型目录以周计地变，一天一次足够，也不至于让人等。 */
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
-/** 我们的 provider id → models.dev 里的 provider 键。 */
-const SOURCE: Readonly<Record<string, string>> = {
-  claude: 'anthropic',
-  codex: 'openai',
+/** provider id → models.dev 里的 provider 键。 */
+export type CatalogSources = Readonly<Record<string, string>>
+
+/**
+ * 从注册表里收集"谁需要外部目录来补模型"。
+ *
+ * @param providers - 备选清单，默认全部已注册的 provider。
+ */
+export function catalogSources(providers: readonly AgentProvider[] = ALL_PROVIDERS): CatalogSources {
+  const sources: Record<string, string> = {}
+  for (const provider of providers) {
+    if (provider.catalogSource !== undefined) sources[provider.id] = provider.catalogSource
+  }
+  return sources
 }
 
 /** provider id → 模型名清单。 */
@@ -54,12 +69,15 @@ function str(value: unknown, key: string): string | undefined {
  * 不让整次加载失败。
  *
  * @param payload - `https://models.dev/api.json` 的内容。
+ * @param sources - provider id → models.dev 的 provider 键，默认从注册表取。
  */
-export function parseCatalog(payload: unknown): Record<string, string[]> {
+export function parseCatalog(
+  payload: unknown, sources: CatalogSources = catalogSources(),
+): Record<string, string[]> {
   const catalog: Record<string, string[]> = {}
   if (typeof payload !== 'object' || payload === null) return catalog
 
-  for (const [ours, theirs] of Object.entries(SOURCE)) {
+  for (const [ours, theirs] of Object.entries(sources)) {
     const provider = (payload as Record<string, unknown>)[theirs]
     const models = typeof provider === 'object' && provider !== null
       ? (provider as Record<string, unknown>)['models']
@@ -86,6 +104,8 @@ export interface LoadOptions {
   readonly cachePath: string
   readonly now?: () => number
   readonly timeoutMs?: number
+  /** provider id → models.dev 的 provider 键，默认从注册表取。 */
+  readonly sources?: CatalogSources
   /** 供测试注入。 */
   readonly fetchImpl?: typeof fetch
 }
@@ -118,7 +138,7 @@ export async function loadModelCatalog(options: LoadOptions): Promise<ModelCatal
       headers: { accept: 'application/json' },
     })
     if (!res.ok) throw new Error(`HTTP ${String(res.status)}`)
-    const catalog = parseCatalog(await res.json())
+    const catalog = parseCatalog(await res.json(), options.sources ?? catalogSources())
     await mkdir(dirname(options.cachePath), { recursive: true })
     await writeFile(options.cachePath, JSON.stringify({ at: now, catalog } satisfies CacheFile), 'utf8')
     return catalog

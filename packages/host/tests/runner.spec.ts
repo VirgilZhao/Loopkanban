@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { AgentPool } from '../src/agents/index.ts'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
@@ -34,6 +35,7 @@ function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvid
   `
   return {
     id: 'scripted',
+    command: 'scripted',
     probe: () => Promise.resolve(null),
     buildStart: (run: RunContext): SpawnSpec => ({
       argv: [process.execPath, '-e', script],
@@ -44,9 +46,9 @@ function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvid
     parseLine: (line: string) => {
       try {
         const event = JSON.parse(line) as Record<string, unknown>
-        return event as never
+        return [event] as never
       } catch {
-        return { kind: 'raw', line }
+        return [{ kind: 'raw', line }]
       }
     },
   }
@@ -72,7 +74,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
 function runner(provider: AgentProvider, patch: Partial<ConstructorParameters<typeof Runner>[0]> = {}): Runner {
   return new Runner({
     storage: store, bus,
-    agents: [{ provider, caps: caps() }],
+    agents: AgentPool.of([{ provider, caps: caps() }]),
     artifactsRoot: join(sandbox, 'artifacts'),
     leaseTtlMs: 60_000,
     timeoutMs: 20_000,
@@ -270,6 +272,90 @@ describe('事件日志与广播', () => {
   })
 })
 
+describe('一行多事件', () => {
+  it('一行拆出的每个事件都要落库 —— 用量不该被同一行里的 finished 挤掉', async () => {
+    store.createTask(task({ id: 't1' }))
+    // 真实形状：claude 的 result 行、codex 的 turn.completed 都是"结束 + 用量"。
+    const provider = scriptedProvider([JSON.stringify({ 结束带用量: true })])
+    const twoInOne: AgentProvider = {
+      ...provider,
+      parseLine: (line) => line.includes('结束带用量')
+        ? [
+            { kind: 'usage', inputTokens: 11, outputTokens: 22, costUsd: 0.25 },
+            { kind: 'finished', ok: true, summary: '干完了' },
+          ]
+        : [{ kind: 'raw', line }],
+    }
+
+    const started = await runner(twoInOne).start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.getRun(started.run.id)?.status).toBe('completed')
+    // 成本此前一路走到这儿就没了：一行只翻译得出一个事件，用量在 finished 手里输掉。
+    expect(store.stats()).toMatchObject({ costUsd: 0.25, inputTokens: 11, outputTokens: 22 })
+  })
+})
+
+describe('完成判定', () => {
+  it('CLI 说成功但进程非零退出 —— 退出码一票否决，不记成 completed', async () => {
+    store.createTask(task({ id: 't1' }))
+    // 真实形状：codex 报完 turn.completed 之后 `-o` 落盘失败、收尾时崩掉。
+    const started = await runner(scriptedProvider(
+      [JSON.stringify({ kind: 'finished', ok: true, summary: '干完了' })], 1,
+    )).start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const run = store.getRun(started.run.id)
+    expect(run?.status).toBe('failed')
+    // 光一个 exit=1 会让人对着"finished ok=true"的事件流发懵，要说清楚。
+    expect(run?.diagnostic).toContain('非零码退出')
+  })
+
+  it('被信号杀掉不算它自己报的错 —— 说过成功的那一轮就是干完了', async () => {
+    store.createTask(task({ id: 't1' }))
+    // tail 里自杀：exitCode 为 null、signal 非空，正是取消与超时那条路。
+    const r = runner(scriptedProvider(
+      [JSON.stringify({ kind: 'finished', ok: true, summary: '干完了' })],
+      0, 'process.kill(process.pid, "SIGKILL")',
+    ))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.getRun(started.run.id)).toMatchObject({ status: 'completed', exitCode: undefined })
+  })
+})
+
+describe('刷新探测结果', () => {
+  it('刷新后装上的 CLI 立刻能派活 —— 池子是活视图，不是开机时的快照', async () => {
+    store.createTask(task({ id: 't1', preferredProvider: 'codex' }))
+    const codex = { ...scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]), id: 'codex' }
+
+    // 开机时本机只有 alpha，卡上却点名要 codex。
+    let found = [{ provider: scriptedProvider([]), caps: caps() }]
+    const pool = new AgentPool(() => Promise.resolve(found), found)
+    const r = new Runner({
+      storage: store, bus, agents: pool,
+      artifactsRoot: join(sandbox, 'artifacts'), leaseTtlMs: 60_000, timeoutMs: 20_000,
+    })
+
+    const before = await r.start(asTaskId('t1'))
+    expect(before).toMatchObject({ ok: false, reason: 'provider-unavailable' })
+
+    // 用户装上了 codex，在界面上点了刷新。
+    found = [...found, { provider: codex, caps: { ...caps(), id: 'codex' } }]
+    await pool.refresh()
+
+    const after = await r.start(asTaskId('t1'))
+    expect(after.ok).toBe(true)
+    if (!after.ok) return
+    expect(after.run.provider).toBe('codex')
+    await settle(after.run.id)
+  })
+})
+
 describe('worktree 隔离', () => {
   it('Agent 在独立分支的 worktree 里干活，主工作区不受影响', async () => {
     store.createTask(task({ id: 't1' }))
@@ -304,7 +390,7 @@ describe('worktree 隔离', () => {
     const other = scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })])
     const second = await new Runner({
       storage: store, bus,
-      agents: [{ provider: { ...other, id: 'codex' }, caps: caps() }],
+      agents: AgentPool.of([{ provider: { ...other, id: 'codex' }, caps: caps() }]),
       artifactsRoot: join(sandbox, 'artifacts'),
       leaseTtlMs: 60_000, timeoutMs: 20_000,
     }).start(asTaskId('t1'))

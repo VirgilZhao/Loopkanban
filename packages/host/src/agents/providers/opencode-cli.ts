@@ -22,6 +22,8 @@
  *      失败则有独立的 `error` 事件，能给出结构化诊断。
  */
 
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { SpawnSpec } from '../../subprocess/index.ts'
 import { capture, findExecutable, probeVersion } from '../discover.ts'
 import { scrubEnv } from '../env.ts'
@@ -170,11 +172,20 @@ async function listModels(bin: string): Promise<string[]> {
   return code === 0 ? parseModelList(stdout) : []
 }
 
+/** 可执行文件名。宿主也要用它来说"我找过谁"，所以是 provider 声明的事实。 */
+const COMMAND = 'opencode'
+
+/** `PATH` 之外还该看一眼的地方 —— 见 claude-cli.ts 里同名常量的说明。 */
+const EXTRA_DIRS: readonly string[] = [join(homedir(), '.opencode', 'bin')]
+
 export const opencodeCliProvider: AgentProvider = {
   id: 'opencode',
+  command: COMMAND,
+  extraDirs: EXTRA_DIRS,
+  // 不填 catalogSource：它自己的 models 子命令比任何外部目录都准（见 listModels）。
 
   async probe(explicitPath?: string): Promise<AgentCaps | null> {
-    const bin = findExecutable('opencode', explicitPath)
+    const bin = findExecutable(COMMAND, explicitPath, EXTRA_DIRS)
     if (bin === null) return null
     const version = await probeVersion(bin)
     if (version === null) return null
@@ -218,16 +229,16 @@ export const opencodeCliProvider: AgentProvider = {
     return spec(run, withPrompt(argv, run.prompt))
   },
 
-  parseLine(line: string, _caps: AgentCaps): AgentEvent {
+  parseLine(line: string, _caps: AgentCaps): readonly AgentEvent[] {
     const trimmed = line.trim()
-    if (trimmed.length === 0) return { kind: 'raw', line }
+    if (trimmed.length === 0) return [{ kind: 'raw', line }]
 
     let event: unknown
     try {
       event = JSON.parse(trimmed)
     } catch {
       // 解析器绝不能成为执行的单点故障：认不出就原样留着。
-      return { kind: 'raw', line }
+      return [{ kind: 'raw', line }]
     }
 
     const type = str(event, 'type')
@@ -237,12 +248,12 @@ export const opencodeCliProvider: AgentProvider = {
       const error = obj(event, 'error')
       const name = str(error, 'name') ?? 'error'
       const message = str(obj(error, 'data'), 'message') ?? str(error, 'message') ?? 'unknown'
-      return { kind: 'finished', ok: false, diagnostic: `opencode ${name}: ${message}`.slice(0, DIAGNOSTIC_MAX) }
+      return [{ kind: 'finished', ok: false, diagnostic: `opencode ${name}: ${message}`.slice(0, DIAGNOSTIC_MAX) }]
     }
 
     if (type === 'text') {
       const text = str(part, 'text')
-      return text === undefined || text.trim().length === 0 ? { kind: 'raw', line } : { kind: 'text', text }
+      return text === undefined || text.trim().length === 0 ? [{ kind: 'raw', line }] : [{ kind: 'text', text }]
     }
 
     if (type === 'tool_use') {
@@ -251,23 +262,23 @@ export const opencodeCliProvider: AgentProvider = {
       const status = str(state, 'status')
       if (status === 'error') {
         const detail = str(state, 'error') ?? str(state, 'output') ?? ''
-        return {
+        return [{
           kind: 'notice',
           level: 'warn',
           text: `工具失败：${name}${detail === '' ? '' : ` ${detail.slice(0, DETAIL_MAX)}`}`,
-        }
+        }]
       }
       // 只在 completed 时算一次工具调用，避免同一个动作被计两次。
-      if (status === 'completed') return { kind: 'tool', name, input: obj(state, 'input') }
+      if (status === 'completed') return [{ kind: 'tool', name, input: obj(state, 'input') }]
       // 实测 1.18.23 只在 completed 时报一次，连跑 12 秒的 bash 也没有中间态
       // ——所以长命令期间界面确实是静的，这点不像 codex 有 item.started。
       // 这个分支是给将来留的：真出现进行中的事件就压成一行提示，而不是丢掉。
       const title = str(state, 'title') ?? ''
-      return {
+      return [{
         kind: 'notice',
         level: 'info',
         text: `${name}${title === '' ? '' : ` ${title.slice(0, DETAIL_MAX)}`}`,
-      }
+      }]
     }
 
     if (type === 'step_finish') {
@@ -277,23 +288,23 @@ export const opencodeCliProvider: AgentProvider = {
       const outputTokens = num(tokens, 'output')
       const costUsd = num(part, 'cost')
       if (inputTokens === undefined && outputTokens === undefined && costUsd === undefined) {
-        return { kind: 'raw', line }
+        return [{ kind: 'raw', line }]
       }
-      return {
+      return [{
         kind: 'usage',
         ...(inputTokens === undefined ? {} : { inputTokens }),
         ...(outputTokens === undefined ? {} : { outputTokens }),
         ...(costUsd === undefined ? {} : { costUsd }),
-      }
+      }]
     }
 
     if (type === 'step_start') {
       // opencode 没有"会话已建立"这种独立事件，sessionID 挂在**每条**事件上。
       // 这里挑 step_start 来上报，重复的那些由 Runner 去重（同一个 id 只报一次）。
       const sessionId = str(event, 'sessionID')
-      return sessionId === undefined ? { kind: 'raw', line } : { kind: 'session', sessionId }
+      return sessionId === undefined ? [{ kind: 'raw', line }] : [{ kind: 'session', sessionId }]
     }
 
-    return { kind: 'raw', line }
+    return [{ kind: 'raw', line }]
   },
 }

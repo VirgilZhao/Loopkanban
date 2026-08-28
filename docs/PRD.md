@@ -98,12 +98,21 @@ Rust 仍然可行，只是对这个项目不再是更优解。
 // 1. Agent 执行器
 interface AgentProvider {
   readonly id: string
+  readonly command: string                        // 可执行文件名
+  readonly extraDirs?: readonly string[]          // PATH 之外这家惯用的安装位置
+  readonly catalogSource?: string                 // 自己列不出模型时，它在 models.dev 上叫什么
   probe(): Promise<AgentCaps | null>              // null = 本机没装
   buildStart(run: RunContext, caps: AgentCaps): SpawnSpec
   buildResume(run: RunContext, caps: AgentCaps, sessionId: string): SpawnSpec | null
-  parseLine(line: string, caps: AgentCaps): AgentEvent | null
+  parseLine(line: string, caps: AgentCaps): readonly AgentEvent[]   // 一行可以是好几件事
 }
+```
 
+接一个新 CLI = 写一个实现 + 在注册表里加一行，**别处不动**。宿主一律按
+provider 声明的事实行事，不按 id 分支；真需要分支时，说明这个接口少了一个
+字段，该补字段。这条约束由 `tests/agents.spec.ts` 看着。
+
+```ts
 // 2. 子进程（将来可换远程 / 容器执行）
 interface Subprocess {
   spawn(spec: SpawnSpec): Promise<ProcessHandle>  // 进程组隔离

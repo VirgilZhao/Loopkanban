@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { parseHelp } from '../src/agents/help-parser.ts'
-import { codexCliProvider, codexTurnCompleted } from '../src/agents/providers/codex-cli.ts'
+import { codexCliProvider } from '../src/agents/providers/codex-cli.ts'
 import type { AgentCaps, RunContext } from '../src/agents/types.ts'
 
 const fixture = (name: string): string =>
@@ -32,7 +32,7 @@ const RUN: RunContext = {
 const lines = (): string[] =>
   fixture('codex-exec-json-success.jsonl').split('\n').filter((l) => l.trim().length > 0)
 
-const events = () => lines().map((l) => codexCliProvider.parseLine(l, CAPS))
+const events = () => lines().flatMap((l) => codexCliProvider.parseLine(l, CAPS))
 
 describe('codexCliProvider.buildStart', () => {
   it('拼出 exec + json + cd + 沙箱 + 最终回答落盘', () => {
@@ -145,12 +145,15 @@ describe('codexCliProvider.parseLine（真实 --json 输出）', () => {
     expect(usage).toMatchObject({ kind: 'usage', inputTokens: 31415, outputTokens: 145 })
   })
 
-  it('turn.completed 是这一轮收尾的信号', () => {
-    expect(lines().filter(codexTurnCompleted)).toHaveLength(1)
+  it('turn.completed 同时是用量与收尾信号 —— 报了用量不该就报不成结束', () => {
+    const all = events()
+    expect(all.filter((e) => e.kind === 'finished')).toEqual([{ kind: 'finished', ok: true }])
+    // 用量排在结束之前：消费方看到 finished 往往就开始收尾了。
+    expect(all.findIndex((e) => e.kind === 'usage')).toBeLessThan(all.findIndex((e) => e.kind === 'finished'))
   })
 
   it('turn.failed 给出结构化诊断', () => {
-    const event = codexCliProvider.parseLine(
+    const [event] = codexCliProvider.parseLine(
       JSON.stringify({ type: 'turn.failed', error: { message: 'context window exceeded' } }),
       CAPS,
     )
@@ -162,6 +165,6 @@ describe('codexCliProvider.parseLine（真实 --json 输出）', () => {
     for (const line of ['{"type":"未来才有的事件"}', '不是 JSON', '', '{"broken":']) {
       expect(() => codexCliProvider.parseLine(line, CAPS)).not.toThrow()
     }
-    expect(codexCliProvider.parseLine('不是 JSON', CAPS).kind).toBe('raw')
+    expect(codexCliProvider.parseLine('不是 JSON', CAPS)[0]?.kind).toBe('raw')
   })
 })

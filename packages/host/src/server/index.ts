@@ -18,7 +18,7 @@ import {
   archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
   unarchiveTask, type Column, type Task, type TaskEdit,
 } from '@loopkanban/core'
-import type { DetectedAgent } from '../agents/index.ts'
+import { AgentPool, type DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
@@ -40,8 +40,13 @@ const DEFAULT_SSE_HEARTBEAT_MS = 20_000
 
 export interface ServerOptions {
   readonly storage: Storage
-  /** 本机探测到的 Agent CLI。UI 只允许在这些里面选。 */
-  readonly agents?: readonly DetectedAgent[]
+  /**
+   * 本机探测到的 Agent CLI。UI 只允许在这些里面选。
+   *
+   * 是**活视图**：`POST /api/agents/refresh` 会让它重新探测一遍，runner 与
+   * scheduler 共用同一个实例，所以刷出来的结果立刻就能派上活。
+   */
+  readonly agents?: AgentPool
   /** 执行器。不给则只能看板，不能真正派活。 */
   readonly runner?: Runner
   /** 验收器。不给则不能通过/打回/废弃。 */
@@ -85,6 +90,29 @@ const MIME: Readonly<Record<string, string>> = {
   '.png': 'image/png',
   '.woff2': 'font/woff2',
   '.ico': 'image/x-icon',
+}
+
+/**
+ * 一个执行器对外的样子：只暴露能力事实，不暴露 help 原文这类噪音。
+ *
+ * GET /api/agents 与刷新用的是同一份映射 —— 两处各写一遍的话，迟早有一处
+ * 少给一个字段，而界面会以为那个能力消失了。
+ */
+function describeAgent({ provider, caps }: DetectedAgent): Record<string, unknown> {
+  return {
+    id: provider.id,
+    bin: caps.bin,
+    version: caps.version,
+    streaming: caps.streaming,
+    canPinSessionId: caps.canPinSessionId,
+    canResume: caps.canResume,
+    canPickModel: caps.canPickModel,
+    // 探测到的模型清单。空数组表示这个 CLI 没法枚举，界面据此退回自由输入。
+    models: caps.models,
+    permissionTiers: caps.permissionTiers,
+    // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
+    ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
+  }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
@@ -140,7 +168,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const token = options.token ?? createToken()
   const bus = options.bus ?? new RunBus()
   const heartbeatMs = options.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS
-  const agents = options.agents ?? []
+  const agents = options.agents ?? AgentPool.of([])
   const runner = options.runner
   const review = options.review
   const scheduler = options.scheduler
@@ -254,23 +282,18 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
     // ── 已探测到的 Agent ────────────────────────────────────
     if (method === 'GET' && pathname === '/api/agents') {
-      // 只暴露能力事实，不暴露 help 原文这类噪音。
-      sendJson(res, 200, {
-        agents: agents.map(({ provider, caps }) => ({
-          id: provider.id,
-          bin: caps.bin,
-          version: caps.version,
-          streaming: caps.streaming,
-          canPinSessionId: caps.canPinSessionId,
-          canResume: caps.canResume,
-          canPickModel: caps.canPickModel,
-          // 探测到的模型清单。空数组表示这个 CLI 没法枚举，界面据此退回自由输入。
-          models: caps.models,
-          permissionTiers: caps.permissionTiers,
-          // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
-          ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
-        })),
-      }, extraHeaders)
+      sendJson(res, 200, { agents: agents.list().map(describeAgent) }, extraHeaders)
+      return
+    }
+
+    /*
+     * 重新探测一遍本机。
+     *
+     * 装了个新 CLI、升级了版本、或者刚 `claude login` 完 —— 这些都不该逼人
+     * 重启看板。POST 而不是 GET：它会真的去起一串子进程，不是一次读取。
+     */
+    if (method === 'POST' && pathname === '/api/agents/refresh') {
+      sendJson(res, 200, { agents: (await agents.refresh()).map(describeAgent) }, extraHeaders)
       return
     }
 

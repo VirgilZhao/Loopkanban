@@ -1,7 +1,7 @@
-# OpenKanban 需求规划
+# LoopKanban 需求规划
 
 > 一个看板：任务可以被**本机已安装的** Claude Code / Codex / opencode CLI 「认领」并自动完成，人类只做定义和验收。
-> `npx openkanban` 启动本地 server + 浏览器 Web UI。**自主实现，借鉴 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的架构思想，不依赖其代码。**
+> `npx loopkanban` 启动本地 server + 浏览器 Web UI。**自主实现，借鉴 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的架构思想，不依赖其代码。**
 
 ---
 
@@ -9,7 +9,7 @@
 
 | 决策 | 选择 |
 |---|---|
-| 运行形态 | `npx openkanban` 启动本地 server + 浏览器 Web UI |
+| 运行形态 | `npx loopkanban` 启动本地 server + 浏览器 Web UI |
 | Agent 隔离 | git worktree，每任务一分支 |
 | 自动认领调度器 | 核心卖点，优先做 |
 | Agent 执行方式 | 起本机已装的 `claude` / `codex` / `opencode` CLI 子进程 |
@@ -60,7 +60,7 @@
 ## 2. 架构
 
 ```
-npx openkanban
+npx loopkanban
    └─ Node 进程
        ├─ HTTP server（127.0.0.1 + 随机端口 + token 鉴权）
        │    ├─ REST      看板 / 任务 / Run
@@ -276,7 +276,7 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 
 ### 权限档位映射
 
-| OpenKanban 档位 | `claude` | `codex` | `opencode` |
+| LoopKanban 档位 | `claude` | `codex` | `opencode` |
 |---|---|---|---|
 | `strict` | `--permission-mode dontAsk` | `-s read-only` | **不支持**：不上报该档，真被要求时**拒绝执行** |
 | `standard`（默认） | `--permission-mode auto` | `--approve-for-me`（隐含 workspace-write，**不可同时传 `-s`**） | `--auto` |
@@ -298,7 +298,7 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 ### 其他
 
 1. **worktree 隔离**，Agent 不在主工作区跑，跑飞了删分支即可
-2. **零 API Key**：OpenKanban 不接受、不存储、不传递任何 key；认证全靠 CLI 自身登录态。`claude` 默认加载 user/project/local 设置，所以你的 `CLAUDE.md`、MCP server、权限配置都生效
+2. **零 API Key**：LoopKanban 不接受、不存储、不传递任何 key；认证全靠 CLI 自身登录态。`claude` 默认加载 user/project/local 设置，所以你的 `CLAUDE.md`、MCP server、权限配置都生效
 3. **禁止自动 push / 开 PR**（v1）
 4. **本地 server 加固（P0）**：只 bind `127.0.0.1`，**绝不 `0.0.0.0`**（远程走 SSH 端口转发）；启动生成一次性随机 token，URL 携带后转 httpOnly cookie，REST 与 SSE 都校验；**校验 `Origin`/`Host` 防 DNS rebinding**（否则任意网页都能打你的 localhost 去起 Agent）；随机端口。这是相对桌面应用多出来的攻击面 —— **一个能执行任意代码的 HTTP 接口**，M1 就要做对
 5. **注入防护**：任务描述、附件、Agent 输出都是数据不是指令
@@ -314,7 +314,7 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 | **M2 验收闭环** ✅ **已完成** | Diff 查看、合并 / 打回 / 废弃；**打回走真续跑**；权限档位定稿 | 完整走完 Ready→Done，打回能接着上次改 |
 | **M3 自动驾驶**（核心卖点）✅ **已完成** | 调度器、租约与超时回收、并发上限、依赖阻塞、孤儿进程与 worktree 对账、崩溃恢复、浏览器通知 | 扔 5 张卡进 Ready，关掉浏览器去睡觉，回来全在 Review |
 | **M4 体验** ✅ **已完成** | 拖拽排序、任务模板、`writeScopes` 冲突预警、Runs 统计与成本 | 日常可用 |
-| **M5 分发** ✅ **已完成** | `npx openkanban` 一行启动；`service install` 装 launchd/systemd 常驻；文档 | 别人能装上用 |
+| **M5 分发** ✅ **已完成** | `npx loopkanban` 一行启动；`service install` 装 launchd/systemd 常驻；文档 | 别人能装上用 |
 
 ---
 
@@ -350,7 +350,7 @@ claude 在 `init` 事件里自报 **`apiKeySource: "none"`**，全靠 OAuth 登�
 
 第 4 条还暴露出一个工程教训：**stderr 必须有人读**。当时 stderr 设了 `pipe` 却没人消费，一个 exit=2 的硬失败在界面上完全看不见，只看到"10ms 就结束了"。
 
-5. **`claude auth status` 的 `loggedIn: true` 不代表凭证还新鲜**。它只说明磁盘上存在凭证。用桌面版 Claude Code 的用户，宿主在内存里持有并刷新 token，而 CLI 独立跑时用的磁盘凭证可能早已过期且自己刷新不了 —— 表现为 401 `OAuth access token has expired`。**OpenKanban 必须在探测阶段做一次真实的轻量调用来验活，不能只信 `auth status`**，否则用户会看着"已登录"却每张卡都失败。
+5. **`claude auth status` 的 `loggedIn: true` 不代表凭证还新鲜**。它只说明磁盘上存在凭证。用桌面版 Claude Code 的用户，宿主在内存里持有并刷新 token，而 CLI 独立跑时用的磁盘凭证可能早已过期且自己刷新不了 —— 表现为 401 `OAuth access token has expired`。**LoopKanban 必须在探测阶段做一次真实的轻量调用来验活，不能只信 `auth status`**，否则用户会看着"已登录"却每张卡都失败。
 
 6. **opencode 不给 `--auto` 会永远挂住**。`opencode run` 在非交互模式下遇到写文件仍然发出权限询问，没人回答就一直等 —— 实测跑满 7 分钟，stdout 一个字节都没有（同一条命令换成只读提示词则 10 秒内正常收尾，证明不是模型慢）。无人值守场景下这是最坏的结局：卡片停在 Running 直到 30 分钟超时。所以 `--auto` 被当成**探测期的硬性前提**，`opencode run --help` 里没有它就当这个 CLI 没装，让它在探测期失败而不是运行期挂死。这也是「不支持的能力当场灰掉」这条原则第一次救了一个**会挂住**而不只是会报错的场景。
 
@@ -367,7 +367,7 @@ claude 在 `init` 事件里自报 **`apiKeySource: "none"`**，全靠 OAuth 登�
 排查上一条时发现宿主环境里带着 20 个父会话变量（`CLAUDE_CODE_SESSION_ID`、`CLAUDE_CODE_MESSAGING_TOKEN`、`CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` …）和 `ANTHROPIC_BASE_URL`。两个后果：
 
 - **凭证泄漏破坏「零 API Key」**：环境里若有 `ANTHROPIC_API_KEY`，子 CLI 会直接拿去用，绕过用户自己的登录态。
-- **父会话身份污染**：OpenKanban 很可能本身就跑在某个 Agent 会话里（开发时就是），子 CLI 会误以为自己是那个会话的子代、鉴权由宿主代管。
+- **父会话身份污染**：LoopKanban 很可能本身就跑在某个 Agent 会话里（开发时就是），子 CLI 会误以为自己是那个会话的子代、鉴权由宿主代管。
 
 因此起子进程前一律清洗：凭证形变量（`API_KEY`/`AUTH_TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`）与父会话前缀（`CLAUDE_CODE_`/`CLAUDE_AGENT_`/`CLAUDECODE`…）全部剔除；端点类变量（`BASE_URL`/`PROXY`）保留但如实上报变量名。**确实要传给子进程的东西只能走显式配置这一条通道。** 上报只报名字，绝不报值。
 
@@ -511,7 +511,7 @@ CAS 冲突面也最小。
 
 ### 改用户机器上的常驻配置，不该在他看不见的地方发生
 
-`openkanban service install` 会写 launchd plist（macOS）或 systemd user unit
+`loopkanban service install` 会写 launchd plist（macOS）或 systemd user unit
 （Linux）——都是**用户级**，不碰系统目录，不需要 sudo。
 
 装和卸都会先把单元文件内容与将要执行的命令原样打印出来，另有

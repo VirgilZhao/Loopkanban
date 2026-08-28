@@ -9,7 +9,7 @@
 
 import { access, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { moveTask, requestChanges, type Task, type TaskId } from '@openkanban/core'
+import { moveTask, requestChanges, type Task, type TaskId } from '@loopkanban/core'
 import type { Run, Storage } from '../storage/index.ts'
 import { commitAll, mergeBranch, removeWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
 

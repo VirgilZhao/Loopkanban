@@ -1,7 +1,7 @@
 /**
- * OpenKanban 启动入口。
+ * LoopKanban 启动入口。
  *
- *   node --experimental-strip-types packages/host/src/bin/openkanban.ts [--port N] [--no-open]
+ *   node --experimental-strip-types packages/host/src/bin/loopkanban.ts [--port N] [--no-open]
  *
  * 起本地 server、探测本机 Agent CLI、打开浏览器。全程零 API Key ——
  * 所有模型访问都发生在 claude / codex / opencode 子进程内部，用你自己的登录态。
@@ -13,7 +13,7 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { asBoardId, asTaskId, type Task } from '@openkanban/core'
+import { asBoardId, asTaskId, type Task } from '@loopkanban/core'
 import { createToken } from '../server/auth.ts'
 import { detectAgents } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
@@ -28,8 +28,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 
 /**
  * 前端产物目录。两种布局都要认：
- *   - 开发时  packages/host/src/bin/openkanban.ts → packages/web/dist
- *   - 发布后  dist/openkanban.js                  → dist/web
+ *   - 开发时  packages/host/src/bin/loopkanban.ts → packages/web/dist
+ *   - 发布后  dist/loopkanban.js                  → dist/web
  */
 function staticDir(): string | undefined {
   for (const candidate of [resolve(HERE, 'web'), resolve(HERE, '../../../web/dist')]) {
@@ -55,9 +55,9 @@ function flag(name: string): string | undefined {
 /** 数据目录，遵循各平台惯例。 */
 function dataDir(): string {
   const home = homedir()
-  if (process.platform === 'darwin') return join(home, 'Library', 'Application Support', 'openkanban')
-  if (process.platform === 'win32') return join(process.env['APPDATA'] ?? home, 'openkanban')
-  return join(process.env['XDG_DATA_HOME'] ?? join(home, '.local', 'share'), 'openkanban')
+  if (process.platform === 'darwin') return join(home, 'Library', 'Application Support', 'loopkanban')
+  if (process.platform === 'win32') return join(process.env['APPDATA'] ?? home, 'loopkanban')
+  return join(process.env['XDG_DATA_HOME'] ?? join(home, '.local', 'share'), 'loopkanban')
 }
 
 /**
@@ -141,14 +141,15 @@ function openBrowser(url: string): void {
 
 const USAGE = `
 用法：
-  openkanban [选项]                     起服务并打开浏览器
-  openkanban service <子命令>           开机自启
+  loopkanban [选项]                     起服务并打开浏览器
+  loopkanban service <子命令>           开机自启
 
 选项：
   --port <n>        监听端口，默认随机
   --data <dir>      数据目录，默认按平台惯例
   --no-open         不自动打开浏览器
   --new-token       轮换访问 token
+  --web-dev <url>   前端交给该地址的 vite dev server（pnpm run dev 会自动带上）
   --help            显示本帮助
 
 service 子命令：
@@ -157,7 +158,7 @@ service 子命令：
   uninstall         停用并删除
 `
 
-/** 处理 `openkanban service …`；返回 true 表示这次调用已经处理完了。 */
+/** 处理 `loopkanban service …`；返回 true 表示这次调用已经处理完了。 */
 async function handleService(): Promise<boolean> {
   const at = process.argv.indexOf('service')
   if (at < 0) return false
@@ -187,7 +188,7 @@ async function handleService(): Promise<boolean> {
   for (const command of commands) console.log(C.dim(`    ${command.join(' ')}`))
 
   if (sub === 'print') {
-    console.log(C.dim('\n  以上只是预览。`openkanban service install` 才会真正写入。\n'))
+    console.log(C.dim('\n  以上只是预览。`loopkanban service install` 才会真正写入。\n'))
     return true
   }
   if (sub !== 'install' && sub !== 'uninstall') {
@@ -218,10 +219,10 @@ async function main(): Promise<void> {
   // --data 让多个看板/临时试验各用各的库，不污染日常数据。
   const dir = flag('data') ?? dataDir()
   await mkdir(dir, { recursive: true })
-  const storage = Storage.open(join(dir, 'openkanban.db'))
+  const storage = Storage.open(join(dir, 'loopkanban.db'))
   seed(storage, process.cwd())
 
-  console.log(C.bold('\n  OPENKANBAN') + C.dim('  agent dispatch\n'))
+  console.log(C.bold('\n  LOOPKANBAN') + C.dim('  agent dispatch\n'))
 
   // ── 探测本机 CLI ─────────────────────────────────────────
   const agents = await detectAgents()
@@ -267,10 +268,13 @@ async function main(): Promise<void> {
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
   const token = await resolveToken(dir, process.argv.includes('--new-token'))
-  const assets = staticDir()
-  if (assets === undefined) {
+  // --web-dev 把前端交给 vite（见 scripts/dev.ts）。此时不碰 packages/web/dist ——
+  // 那份产物只在构建时更新，开发时读它就是在看一个过期的界面。
+  const webDev = flag('web-dev')
+  const assets = webDev === undefined ? staticDir() : undefined
+  if (webDev === undefined && assets === undefined) {
     console.log(C.red('  ✗ 找不到前端产物，本次只提供 API。'))
-    console.log(C.dim('    从源码运行时先跑 `pnpm run build:web`。\n'))
+    console.log(C.dim('    从源码运行时用 `pnpm run dev`，或先跑 `pnpm run build:web`。\n'))
   }
   const server = await startServer({
     storage,
@@ -280,14 +284,16 @@ async function main(): Promise<void> {
     scheduler,
     bus,
     token,
+    ...(webDev === undefined ? {} : { devServer: webDev }),
     ...(assets === undefined ? {} : { staticDir: assets }),
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })
 
   console.log(`\n  ${C.amber('▸')} ${server.url}`)
+  if (webDev !== undefined) console.log(C.dim(`    前端来自 ${webDev}，改 packages/web/src 会热更新。`))
   console.log(C.dim('    只监听 127.0.0.1。远程访问请用 SSH 端口转发，不要改成 0.0.0.0。'))
   console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
-  console.log(C.dim(`    数据 ${join(dir, 'openkanban.db')}`))
+  console.log(C.dim(`    数据 ${join(dir, 'loopkanban.db')}`))
   console.log(scheduler.settings.autopilot
     ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 并发 ${String(scheduler.settings.maxConcurrent)}`)}\n`
     : C.dim('    自动认领当前关闭，可在界面右上角打开。\n'))

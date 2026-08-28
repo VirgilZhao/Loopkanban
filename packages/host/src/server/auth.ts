@@ -21,7 +21,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 
 /** cookie 名。带 `__Host-` 前缀在 https 下才有意义，本地 http 用普通名。 */
-export const TOKEN_COOKIE = 'openkanban_token'
+export const TOKEN_COOKIE = 'loopkanban_token'
 
 /** 只有这两个主机名被认为是"本机"。 */
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
@@ -81,6 +81,15 @@ function isLocalHost(hostname: string): boolean {
 export interface GuardConfig {
   readonly token: string
   readonly port: number
+  /**
+   * 只认 cookie 里的 token，无视 URL 上的同名参数。
+   *
+   * 给 WebSocket 升级用：vite 的 HMR 客户端会往自己的 ws URL 上挂一个
+   * **同样叫 `token`** 的握手凭据，两边撞名，按 query 优先取到的是它的那份。
+   * 升级请求一定来自已经加载好的页面，cookie 必然在，所以直接不看 query ——
+   * 这不放松任何一道关，只是换个地方取同一个 token。
+   */
+  readonly cookieOnly?: boolean
 }
 
 /**
@@ -114,9 +123,10 @@ export function guardRequest(req: IncomingMessage, config: GuardConfig): GuardRe
   }
 
   // ── 关卡 3：token ────────────────────────────────────────────
-  const url = new URL(req.url ?? '/', `http://${host}`)
-  const supplied = url.searchParams.get('token')
-    ?? readCookie(req.headers.cookie, TOKEN_COOKIE)
+  const fromQuery = config.cookieOnly === true
+    ? null
+    : new URL(req.url ?? '/', `http://${host}`).searchParams.get('token')
+  const supplied = fromQuery ?? readCookie(req.headers.cookie, TOKEN_COOKIE)
   if (supplied === null || supplied === undefined || supplied.length === 0) {
     return deny(401, 'missing-token', '缺少访问 token')
   }

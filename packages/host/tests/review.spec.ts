@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
+import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { Review } from '../src/review/index.ts'
 import { Storage } from '../src/storage/index.ts'
@@ -43,7 +43,7 @@ async function reviewable(id = 't1'): Promise<{ worktreePath: string; branch: st
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'openkanban-review-'))
+  sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-review-'))
   repo = join(sandbox, 'repo')
   await capture(['git', 'init', '-q', '-b', 'main', repo])
   for (const args of [['config', 'user.email', 't@t'], ['config', 'user.name', 'T']]) await git(repo, ...args)

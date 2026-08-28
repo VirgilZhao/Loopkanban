@@ -3,7 +3,7 @@
  *
  * 认证与配置完全交给 CLI 自身：我们不省略 `--setting-sources`，所以用户的
  * user/project/local 设置（CLAUDE.md、MCP server、权限）都照常生效。
- * OpenKanban 不接受、不存储、不传递任何 API Key。
+ * LoopKanban 不接受、不存储、不传递任何 API Key。
  */
 
 import { join } from 'node:path'
@@ -14,7 +14,7 @@ import { choicesOf, hasFlag, parseHelp } from '../help-parser.ts'
 import type { AgentCaps, AgentEvent, AgentProvider, PermissionTier, RunContext } from '../types.ts'
 
 /**
- * OpenKanban 三档 → claude 的 `--permission-mode` 取值。
+ * LoopKanban 三档 → claude 的 `--permission-mode` 取值。
  *
  * standard 用 `auto` 而不是 `acceptEdits`：实测 `acceptEdits` 只放行文件
  * 编辑，Bash 一律 `permission_denied`，Agent 写完代码跑不了测试也跑不了

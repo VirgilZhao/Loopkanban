@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { request as httpRequest } from 'node:http'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
-import { connect } from 'node:net'
+import { connect, type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
+import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { Storage } from '../src/storage/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
@@ -28,7 +28,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
 const api = (path: string, init: RequestInit = {}): Promise<Response> =>
   fetch(`http://127.0.0.1:${String(server.port)}${path}`, {
     ...init,
-    headers: { cookie: `openkanban_token=${TOKEN}`, ...init.headers },
+    headers: { cookie: `loopkanban_token=${TOKEN}`, ...init.headers },
   })
 
 /** 用原始 http 客户端发请求，以便伪造 Host 头（fetch 不允许覆盖）。 */
@@ -76,7 +76,7 @@ describe('GET /api/agents', () => {
     })
     try {
       const body = await fetch(`http://127.0.0.1:${String(withCaveat.port)}/api/agents`, {
-        headers: { cookie: `openkanban_token=${TOKEN}` },
+        headers: { cookie: `loopkanban_token=${TOKEN}` },
       }).then((r) => r.json() as Promise<{ agents: { id: string; permissionCaveat?: typeof CAVEAT }[] }>)
       expect(body.agents[0]?.permissionCaveat).toEqual(CAVEAT)
     } finally {
@@ -90,7 +90,7 @@ describe('GET /api/agents', () => {
     })
     try {
       const body = await fetch(`http://127.0.0.1:${String(plain.port)}/api/agents`, {
-        headers: { cookie: `openkanban_token=${TOKEN}` },
+        headers: { cookie: `loopkanban_token=${TOKEN}` },
       }).then((r) => r.json() as Promise<{ agents: Record<string, unknown>[] }>)
       expect(body.agents[0]).not.toHaveProperty('permissionCaveat')
       // help 原文这类噪音也不该漏出去。
@@ -124,21 +124,21 @@ describe('安全守卫', () => {
   it('token 错误 401', async () => {
     expect(await rawRequest({
       host: `127.0.0.1:${String(server.port)}`,
-      cookie: 'openkanban_token=wrong',
+      cookie: 'loopkanban_token=wrong',
     })).toBe(401)
   })
 
   it('伪造的 Host 被拒 —— 即使 token 正确（DNS rebinding 防线）', async () => {
     expect(await rawRequest({
       host: 'evil.com',
-      cookie: `openkanban_token=${TOKEN}`,
+      cookie: `loopkanban_token=${TOKEN}`,
     })).toBe(403)
   })
 
   it('跨源 Origin 被拒', async () => {
     expect(await rawRequest({
       host: `127.0.0.1:${String(server.port)}`,
-      cookie: `openkanban_token=${TOKEN}`,
+      cookie: `loopkanban_token=${TOKEN}`,
       origin: 'https://evil.com',
     })).toBe(403)
   })
@@ -379,7 +379,7 @@ describe('SSE 事件流', () => {
     for (let i = 1; i <= 5; i += 1) store.appendEvent(RUN, 'text', { i }, T0 + i)
 
     const res = await fetch(`http://127.0.0.1:${String(server.port)}/api/runs/run-1/events`, {
-      headers: { cookie: `openkanban_token=${TOKEN}`, 'last-event-id': '3' },
+      headers: { cookie: `loopkanban_token=${TOKEN}`, 'last-event-id': '3' },
     })
     const text = await readEvents(res, 2)
     expect(text).toContain('id: 4')
@@ -409,7 +409,7 @@ describe('静态资源托管', () => {
 
   beforeEach(async () => {
     // 自建固件：测试不能依赖机器上恰好存在的文件。
-    const sandbox = await mkdtemp(join(tmpdir(), 'openkanban-static-'))
+    const sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-static-'))
     root = join(sandbox, 'dist')
     outside = join(sandbox, 'secret.txt')
     await mkdir(join(root, 'assets'), { recursive: true })
@@ -430,7 +430,7 @@ describe('静态资源托管', () => {
 
   const get = (path: string): Promise<Response> =>
     fetch(`http://127.0.0.1:${String(staticServer.port)}${path}`, {
-      headers: { cookie: `openkanban_token=${TOKEN}` },
+      headers: { cookie: `loopkanban_token=${TOKEN}` },
     })
 
   it('根路径返回 index.html', async () => {
@@ -452,7 +452,7 @@ describe('静态资源托管', () => {
       const socket = connect(staticServer.port, '127.0.0.1', () => {
         socket.write(
           `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${String(staticServer.port)}\r\n`
-          + `Cookie: openkanban_token=${TOKEN}\r\nConnection: close\r\n\r\n`,
+          + `Cookie: loopkanban_token=${TOKEN}\r\nConnection: close\r\n\r\n`,
         )
       })
       let buffer = ''
@@ -508,9 +508,111 @@ describe('错误处理（回归）', () => {
   })
 })
 
+describe('开发模式：把前端转发给 vite', () => {
+  let upstream: ReturnType<typeof createHttpServer>
+  let upstreamPort: number
+  let dev: RunningServer
+  /** upstream 收到的请求，用来断言转发的忠实程度。 */
+  let seen: { url: string; host: string | undefined }[]
+
+  beforeEach(async () => {
+    seen = []
+    upstream = createHttpServer((req, res) => {
+      seen.push({ url: req.url ?? '', host: req.headers.host })
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(`<!doctype html>vite:${req.url ?? ''}`)
+    })
+    // 假装自己是 vite 的 HMR ws server：认下升级，回一句能被断言的内容。
+    upstream.on('upgrade', (req, socket) => {
+      seen.push({ url: req.url ?? '', host: req.headers.host })
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
+        + `Connection: Upgrade\r\nx-echo-url: ${req.url ?? ''}\r\n\r\n`,
+      )
+      socket.end()
+    })
+    await new Promise<void>((resolve) => { upstream.listen(0, '127.0.0.1', resolve) })
+    upstreamPort = (upstream.address() as AddressInfo).port
+
+    dev = await startServer({
+      storage: store, token: TOKEN, sseHeartbeatMs: 50,
+      devServer: `http://127.0.0.1:${String(upstreamPort)}`,
+    })
+  })
+
+  afterEach(async () => {
+    await dev.close()
+    await new Promise<void>((resolve) => { upstream.close(() => { resolve() }) })
+  })
+
+  const get = (path: string): Promise<Response> =>
+    fetch(`http://127.0.0.1:${String(dev.port)}${path}`, {
+      headers: { cookie: `loopkanban_token=${TOKEN}` },
+    })
+
+  it('非 /api 的请求原样转给 vite', async () => {
+    const res = await get('/src/main.tsx')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('vite:/src/main.tsx')
+    expect(seen[0]?.host).toBe(`127.0.0.1:${String(upstreamPort)}`)
+  })
+
+  it('/api 仍由 host 自己处理，不会被转走', async () => {
+    const res = await get('/api/state')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toHaveProperty('boards')
+    expect(seen).toHaveLength(0)
+  })
+
+  it('vite 挂了时说清楚是哪一环，而不是给一个白页', async () => {
+    await new Promise<void>((resolve) => { upstream.close(() => { resolve() }) })
+    const res = await get('/')
+    expect(res.status).toBe(502)
+    expect(await res.json()).toMatchObject({ error: 'dev-server-unreachable' })
+  })
+
+  /**
+   * 发一个 WebSocket 升级请求，返回 upstream 回声出来的路径。
+   * @param cookie - 是否带上 token cookie。
+   */
+  function upgrade(cookie: boolean): Promise<string | undefined> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1', port: dev.port,
+        // vite 的 HMR 会往 ws URL 上挂它自己的同名 token，这里一并复现。
+        path: '/?token=vite-hmr-handshake',
+        headers: {
+          ...(cookie ? { cookie: `loopkanban_token=${TOKEN}` } : {}),
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'sec-websocket-version': '13',
+          'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        },
+      })
+      req.on('upgrade', (res, socket) => {
+        socket.destroy()
+        resolve(res.headers['x-echo-url'] as string | undefined)
+      })
+      // 被 guard 挡下时 host 直接 destroy socket，这里体现为连接被掐断。
+      req.on('error', () => { resolve(undefined) })
+      req.on('response', (res) => { res.resume(); reject(new Error(`没有升级，返回 ${String(res.statusCode)}`)) })
+      req.end()
+    })
+  }
+
+  it('WebSocket 升级也照转 —— 少了它 HMR 连不上，改代码不刷新', async () => {
+    // 连 vite 自己的那个 ?token= 都要原样带过去，否则它会拒绝握手。
+    expect(await upgrade(true)).toBe('/?token=vite-hmr-handshake')
+  })
+
+  it('升级请求同样要过 token 关，没 cookie 一律掐断', async () => {
+    expect(await upgrade(false)).toBeUndefined()
+  })
+})
+
 describe('静态资源路径（回归）', () => {
   it('嵌套资源按原路径返回，而不是回落到 index.html', async () => {
-    const sandbox = await mkdtemp(join(tmpdir(), 'openkanban-nested-'))
+    const sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-nested-'))
     const root = join(sandbox, 'dist')
     await mkdir(join(root, 'assets', 'deep'), { recursive: true })
     await writeFile(join(root, 'index.html'), '<!doctype html><title>app</title>', 'utf8')
@@ -519,7 +621,7 @@ describe('静态资源路径（回归）', () => {
     const nested = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50, staticDir: root })
     try {
       const res = await fetch(`http://127.0.0.1:${String(nested.port)}/assets/deep/app.js`, {
-        headers: { cookie: `openkanban_token=${TOKEN}` },
+        headers: { cookie: `loopkanban_token=${TOKEN}` },
       })
       // 越界判断若写死分隔符（Windows 上是反斜杠），这里会拿到 index.html。
       expect(res.headers.get('content-type')).toContain('javascript')

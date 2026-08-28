@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import {
   acquireLease, asBoardId, asRunId, asTaskId, moveTask, type Task,
-} from '@openkanban/core'
+} from '@loopkanban/core'
 import { Storage, type Board, type Run } from '../src/storage/index.ts'
 import { MIGRATIONS } from '../src/storage/schema.ts'
 
@@ -338,7 +338,7 @@ describe('迁移', () => {
   }
 
   it('取消 Failed 列：旧库里 failed 的卡就地搬进 review', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'openkanban-migrate-'))
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
     const file = join(dir, 'board.db')
     try {
       // v2 = 建表 + feedback 列，也就是 Failed 列还存在的那个世界。
@@ -367,7 +367,7 @@ describe('迁移', () => {
   })
 
   it('加归档列：旧库里的卡一律视为未归档', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'openkanban-migrate-'))
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
     const file = join(dir, 'board.db')
     try {
       const legacy = seedLegacyDb(file, 3)

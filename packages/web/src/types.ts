@@ -65,6 +65,13 @@ export interface Attachment {
   filename: string
   mime: string
   size: number
+  /**
+   * 挂在讨论的哪条留言上；规格附件没有这个字段。
+   *
+   * 空串是**还没发出去的草稿**：文件已经在服务端了，但那条留言还没发 ——
+   * 它撤得回，已经发出去的则不能（讨论是一份记录）。
+   */
+  commentId?: string
   at: number
 }
 
@@ -215,6 +222,8 @@ export interface TaskComment {
   body: string
   /** Agent 的回答出自哪次执行；人写的留言没有。 */
   runId?: string
+  /** 这条留言带的文件。跟着话一起给，前端不必自己对齐两份列表。 */
+  attachments?: Attachment[]
   at: number
 }
 

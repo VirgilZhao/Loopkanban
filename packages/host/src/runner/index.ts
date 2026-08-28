@@ -194,7 +194,14 @@ export class Runner {
     await mkdir(artifactsDir, { recursive: true })
     // 附件先落进 worktree，再写 TASK.md —— 清单里的每一条都得真的在那儿，
     // 拷不过去的不列出来，免得 Agent 去找一个不存在的文件。
-    const staged = await stageAttachments(worktree.path, storage.listAttachments(task.id))
+    //
+    // 规格附件在前、讨论里带的在后：**两种都要拷**。人在讨论里贴的那张
+    // 截图和他那句"这儿为什么长这样"是一件事，只把需求里的文件放进去，
+    // 等于让 Agent 读着一句指着图说的话却看不见图。
+    const staged = await stageAttachments(worktree.path, [
+      ...storage.listAttachments(task.id),
+      ...storage.listCommentAttachments(task.id),
+    ])
     // 讨论线程一起写进 TASK.md：人和 Agent 的每一轮往来都是这次执行的上下文。
     const comments = storage.listComments(task.id)
     await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged), 'utf8')
@@ -566,11 +573,13 @@ export function renderTaskSpec(
     lines.push('## 验收标准', '')
     for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
   }
-  if (attachments.length > 0) {
+  // 规格附件进「附件」一节，讨论里带的跟着它那条留言走 —— 一张截图脱离了
+  // 「这儿为什么长这样」那句话就只是一张来历不明的图，摆进需求清单反而
+  // 会被当成一条新要求。
+  const spec = attachments.filter((file) => file.commentId === undefined)
+  if (spec.length > 0) {
     lines.push('', '## 附件', '', '这些文件是需求的一部分，已经放在工作区里，请读过再动手：', '')
-    for (const file of attachments) {
-      lines.push(`- \`${file.relPath}\` —— ${file.filename}（${file.mime}，${humanSize(file.size)}）`)
-    }
+    for (const file of spec) lines.push(describeStaged(file))
     lines.push('', '读不了某个格式（比如 Word、PDF）就想办法转成文本再读，不要跳过它。')
   }
   if (comments.length > 0) {
@@ -578,6 +587,12 @@ export function renderTaskSpec(
     for (const comment of comments) {
       lines.push(`### ${comment.author === 'agent' ? 'Agent' : '人'} · ${new Date(comment.at).toISOString()}`, '')
       lines.push(comment.body.trim(), '')
+      const carried = attachments.filter((file) => file.commentId === comment.id)
+      if (carried.length > 0) {
+        lines.push('这条留言带了这些文件，已经放在工作区里：', '')
+        for (const file of carried) lines.push(describeStaged(file))
+        lines.push('')
+      }
     }
   }
   lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
@@ -615,16 +630,35 @@ export function renderPrompt(
       '完整需求与此前的往来见仓库根目录的 TASK.md 的「讨论」一节。',
     )
   }
-  if (attachments.length > 0) {
+  const spec = attachments.filter((file) => file.commentId === undefined)
+  if (spec.length > 0) {
     lines.push(
       '',
-      `这张卡带了 ${String(attachments.length)} 个附件，是需求的一部分，动手前先读：`,
-      ...attachments.map((file) => `- ${file.relPath}（${file.filename}）`),
+      `这张卡带了 ${String(spec.length)} 个附件，是需求的一部分，动手前先读：`,
+      ...spec.map((file) => `- ${file.relPath}（${file.filename}）`),
+    )
+  }
+  // 最新这条反馈自己带的文件**单独点一次名**：它多半就是这一轮要看的东西
+  // （"照着这张图改"），混在整卡的清单里说一句"共 N 个附件"，等于指望
+  // Agent 自己去分辨哪个是新的。
+  const carried = lastHuman === undefined
+    ? []
+    : attachments.filter((file) => file.commentId === lastHuman.id)
+  if (carried.length > 0) {
+    lines.push(
+      '',
+      `这条反馈带了 ${String(carried.length)} 个文件，就是它说的那些东西：`,
+      ...carried.map((file) => `- ${file.relPath}（${file.filename}）`),
     )
   }
   lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')
   lines.push('不要提交、不要推送、不要改动 TASK.md。')
   return lines.join('\n')
+}
+
+/** TASK.md 里的一条附件：路径在前，因为 Agent 要拿它去读文件。 */
+function describeStaged(file: StagedAttachment): string {
+  return `- \`${file.relPath}\` —— ${file.filename}（${file.mime}，${humanSize(file.size)}）`
 }
 
 function describeError(error: unknown): string {

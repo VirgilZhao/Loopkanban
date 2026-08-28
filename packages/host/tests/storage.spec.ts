@@ -269,6 +269,36 @@ describe('附件', () => {
     expect(store.deleteProject(PROJECT)).toBe(true)
     expect(store.getAttachment('a-1')).toBeNull()
   })
+
+  it('三种附件各归各的：规格 / 草稿 / 已经跟着留言发出去的', () => {
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '看这个', at: T0 })
+    store.addAttachment(attachment({ id: 'a-spec' }))
+    store.addAttachment(attachment({ id: 'a-draft', commentId: '' }))
+    store.addAttachment(attachment({ id: 'a-sent', commentId: 'c1' }))
+
+    // 规格清单只有需求带的那份：讨论里贴的图混进来，会让"需求是什么"越读越糊。
+    expect(store.listAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-spec'])
+    expect(store.listDraftAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-draft'])
+    expect(store.listCommentAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-sent'])
+    // 收拾磁盘时要看得见全部 —— 记录被外键连带删了，字节可不会自己消失。
+    expect(store.listProjectAttachments(PROJECT)).toHaveLength(3)
+  })
+
+  it('留言发出去时认领草稿；已经发出去的和别人的草稿都认不走', () => {
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '看这个', at: T0 })
+    store.addAttachment(attachment({ id: 'a-draft', commentId: '' }))
+    store.addAttachment(attachment({ id: 'a-sent', commentId: 'c-old' }))
+    store.addAttachment(attachment({ id: 'a-other', taskId: asTaskId('t2'), commentId: '' }))
+
+    expect(store.attachToComment(asTaskId('t1'), ['a-draft', 'a-sent', 'a-other'], 'c1')).toBe(1)
+    expect(store.getAttachment('a-draft')?.commentId).toBe('c1')
+    // 已经进了讨论记录的不该被搬到另一条留言底下，别的卡的草稿更不行。
+    expect(store.getAttachment('a-sent')?.commentId).toBe('c-old')
+    expect(store.getAttachment('a-other')?.commentId).toBe('')
+    // 认领是幂等的：条件里的"还是草稿"本身就挡住了第二次。
+    expect(store.attachToComment(asTaskId('t1'), ['a-draft'], 'c1')).toBe(0)
+  })
 })
 
 describe('事件日志（append-only）', () => {

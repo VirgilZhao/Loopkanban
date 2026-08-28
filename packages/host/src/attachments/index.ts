@@ -22,8 +22,17 @@ import { extname, join, resolve } from 'node:path'
  */
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
-/** 一张卡最多挂多少个附件。挡的是"把整个文件夹拖进来"这类手滑。 */
+/** 一张卡最多挂多少个规格附件。挡的是"把整个文件夹拖进来"这类手滑。 */
 export const MAX_ATTACHMENTS_PER_TASK = 20
+
+/**
+ * 一条留言最多带多少个附件。
+ *
+ * 单独一道闸，不占规格附件那 20 个名额：讨论是一轮一轮长出来的，让它去
+ * 分一份固定的额度，结果就是聊到第五轮突然传不了图了。一条留言配 10 个
+ * 文件已经远超"贴张截图说这儿不对"的用量。
+ */
+export const MAX_ATTACHMENTS_PER_COMMENT = 10
 
 /**
  * 附件在 worktree 里的落点，相对于 worktree 根目录。
@@ -203,6 +212,13 @@ export interface StagedAttachment {
   readonly size: number
   /** 相对于 worktree 根目录的路径，用正斜杠 —— 它要写进 TASK.md 给人和 Agent 看。 */
   readonly relPath: string
+  /**
+   * 来自讨论里的哪条留言；规格附件没有。
+   *
+   * 原样带过来是为了 TASK.md 能把文件摆回它出现的那句话底下 —— 一张截图
+   * 脱离了「这儿为什么长这样」那句话，就只是一张来历不明的图。
+   */
+  readonly commentId?: string | undefined
 }
 
 /** 需要拷进 worktree 的一个附件。 */
@@ -210,6 +226,7 @@ export interface StageInput {
   readonly filename: string
   readonly mime: string
   readonly path: string
+  readonly commentId?: string | undefined
 }
 
 /**
@@ -246,6 +263,7 @@ export async function stageAttachments(
         filename: input.filename,
         mime: input.mime,
         size: info.size,
+        ...(input.commentId === undefined ? {} : { commentId: input.commentId }),
         // 正斜杠是给人和 Agent 看的路径，Windows 上也认。
         relPath: `${ATTACHMENTS_IN_WORKTREE.split(/[/\\]/).join('/')}/${name}`,
       })

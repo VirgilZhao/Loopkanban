@@ -142,6 +142,24 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX idx_attachments_task ON task_attachments(task_id, at);
   `,
+  // 讨论里也能带附件。贴一张截图问「这儿为什么长这样」，比用文字描述一个界面
+  // 快得多，而这种材料十有八九是在往来当中才出现的 —— 逼人回规格表单去传，
+  // 等于让它和这句话失去关系。
+  //
+  // 与规格附件同一张表：它们本来就是同一种东西（一份要交给 Agent 的文件），
+  // 差别只在挂在哪儿。`comment_id` 三态，都得认：
+  //
+  //   NULL      规格附件，需求的一部分，卡在那儿就一直在
+  //   ''        讨论里已经传上来、但那条留言还没发出去
+  //   'c-xxxx'  那条留言带的文件
+  //
+  // 空串这个中间态是**上传先于留言**逼出来的：文件是选完就传的（传上去了却
+  // 因为没点发送而丢掉，是最让人恼火的那种意外），而留言的 id 要等它真发出去
+  // 才存在。发送时把这些草稿一次认领过去。
+  `
+  ALTER TABLE task_attachments ADD COLUMN comment_id TEXT;
+  CREATE INDEX idx_attachments_comment ON task_attachments(comment_id, at);
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

@@ -16,17 +16,17 @@ import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath 
 import { randomUUID } from 'node:crypto'
 import {
   archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
-  unarchiveTask, type Column, type Task, type TaskEdit,
+  unarchiveTask, type Column, type Task, type TaskEdit, type TaskId,
 } from '@loopkanban/core'
 import { AgentPool, type DetectedAgent } from '../agents/index.ts'
 import {
   canInline, mimeOf, safeFilename, AttachmentStore,
-  MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_COMMENT, MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
 } from '../attachments/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
-import type { Attachment, Storage } from '../storage/index.ts'
+import { DRAFT_COMMENT, type Attachment, type Storage } from '../storage/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
@@ -198,8 +198,32 @@ function describeAttachment(attachment: Attachment): Record<string, unknown> {
     filename: attachment.filename,
     mime: attachment.mime,
     size: attachment.size,
+    // 三态原样带出去（空串 = 还没发出去的草稿）：前端要靠它分辨这个文件
+    // 是撤得回的草稿，还是已经进了讨论记录的东西。
+    ...(attachment.commentId === undefined ? {} : { commentId: attachment.commentId }),
     at: attachment.at,
   }
+}
+
+/**
+ * 讨论线程对外的样子：每条留言把自己带的文件挂在身上。
+ *
+ * 附件不另开一个接口去拼：一句话和它随手贴的那张截图是一起说出来的，
+ * 前端要是得自己按 id 对齐两份列表，迟早会在某个刷新时序里把图挂到
+ * 上一条留言底下。
+ */
+function describeComments(storage: Storage, taskId: TaskId): Record<string, unknown>[] {
+  const byComment = new Map<string, Record<string, unknown>[]>()
+  for (const file of storage.listCommentAttachments(taskId)) {
+    const key = file.commentId ?? ''
+    const list = byComment.get(key) ?? []
+    list.push(describeAttachment(file))
+    byComment.set(key, list)
+  }
+  return storage.listComments(taskId).map((comment) => ({
+    ...comment,
+    ...(byComment.has(comment.id) ? { attachments: byComment.get(comment.id) } : {}),
+  }))
 }
 
 /** 从路径里取出形如 `/api/runs/<id>/events` 的片段。 */
@@ -646,7 +670,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
 
       if (method === 'GET') {
-        sendJson(res, 200, { comments: storage.listComments(taskId) }, extraHeaders)
+        sendJson(res, 200, { comments: describeComments(storage, taskId) }, extraHeaders)
         return
       }
       if (method === 'POST') {
@@ -655,6 +679,28 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         const text = body?.body?.trim() ?? ''
         if (text.length === 0) {
           sendJson(res, 400, { error: 'bad-request', detail: '留言不能为空' })
+          return
+        }
+        // 这条话带上哪几个已经传好的草稿附件。文件先传、留言后发，所以
+        // 这里收的是 id 而不是字节 —— 真正的认领在留言落库之后。
+        const rawIds = body?.['attachmentIds']
+        const attachmentIds = Array.isArray(rawIds)
+          ? rawIds.filter((value): value is string => typeof value === 'string')
+          : []
+        /*
+         * 数量在这儿就挡住，**而且必须挡在留言落库之前**。
+         *
+         * 认领那一句是 `id IN (?, ?, …)`，一个 id 一个占位符；数量一大就顶穿
+         * SQLite 的参数上限，`prepare` 直接抛 —— 而那时留言已经写进去、卡可能
+         * 也已经回了队列，调用方却拿到一个 500，重试就多一条重复留言。
+         * 上传那一路本来就传不出超过这个数的草稿，所以这里拒绝也不冤枉任何
+         * 正常的客户端。
+         */
+        if (attachmentIds.length > MAX_ATTACHMENTS_PER_COMMENT) {
+          sendJson(res, 422, {
+            error: 'too-many-attachments',
+            detail: `一条留言最多带 ${String(MAX_ATTACHMENTS_PER_COMMENT)} 个附件`,
+          })
           return
         }
 
@@ -686,13 +732,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           current = edited.value
         }
 
+        const commentId = `c-${randomUUID().slice(0, 8)}`
         storage.addComment({
-          id: `c-${randomUUID().slice(0, 8)}`,
+          id: commentId,
           taskId,
           author: 'human',
           body: text,
           at: Date.now(),
         })
+        // 认领在留言之后：反过来的话，留言写失败会留下一批挂在幽灵 id 上的
+        // 附件 —— 它们既不在草稿里也不在任何一条留言底下，谁都再看不见。
+        storage.attachToComment(taskId, attachmentIds, commentId)
         // 在 Review 里留言就是"再改一版"：卡自动回队列，下一次执行带着
         // 整条讨论走。别的列只是留个话，不动卡的位置。
         let moved = false
@@ -702,7 +752,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           })
           if (next.ok) moved = storage.commitTask(next.value)
         }
-        sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)
+        sendJson(res, 201, { comments: describeComments(storage, taskId), requeued: moved }, extraHeaders)
         return
       }
     }
@@ -714,15 +764,23 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * `x-filename` 头（URI 编码，非 ASCII 的文件名只有这样才能安全过头部）。
      * 自己写一个 multipart 解析器是这个项目最不值得的那种代码 —— 而"零运行时
      * 依赖"这条线又不允许引一个库进来。前端本来就一个一个地传。
+     *
+     * `?scope=draft` 走的是讨论那一路：文件先落地、等留言发出去时再认领。
+     * 两路共用这个口子是因为它们从头到尾是同一件事（收一份字节、记一条
+     * 元数据），只有"挂在哪儿"和"什么时候能传"不一样。
      */
     const attachmentsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/attachments$/)
     if (attachmentsOf !== null) {
       const taskId = asTaskId(decodeURIComponent(attachmentsOf))
       const task = storage.getTask(taskId)
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      // 讨论里传的文件属于那条还没发出去的留言，不是需求的一部分 ——
+      // 两路各看各的清单，谁也不该出现在对方的列表里。
+      const draft = url.searchParams.get('scope') === 'draft'
 
       if (method === 'GET') {
-        sendJson(res, 200, { attachments: storage.listAttachments(taskId).map(describeAttachment) }, extraHeaders)
+        const listed = draft ? storage.listDraftAttachments(taskId) : storage.listAttachments(taskId)
+        sendJson(res, 200, { attachments: listed.map(describeAttachment) }, extraHeaders)
         return
       }
       if (method === 'POST') {
@@ -739,22 +797,32 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           refuse(503, { error: 'no-attachments', detail: '当前实例没有配置附件存储' })
           return
         }
-        // 与「正在执行的卡不能改需求」同一条规矩：附件就是需求的一部分，
-        // Agent 已经拿着 TASK.md 在干活了，此刻加一份材料只会让人和机器
-        // 对着两份规格。归档的卡是冻结的，同理。
-        if (task.column === 'running') {
+        /*
+         * 冻结的规矩只管规格附件。
+         *
+         * 与「正在执行的卡不能改需求」同一条：附件是需求的一部分，Agent
+         * 已经拿着 TASK.md 在干活了，此刻加一份材料只会让人和机器对着两份
+         * 规格。归档的卡是冻结的，同理。
+         *
+         * **讨论不受这条约束**，因为留言本来就不受：跑着的时候看见哪儿不对
+         * 顺手贴张图，和顺手留一句话是同一个动作，它们一起等下一轮被带走。
+         */
+        if (!draft && task.column === 'running') {
           refuse(422, { error: 'task-running', detail: '正在执行的卡片不能加附件，先终止执行' })
           return
         }
-        if (task.archivedAt !== undefined) {
+        if (!draft && task.archivedAt !== undefined) {
           refuse(422, { error: 'task-archived', detail: '这张卡已归档。要动它先取消归档' })
           return
         }
-        const existing = storage.listAttachments(taskId)
-        if (existing.length >= MAX_ATTACHMENTS_PER_TASK) {
+        const cap = draft ? MAX_ATTACHMENTS_PER_COMMENT : MAX_ATTACHMENTS_PER_TASK
+        const existing = draft ? storage.listDraftAttachments(taskId) : storage.listAttachments(taskId)
+        if (existing.length >= cap) {
           refuse(422, {
             error: 'too-many-attachments',
-            detail: `一张卡最多 ${String(MAX_ATTACHMENTS_PER_TASK)} 个附件`,
+            detail: draft
+              ? `一条留言最多带 ${String(cap)} 个附件`
+              : `一张卡最多 ${String(cap)} 个附件`,
           })
           return
         }
@@ -794,6 +862,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           mime,
           size: stored.size,
           path: stored.path,
+          // 草稿先挂在空串上，等那条留言发出去再认领过去。
+          ...(draft ? { commentId: DRAFT_COMMENT } : {}),
           at: Date.now(),
         }
         storage.addAttachment(attachment)
@@ -869,13 +939,28 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
       if (method === 'DELETE') {
         const owner = storage.getTask(attachment.taskId)
-        if (owner?.column === 'running') {
+        /*
+         * 已经跟着留言发出去的附件撤不回。
+         *
+         * 讨论是一份记录：话说出去了改不了，话里带的那张图自然也不该消失
+         * —— 底下若还接着 Agent 的回复，抽掉它就等于让那段对话失去依据。
+         * 要更正就再留一条，这也正是这条线程本来的用法。
+         */
+        if (attachment.commentId !== undefined && attachment.commentId !== DRAFT_COMMENT) {
+          sendJson(res, 422, {
+            error: 'attachment-sent', detail: '这个附件已经跟着留言发出去了，讨论是一份记录，撤不回来',
+          })
+          return
+        }
+        // 冻结只管规格附件：草稿附件和留言一样，跑着的时候也能收拾 ——
+        // 它要到下一轮才被带走，此刻动它谁也不碍着。
+        if (attachment.commentId === undefined && owner?.column === 'running') {
           sendJson(res, 422, { error: 'task-running', detail: '正在执行的卡片不能删附件，先终止执行' })
           return
         }
         // 归档的卡是冻结的，删附件和加附件同属"改需求"，两边必须同一套规矩
         // —— 上传拒了、删除放行，等于让归档这个动作只挡住一半。
-        if (owner?.archivedAt !== undefined) {
+        if (attachment.commentId === undefined && owner?.archivedAt !== undefined) {
           sendJson(res, 422, { error: 'task-archived', detail: '这张卡已归档。要动它先取消归档' })
           return
         }

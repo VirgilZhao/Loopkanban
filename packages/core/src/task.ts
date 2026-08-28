@@ -64,6 +64,16 @@ export interface Task {
    * 搁置前的位置。
    */
   readonly archivedAt?: number | undefined
+  /**
+   * 验收通过、进入 Done 的那一刻；`undefined` 表示还没走到那一步。
+   *
+   * 不复用 `updatedAt`：Done 是终点，但卡片进去之后仍会被动 —— 归档、
+   * 补一句描述都会把 `updatedAt` 推到今天。拿它排序，一张半年前完成的卡
+   * 会因为刚被归档而排到队首。`doneAt` 只在跨进 Done 的那一次写入，
+   * 之后不再变（Done 没有出口，重排列内位置也不重写它），所以它就是
+   * "这张卡是什么时候做完的"。
+   */
+  readonly doneAt?: number | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -302,8 +312,15 @@ export function moveTask(task: Task, request: MoveRequest): DomainResult<Task> {
     ? {}
     : { lease: undefined }
 
+  // 只在**跨进** Done 的那一次盖时间戳。done → done 是列内重排（唯一还被
+  // 允许的自反流转），拿它重写 doneAt 等于"拖一下就把完成时间改成现在"。
+  const done: Partial<Task> = request.to === 'done' && task.column !== 'done'
+    ? { doneAt: request.now }
+    : {}
+
   return succeed(bump(task, {
     ...patch,
+    ...done,
     column: request.to,
     ...(request.position === undefined ? {} : { position: request.position }),
   }, request.now))

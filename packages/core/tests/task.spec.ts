@@ -92,6 +92,22 @@ describe('moveTask', () => {
     const result = moveTask(running, { expectedRevision: 1, to: 'review', now: T0 })
     expect(result.ok && result.value.lease).toBeUndefined()
   })
+
+  it('进 Done 时盖上完成时间 —— Done 列按它从新到旧排', () => {
+    const result = moveTask(task({ column: 'review' }), { expectedRevision: 1, to: 'done', now: T0 + 7 })
+    expect(result.ok && result.value.doneAt).toBe(T0 + 7)
+  })
+
+  it('没进 Done 的卡不带完成时间', () => {
+    const result = moveTask(task({ column: 'running' }), { expectedRevision: 1, to: 'review', now: T0 })
+    expect(result.ok && result.value.doneAt).toBeUndefined()
+  })
+
+  it('done → done 是列内重排，不重写完成时间', () => {
+    const done = task({ column: 'done', doneAt: T0 })
+    const result = moveTask(done, { expectedRevision: 1, to: 'done', position: 9, now: T0 + 100_000 })
+    expect(result.ok && result.value.doneAt).toBe(T0)
+  })
 })
 
 describe('acquireLease', () => {

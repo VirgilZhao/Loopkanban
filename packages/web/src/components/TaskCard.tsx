@@ -42,10 +42,13 @@ export function TaskCard({
   // 也算进这个数，但颜色不给亮的 —— 开着不等于合上了。
   const merged = prs?.filter((pr) => pr.state === 'merged') ?? []
   const archived = task.archivedAt !== undefined
+  // Done 的卡同样拖不动：那一列是终点（领域层不给它任何出口），顺序也不再由
+  // position 决定，而是按完成时间从新到旧排。留着拖拽只会让人拖完看见它弹回去。
+  const fixed = archived || task.column === 'done'
   // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
   // 只换来一条错误提示。
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: task.id, disabled: archived,
+    id: task.id, disabled: fixed,
   })
   const running = task.column === 'running'
   const leaseExpired = task.lease !== undefined && task.lease.expiresAt <= now
@@ -63,6 +66,8 @@ export function TaskCard({
         'group relative cursor-grab overflow-hidden rounded-xl border border-hairline px-3 py-2.5 text-left',
         'shadow-sm transition-[border-color,box-shadow] duration-150',
         'hover:border-hairline-bright hover:shadow-md',
+        // 拖不动的卡不摆出"可以抓"的手势。
+        fixed && 'cursor-default',
         selected && 'border-sodium-deep ring-1 ring-sodium-deep/30',
         isDragging && 'z-50 cursor-grabbing opacity-90 shadow-lg',
         // 归档的卡是背景板：看得见、认得出，但不参与任何操作。

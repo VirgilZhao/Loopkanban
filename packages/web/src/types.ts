@@ -87,6 +87,8 @@ export interface Task {
   lease?: Lease
   /** 归档时间；缺席表示没归档。归档正交于 column，不改变卡在哪一列。 */
   archivedAt?: number
+  /** 进入 Done 的那一刻；只有 Done 列的卡有。Done 列按它从新到旧排。 */
+  doneAt?: number
   createdAt: number
   updatedAt: number
 }

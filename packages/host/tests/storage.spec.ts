@@ -492,8 +492,8 @@ describe('迁移', () => {
     const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
     const file = join(dir, 'board.db')
     try {
-      // 这条迁移之前的世界：projects 表还没有 test_command 列。
-      const legacy = seedLegacyDb(file, MIGRATIONS.length - 1)
+      // v10 = projects 表还没有 test_command 列的世界。
+      const legacy = seedLegacyDb(file, 10)
       legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
         .run(PROJECT, '老项目', '/repo', 'main', T0)
       legacy.close()
@@ -503,6 +503,36 @@ describe('迁移', () => {
       expect(migrated?.name).toBe('老项目')
       // 缺席，不是空串 —— 界面据此显示"还没配"并把输入框摆出来。
       expect(migrated?.testCommand).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加完成时间：旧库里已在 Done 的卡用 updated_at 回填，其余的仍然没有', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v11 = 加 done_at 之前的世界。
+      const legacy = seedLegacyDb(file, 11)
+      legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '默认看板', '/repo', 'main', T0)
+      const insert = legacy.prepare(`
+        INSERT INTO tasks (
+          id, project_id, revision, column_name, position, description,
+          acceptance_json, repo_path, base_branch, preferred_provider, model,
+          blocked_by_json, lease_json, archived_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      insert.run('t1', PROJECT, 1, 'done', 1, '早就做完的卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0 + 5_000)
+      insert.run('t2', PROJECT, 1, 'ready', 2, '还没做的卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0 + 9_000)
+      legacy.close()
+
+      const store = Storage.open(file)
+      expect(store.getTask(asTaskId('t1'))?.doneAt).toBe(T0 + 5_000)
+      expect(store.getTask(asTaskId('t2'))?.doneAt).toBeUndefined()
       store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })

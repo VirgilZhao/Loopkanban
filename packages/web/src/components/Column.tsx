@@ -3,7 +3,7 @@ import { useDroppable } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { Button } from '@/components/ui/button.tsx'
 import { cn } from '@/lib/utils.ts'
-import { COLUMN_META, type Column as ColumnKey, type Skip, type Task } from '@/types.ts'
+import { COLUMN_META, type Column as ColumnKey, type LiveLine, type Skip, type Task } from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
 
 /** 列头的图标，与侧边栏导航同一套 —— 两处指的是同一件东西。 */
@@ -21,7 +21,7 @@ interface Props {
   now: number
   index: number
   selectedId: string | null
-  liveTools: Record<string, string>
+  live: Record<string, LiveLine>
   skips: Map<string, Skip>
   onSelect: (task: Task) => void
   /** 概览里同一列会来自不同仓库，给出项目名让卡片自报家门；单项目视图下不传。 */
@@ -31,7 +31,7 @@ interface Props {
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, liveTools, skips, onSelect, projectName, onCreate,
+  column, tasks, now, index, selectedId, live, skips, onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const { setNodeRef, isOver } = useDroppable({ id: column })
   const meta = COLUMN_META[column]
@@ -86,7 +86,7 @@ export function Column({
             task={task}
             now={now}
             selected={selectedId === task.id}
-            liveTool={liveTools[task.id]}
+            live={live[task.id]}
             skip={skips.get(task.id)}
             projectName={projectName?.(task.projectId)}
             onSelect={onSelect}

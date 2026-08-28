@@ -16,8 +16,8 @@ import { insertPosition } from '@/lib/position.ts'
 import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type Project, type RunStats, type SchedulerState,
-  type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunStats,
+  type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
@@ -69,7 +69,8 @@ export default function App(): React.JSX.Element {
   const [deleting, setDeleting] = useState<Project | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [liveTools, setLiveTools] = useState<Record<string, string>>({})
+  // 运行中卡片的最后一条事件，跟着看板轮询一起来 —— 详情弹窗关着也看得见。
+  const [live, setLive] = useState<Record<string, LiveLine>>({})
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -82,13 +83,14 @@ export default function App(): React.JSX.Element {
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded, projects: known }, state, summary] = await Promise.all([
+    const [{ tasks: loaded, projects: known, live: lines }, state, summary] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
       api.stats().catch(() => null),
     ])
     setTasks(loaded)
     setProjects(known)
+    setLive(lines)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -258,16 +260,6 @@ export default function App(): React.JSX.Element {
     }
   }, [tasks, refresh])
 
-  const onLiveTool = useCallback((taskId: string, tool: string | undefined) => {
-    setLiveTools((prev) => {
-      if (tool === undefined) {
-        const { [taskId]: _drop, ...rest } = prev
-        return rest
-      }
-      return { ...prev, [taskId]: tool }
-    })
-  }, [])
-
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
   const runningCount = byColumn.running.length
 
@@ -358,7 +350,7 @@ export default function App(): React.JSX.Element {
                 tasks={byColumn[column]}
                 now={now}
                 selectedId={selectedId}
-                liveTools={liveTools}
+                live={live}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
                 // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
@@ -387,7 +379,6 @@ export default function App(): React.JSX.Element {
             task={selected}
             project={projectById.get(selected.projectId) ?? null}
             agents={agents}
-            onLiveTool={onLiveTool}
             onChanged={() => { void refresh() }}
             onError={(code, detail) => {
               setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })

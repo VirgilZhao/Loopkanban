@@ -112,6 +112,13 @@ export interface Run {
 }
 
 /** SSE 推过来的一条事件，与 host 的 AgentEvent 对齐。 */
+/** 运行中卡片的最后一条事件，看板上那行日志预览就来自它。 */
+export interface LiveLine {
+  kind: string
+  payload: Record<string, unknown>
+  at: number
+}
+
 export interface StreamEvent {
   seq: number
   kind: string

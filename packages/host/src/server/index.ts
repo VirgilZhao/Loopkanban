@@ -179,10 +179,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
     // ── 看板状态 ─────────────────────────────────────────────
     if (method === 'GET' && pathname === '/api/state') {
-      sendJson(res, 200, {
-        projects: storage.listProjects(),
-        tasks: storage.listTasks(),
-      }, extraHeaders)
+      const tasks = storage.listTasks()
+      // 运行中的卡各捎一条最新事件，看板据此在卡上显示一行日志预览 ——
+      // 不然关着详情弹窗就完全看不出 Agent 正在干什么。
+      const live: Record<string, { kind: string; payload: unknown; at: number }> = {}
+      for (const task of tasks) {
+        const runId = task.lease?.runId
+        if (task.column !== 'running' || runId === undefined) continue
+        const event = storage.lastEvent(runId)
+        if (event !== null) live[task.id] = { kind: event.kind, payload: event.payload, at: event.at }
+      }
+      sendJson(res, 200, { projects: storage.listProjects(), tasks, live }, extraHeaders)
       return
     }
 

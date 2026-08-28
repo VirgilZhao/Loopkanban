@@ -495,6 +495,28 @@ export class Storage {
    * @param at - 发生时间（毫秒）。
    * @returns 分配到的 seq，可直接用作 SSE 的 `id:`。
    */
+  /**
+   * 一次执行的最后一条事件。
+   *
+   * 看板上的"运行中"卡片要一行日志预览，而它们的 SSE 只在详情弹窗开着时才
+   * 订阅 —— 关着弹窗就什么都看不见。看板本来就在轮询，顺手把最后一条捎上，
+   * 比给每张卡各开一条 SSE 便宜得多。
+   */
+  lastEvent(runId: RunId): RunEvent | null {
+    const row = this.db.prepare(
+      'SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1',
+    ).get(runId) as unknown as
+      { run_id: string; seq: number; kind: string; payload_json: string; at: number } | undefined
+    if (row === undefined) return null
+    return {
+      runId: asRunId(row.run_id),
+      seq: row.seq,
+      kind: row.kind,
+      payload: JSON.parse(row.payload_json) as unknown,
+      at: row.at,
+    }
+  }
+
   appendEvent(runId: RunId, kind: string, payload: unknown, at: number): number {
     this.db.exec('BEGIN IMMEDIATE')
     try {

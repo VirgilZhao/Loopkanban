@@ -1,8 +1,9 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, PauseCircle } from 'lucide-react'
+import { summarize } from '@/lib/events.ts'
 import { cn } from '@/lib/utils.ts'
-import type { Skip, Task } from '@/types.ts'
+import type { LiveLine, Skip, Task } from '@/types.ts'
 
 /** 把毫秒时长压成人能扫一眼的形式。 */
 function since(from: number, now: number): string {
@@ -16,8 +17,8 @@ interface Props {
   task: Task
   now: number
   selected: boolean
-  /** 该任务当前正在跑的工具名，用于卡片上的实时票据。 */
-  liveTool?: string | undefined
+  /** 该任务最新的一条执行事件，用于卡片上那行日志预览。 */
+  live?: LiveLine | undefined
   /** 调度器这一轮为什么没派它。 */
   skip?: Skip | undefined
   /** 所属项目名。只有概览里才给 —— 单项目视图下每张卡都一样，写了是噪音。 */
@@ -25,7 +26,7 @@ interface Props {
   onSelect: (task: Task) => void
 }
 
-export function TaskCard({ task, now, selected, liveTool, skip, projectName, onSelect }: Props): React.JSX.Element {
+export function TaskCard({ task, now, selected, live, skip, projectName, onSelect }: Props): React.JSX.Element {
   const archived = task.archivedAt !== undefined
   // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
   // 只换来一条错误提示。
@@ -64,7 +65,12 @@ export function TaskCard({ task, now, selected, liveTool, skip, projectName, onS
         {archived ? <Archive className="size-3 text-ink-faint" /> : null}
         {task.preferredProvider === undefined ? null : (
           // 指定了模型就一并标出来：覆盖过默认值这件事，一眼看得见才有意义。
-          <span className="chrome-label !text-[8px]">
+          // 但 opencode 的模型 id 能长到 `opencode-go/deepseek-v4-flash`，
+          // 不截断就会把整张卡挤成三行 —— 截了，完整的挂在 title 上。
+          <span
+            className="chrome-label min-w-0 truncate !text-[8px]"
+            title={`${task.preferredProvider}${task.model === undefined ? '' : ` · ${task.model}`}`}
+          >
             {task.preferredProvider}{task.model === undefined ? '' : ` · ${task.model}`}
           </span>
         )}
@@ -80,10 +86,14 @@ export function TaskCard({ task, now, selected, liveTool, skip, projectName, onS
         </p>
       )}
 
-      {running && liveTool !== undefined ? (
+      {/* 正在跑的卡给一行日志预览：不打开详情也看得出 Agent 走到哪儿了。
+          只留一行 —— 卡片是扫视用的，要读全文去弹窗里的事件流。 */}
+      {running && live !== undefined ? (
         <p className="mono mt-1.5 flex items-center gap-1.5 ps-1.5 text-[10px] text-sodium">
-          <span className="inline-block size-1 animate-pulse rounded-full bg-sodium" />
-          {liveTool}
+          <span className="inline-block size-1 flex-none animate-pulse rounded-full bg-sodium" />
+          <span className="min-w-0 truncate" title={summarize({ seq: 0, ...live })}>
+            {summarize({ seq: 0, ...live })}
+          </span>
         </p>
       ) : null}
 

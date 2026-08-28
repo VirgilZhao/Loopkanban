@@ -9,6 +9,7 @@ import {
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
+import { summarize } from '@/lib/events.ts'
 import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
@@ -24,46 +25,18 @@ const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
   raw:      { label: 'RAW',      tone: 'text-ink-faint/60' },
 }
 
-/** raw 行是没被识别的原始输出，只留个头，别把整坨 JSON 倒进界面。 */
-const RAW_MAX = 140
-
-/** 把一条事件压成一行可读文本。 */
-function summarize(event: StreamEvent): string {
-  const p = event.payload
-  switch (event.kind) {
-    case 'session': {
-      // 不同 CLI 给的字段不一样（codex 没有 model / apiKeySource），
-      // 缺的就不显示，别用 "?" 占位假装它存在。
-      const parts = [String(p['sessionId'] ?? '')]
-      if (typeof p['model'] === 'string') parts.push(`model=${p['model']}`)
-      if (typeof p['apiKeySource'] === 'string') parts.push(`apiKeySource=${p['apiKeySource']}`)
-      return parts.join('  ')
-    }
-    case 'text': return String(p['text'] ?? '')
-    case 'tool': return String(p['name'] ?? '')
-    case 'notice': return String(p['text'] ?? '')
-    case 'usage': return `in=${String(p['inputTokens'] ?? '-')} out=${String(p['outputTokens'] ?? '-')}${p['costUsd'] === undefined ? '' : ` $${String(p['costUsd'])}`}`
-    case 'finished': return `${p['ok'] === true ? 'ok' : 'failed'} ${String(p['diagnostic'] ?? p['summary'] ?? '')}`
-    default: {
-      const text = String(p['line'] ?? JSON.stringify(p))
-      return text.length > RAW_MAX ? `${text.slice(0, RAW_MAX)}…` : text
-    }
-  }
-}
-
 interface Props {
   task: Task
   /** 任务所属项目。任务干活的地方是它派生出来的 worktree。 */
   project: Project | null
   agents: Agent[]
-  onLiveTool: (taskId: string, tool: string | undefined) => void
   onChanged: () => void
   onError: (code: string, detail: string) => void
   onClose: () => void
 }
 
 export function RunPanel({
-  task, project, agents, onLiveTool, onChanged, onError, onClose,
+  task, project, agents, onChanged, onError, onClose,
 }: Props): React.JSX.Element {
   const [runs, setRuns] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
@@ -75,6 +48,8 @@ export function RunPanel({
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
   const archived = task.archivedAt !== undefined
+  /** 卡上指定的执行器，且本机确实探测到了它。 */
+  const pinned = agents.find((agent) => agent.id === task.preferredProvider)
   // 只有想法池与队列里的卡能删。再往后 Agent 已经动过仓库，该走的是终止 / 废弃。
   const deletable = task.column === 'backlog' || task.column === 'ready'
 
@@ -97,10 +72,8 @@ export function RunPanel({
     if (latest === undefined) return undefined
     return subscribeRun(latest.id, (event) => {
       setEvents((prev) => (prev.some((e) => e.seq === event.seq) ? prev : [...prev, event]))
-      if (event.kind === 'tool') onLiveTool(task.id, String(event.payload['name'] ?? ''))
-      if (event.kind === 'finished') onLiveTool(task.id, undefined)
     })
-  }, [latest, task.id, onLiveTool])
+  }, [latest])
 
   // 只在有执行记录时拉 diff；卡片状态变了要重拉（打回后又跑了一轮）。
   useEffect(() => {
@@ -149,6 +122,17 @@ export function RunPanel({
         if (error instanceof ApiError) onError(error.code, error.message)
       })
       .finally(() => { setBusy(false); setConfirmDelete(false) })
+  }
+
+  /** 把这张卡派给某个执行器。 */
+  const dispatch = (provider: string): void => {
+    setBusy(true)
+    void api.run(task.id, provider)
+      .then(() => { onChanged() })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) onError(error.code, error.message)
+      })
+      .finally(() => { setBusy(false) })
   }
 
   /**
@@ -253,29 +237,45 @@ export function RunPanel({
                 <span className="text-xs text-ink-faint">派给</span>
                 {agents.length === 0 ? (
                   <span className="cjk-label !text-lamp-fail">没有可用的 Agent CLI</span>
-                ) : agents.map((agent) => (
-                  <Button
-                    key={agent.id}
-                    variant="outline"
-                    size="sm"
-                    disabled={busy}
-                    {...(agent.permissionCaveat === undefined ? {} : { title: agent.permissionCaveat.detail })}
-                    onClick={() => {
-                      setBusy(true)
-                      void api.run(task.id, agent.id)
-                        .then(() => { onChanged() })
-                        .catch((error: unknown) => {
-                          if (error instanceof ApiError) onError(error.code, error.message)
-                        })
-                        .finally(() => { setBusy(false) })
-                    }}
-                  >
-                    <Play />{agent.id}
-                    {agent.permissionCaveat === undefined ? null : (
-                      <span className="text-xs text-sodium">{agent.permissionCaveat.label}</span>
+                ) : task.preferredProvider === undefined ? (
+                  // 没指定执行器：三个都摆出来，点哪个是哪个。
+                  agents.map((agent) => (
+                    <Button
+                      key={agent.id}
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      {...(agent.permissionCaveat === undefined ? {} : { title: agent.permissionCaveat.detail })}
+                      onClick={() => { dispatch(agent.id) }}
+                    >
+                      <Play />{agent.id}
+                      {agent.permissionCaveat === undefined ? null : (
+                        <span className="text-xs text-sodium">{agent.permissionCaveat.label}</span>
+                      )}
+                    </Button>
+                  ))
+                ) : pinned === undefined ? (
+                  // 指定的执行器本机没探测到。这里不给"换一个派"的口子 ——
+                  // 卡上写着要谁干，就不该在派活这一步偷偷换人。
+                  <span className="text-xs text-lamp-fail">
+                    指定的 <span className="mono">{task.preferredProvider}</span> 本机没探测到，去规格里换一个
+                  </span>
+                ) : (
+                  <>
+                    {/* 指定过了就只派给它，连模型一起标出来 —— 这一屏只剩一个动作。 */}
+                    <Button
+                      size="sm"
+                      disabled={busy}
+                      {...(pinned.permissionCaveat === undefined ? {} : { title: pinned.permissionCaveat.detail })}
+                      onClick={() => { dispatch(pinned.id) }}
+                    >
+                      <Play />{pinned.id}{task.model === undefined ? '' : ` · ${task.model}`}
+                    </Button>
+                    {pinned.permissionCaveat === undefined ? null : (
+                      <span className="text-xs text-sodium">{pinned.permissionCaveat.label}</span>
                     )}
-                  </Button>
-                ))}
+                  </>
+                )}
               </>
             ) : (
               <Button

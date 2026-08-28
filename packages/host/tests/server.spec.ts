@@ -319,6 +319,34 @@ describe('GET /api/state', () => {
   })
 })
 
+describe('GET /api/state 的运行中预览', () => {
+  it('运行中的卡捎上最后一条事件 —— 关着弹窗也看得出 Agent 走到哪儿了', async () => {
+    const runId = asRunId('run-1')
+    store.createTask(task({
+      id: 't1',
+      column: 'running',
+      lease: { runId, provider: 'claude', acquiredAt: T0, expiresAt: T0 + 60_000 },
+    }))
+    store.createRun({
+      id: runId, taskId: asTaskId('t1'), provider: 'claude', cliVersion: '1.0',
+      worktreePath: '/wt', branch: 'task/t1', status: 'running', startedAt: T0,
+    })
+    store.appendEvent(runId, 'tool', { name: 'Bash' }, T0 + 1)
+    store.appendEvent(runId, 'tool', { name: 'Edit' }, T0 + 2)
+
+    const body = await (await api('/api/state')).json() as
+      { live: Record<string, { kind: string; payload: { name?: string } }> }
+    // 最后一条，不是第一条。
+    expect(body.live['t1']).toMatchObject({ kind: 'tool', payload: { name: 'Edit' } })
+  })
+
+  it('没在跑的卡不捎 —— 它没有正在发生的事', async () => {
+    store.createTask(task({ id: 't1', column: 'ready' }))
+    const body = await (await api('/api/state')).json() as { live: Record<string, unknown> }
+    expect(body.live).toEqual({})
+  })
+})
+
 describe('POST /api/tasks/:id/move', () => {
   beforeEach(() => { store.createTask(task({ id: 't1' })) })
 

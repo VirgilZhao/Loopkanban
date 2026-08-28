@@ -7,7 +7,7 @@
  */
 
 import type {
-  Agent, DiffView, DirListing, Project, Run, RunStats, SchedulerSettings, SchedulerState,
+  Agent, DiffView, DirListing, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState,
   StreamEvent, Task, TaskEdit,
 } from './types.ts'
 
@@ -43,7 +43,7 @@ function clearable(edit: TaskEdit): Record<string, unknown> {
 }
 
 export const api = {
-  state: () => call<{ projects: Project[]; tasks: Task[] }>('/api/state'),
+  state: () => call<{ projects: Project[]; tasks: Task[]; live: Record<string, LiveLine> }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
 

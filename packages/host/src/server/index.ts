@@ -290,8 +290,25 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
     }
 
-    // ── 删除项目 ────────────────────────────────────────────
+    // ── 改项目名 ────────────────────────────────────────────
     const projectId = matchPath(pathname, /^\/api\/projects\/([^/]+)$/)
+    if (method === 'PATCH' && projectId !== null) {
+      const target = asProjectId(decodeURIComponent(projectId))
+      const body = await readJsonBody(req) as Partial<{ name: string }> | undefined
+      const name = body?.name?.trim() ?? ''
+      if (name.length === 0) {
+        sendJson(res, 400, { error: 'bad-request', detail: '项目名不能为空' })
+        return
+      }
+      if (!storage.renameProject(target, name)) {
+        sendJson(res, 404, { error: 'project-not-found' })
+        return
+      }
+      sendJson(res, 200, { project: storage.getProject(target) }, extraHeaders)
+      return
+    }
+
+    // ── 删除项目 ────────────────────────────────────────────
     if (method === 'DELETE' && projectId !== null) {
       const target = asProjectId(decodeURIComponent(projectId))
       const project = storage.getProject(target)

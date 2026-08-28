@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Archive, Bot, FolderGit2, LayoutGrid, Plus, Trash2 } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import {
@@ -21,6 +22,7 @@ interface Props {
   onView: (view: View) => void
   onNewProject: () => void
   onDeleteProject: (project: Project) => void
+  onRenameProject: (project: Project, name: string) => void
   onCreate: () => void
   /** 概览里没有"当前项目"，新建任务无处可落，这时按钮是灰的。 */
   canCreate: boolean
@@ -34,10 +36,12 @@ interface Props {
 }
 
 export function AppSidebar({
-  agents, projects, counts, total, view, onView, onNewProject, onDeleteProject, onCreate, canCreate,
-  archivedCount, showArchived, onToggleArchived,
+  agents, projects, counts, total, view, onView, onNewProject, onDeleteProject, onRenameProject,
+  onCreate, canCreate, archivedCount, showArchived, onToggleArchived,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
+  // 正在改名的那个项目。双击名字进入，回车 / 失焦落定，Esc 放弃。
+  const [renaming, setRenaming] = useState<string | null>(null)
   return (
     <Sidebar>
       {/* 品牌位。收起时只剩那个方块标记。 */}
@@ -129,10 +133,21 @@ export function AppSidebar({
                 </SidebarMenuItem>
               ) : projects.map((project) => (
                 <SidebarMenuItem key={project.id}>
+                  {renaming === project.id ? (
+                    <RenameRow
+                      project={project}
+                      onCancel={() => { setRenaming(null) }}
+                      onCommit={(name) => {
+                        setRenaming(null)
+                        if (name !== project.name) onRenameProject(project, name)
+                      }}
+                    />
+                  ) : (
                   <SidebarMenuButton
                     isActive={view.kind === 'project' && view.id === project.id}
                     onClick={() => { onView({ kind: 'project', id: project.id }) }}
-                    title={`${project.repoPath}\n基线 ${project.baseBranch}`}
+                    onDoubleClick={() => { setRenaming(project.id) }}
+                    title={`${project.repoPath}\n基线 ${project.baseBranch}\n双击改名`}
                   >
                     <FolderGit2 />
                     <span>{project.name}</span>
@@ -142,14 +157,17 @@ export function AppSidebar({
                       {counts[project.id] ?? 0}
                     </SidebarMenuBadge>
                   </SidebarMenuButton>
-                  <SidebarMenuAction
-                    aria-label={`删除项目 ${project.name}`}
-                    title="删除项目"
-                    onClick={() => { onDeleteProject(project) }}
-                    className="hover:!text-lamp-fail"
-                  >
-                    <Trash2 />
-                  </SidebarMenuAction>
+                  )}
+                  {renaming === project.id ? null : (
+                    <SidebarMenuAction
+                      aria-label={`删除项目 ${project.name}`}
+                      title="删除项目"
+                      onClick={() => { onDeleteProject(project) }}
+                      className="hover:!text-lamp-fail"
+                    >
+                      <Trash2 />
+                    </SidebarMenuAction>
+                  )}
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -254,5 +272,51 @@ export function AppSidebar({
         )}
       </SidebarFooter>
     </Sidebar>
+  )
+}
+
+/**
+ * 就地改名。
+ *
+ * 落定的时机取三个：回车、失焦、以及点到别处 —— 与 Finder / 编辑器的侧栏
+ * 一致。Esc 放弃；名字改空了当作放弃，而不是把项目变成一行空白。
+ */
+function RenameRow({ project, onCommit, onCancel }: {
+  project: Project
+  onCommit: (name: string) => void
+  onCancel: () => void
+}): React.JSX.Element {
+  const [value, setValue] = useState(project.name)
+  const ref = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    ref.current?.focus()
+    ref.current?.select()
+  }, [])
+
+  const commit = (): void => {
+    const next = value.trim()
+    if (next.length === 0) { onCancel(); return }
+    onCommit(next)
+  }
+
+  return (
+    <div className="flex h-8 w-full items-center gap-2 rounded-md bg-sidebar-accent p-2">
+      <FolderGit2 className="size-4 flex-none text-sidebar-accent-foreground" />
+      <input
+        ref={ref}
+        value={value}
+        onChange={(event) => { setValue(event.target.value) }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') commit()
+          if (event.key === 'Escape') onCancel()
+        }}
+        className={cn(
+          'min-w-0 flex-1 bg-transparent text-sm text-sidebar-accent-foreground outline-none',
+          'selection:bg-sidebar-primary selection:text-sidebar-primary-foreground',
+        )}
+      />
+    </div>
   )
 }

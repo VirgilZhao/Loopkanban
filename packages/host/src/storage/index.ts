@@ -192,6 +192,16 @@ export class Storage {
   }
 
   /**
+   * 改项目的名字。只动这一个字段 —— 仓库路径与基线分支是它的身份，
+   * 改了名字还是同一个项目；要换仓库，那是另一个项目。
+   *
+   * @returns 是否改到了；false 表示这个项目不在。
+   */
+  renameProject(id: ProjectId, name: string): boolean {
+    return this.db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id).changes === 1
+  }
+
+  /**
    * 删除项目，连同它名下所有卡片与执行历史。
    *
    * 同 `deleteTask`，这是 `run_events` 只插不改不删的另一处例外：整个项目都

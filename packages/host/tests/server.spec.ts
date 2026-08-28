@@ -124,6 +124,29 @@ describe('POST /api/projects', () => {
   })
 })
 
+describe('PATCH /api/projects/:id', () => {
+  const rename = (id: string, body: unknown) =>
+    api(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+
+  it('改名字，仓库路径与基线分支不动 —— 那是它的身份', async () => {
+    const res = await rename(PROJECT, { name: '改过的名字' })
+    expect(res.status).toBe(200)
+    const project = store.getProject(PROJECT)
+    expect(project?.name).toBe('改过的名字')
+    expect(project?.repoPath).toBe('/repo')
+    expect(project?.baseBranch).toBe('main')
+  })
+
+  it('空名字 400 —— 边栏上一行空白没人认得出那是什么', async () => {
+    expect((await rename(PROJECT, { name: '   ' })).status).toBe(400)
+    expect(store.getProject(PROJECT)?.name).toBe('默认')
+  })
+
+  it('项目不存在返回 404', async () => {
+    expect((await rename('nope', { name: '新名字' })).status).toBe(404)
+  })
+})
+
 describe('DELETE /api/projects/:id', () => {
   it('删掉项目，连同它名下的卡与执行历史', async () => {
     store.createTask(task({ id: 't1' }))

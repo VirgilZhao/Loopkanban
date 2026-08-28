@@ -281,6 +281,15 @@ export default function App(): React.JSX.Element {
         onView={setView}
         onNewProject={() => { setNewProject(true) }}
         onDeleteProject={setDeleting}
+        onRenameProject={(project, name) => {
+          // 乐观改名：一个字段的重命名不值得让边栏闪一下。失败就用服务端的真相盖回来。
+          setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, name } : p)))
+          void api.renameProject(project.id, name)
+            .catch((error: unknown) => {
+              if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+              void refresh()
+            })
+        }}
         onCreate={createTask}
         canCreate={activeProject !== null}
         archivedCount={archivedCount}

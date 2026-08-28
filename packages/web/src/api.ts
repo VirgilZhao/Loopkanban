@@ -36,6 +36,12 @@ export const api = {
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
 
+  /** 改项目名。仓库路径与基线分支是它的身份，改名不动它们。 */
+  renameProject: (projectId: string, name: string) =>
+    call<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH', body: JSON.stringify({ name }),
+    }),
+
   /**
    * 删除项目，连同它名下所有卡片、执行历史，以及这些卡留下的分支与 worktree。
    * **仓库本身不动**。还有卡在执行时会被拒绝。

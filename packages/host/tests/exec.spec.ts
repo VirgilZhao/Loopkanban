@@ -30,6 +30,20 @@ describe('runCommand', () => {
     expect(Buffer.byteLength(result.stdout)).toBe(MAX_OUTPUT_BYTES)
   })
 
+  /*
+   * 封顶是按字节切的，切口必然落在某个汉字中间。不收尾的话每一次超长输出都
+   * 以一个 `�` 收场，看着像命令自己吐了乱码 —— 而它没有。
+   */
+  it('输出截断处不留半个多字节字符', async () => {
+    const result = await runCommand(
+      `node -e 'process.stdout.write("中".repeat(${String(MAX_OUTPUT_BYTES)}))'`,
+      sandbox,
+    )
+    expect(result.truncated).toBe(true)
+    expect(result.stdout).not.toContain('\uFFFD')
+    expect(result.stdout.endsWith('中')).toBe(true)
+  })
+
   it('超时会收掉进程并标出来', async () => {
     const result = await runCommand('sleep 5', sandbox, 1_000)
     expect(result.timedOut).toBe(true)

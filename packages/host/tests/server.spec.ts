@@ -1049,7 +1049,7 @@ describe('GET /api/tasks/:id/file', () => {
     await writeFile(join(sandbox, 'secret.txt'), 'nope')
     const res = await ask('t1', join(sandbox, 'secret.txt'))
     expect(res.status).toBe(422)
-    expect(await res.json()).toMatchObject({ error: 'path-outside-workspace' })
+    expect(await res.json()).toMatchObject({ error: 'outside-project' })
   })
 
   it('二进制 415，不给一屏乱码', async () => {

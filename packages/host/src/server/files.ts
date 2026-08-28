@@ -5,28 +5,17 @@
  * 所以它可以从家目录起步、逛遍整台机器。这个要列文件、还要把正文吐回浏览器，
  * 强得多，因此反过来 —— **只在已登记的项目仓库里逛**。
  *
- * 为什么要这层围栏：localhost + token 已经挡住了外人，但挡不住自己写错的
- * 路径拼接。一个 `..` 的疏漏在「只列目录名」时是噪音，在「读任意文件正文」
- * 时就是把整台机器的内容摊开。围栏让这种 bug 的最坏后果止步于用户自己的仓库。
- *
- * 围栏画在**真实路径**上（`realpath`）：不然一条指向 `/etc` 的符号链接就能
- * 把请求带出去，而字符串前缀比较看不出来。
+ * 围栏与「安全地读出一个文件」都在 `../fs/`，与讨论里的文档预览共用。这里剩下
+ * 的是浏览页自己的策略：围栏的根是**已登记项目的仓库**（预览画的是另一圈 ——
+ * 那张卡历次执行的 worktree），以及二进制**如实标注而不是拒绝** —— 文件管理器
+ * 该让人看见 `logo.png` 在那儿，而不是假装它不存在。
  */
 
-import { open, readdir, realpath, stat } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { readdir, realpath, stat } from 'node:fs/promises'
+import { basename, dirname, join, relative, resolve } from 'node:path'
+import { contains, readTextHead } from '../fs/index.ts'
+import type { TextFailure } from '../fs/index.ts'
 import { WORKTREE_HOME, currentBranch, listWorktrees } from '../worktree/index.ts'
-
-/**
- * 单个文件最多回多少正文。
- *
- * 这是个看代码的窗口，不是下载通道：几 MB 的日志塞进 JSON 再交给浏览器渲染，
- * 只会把标签页顶住。超过就截断并如实说明。
- */
-export const MAX_FILE_BYTES = 512 * 1024
-
-/** 判定二进制时看头部多少字节。文本文件的 NUL 几乎总在开头就能撞见。 */
-const SNIFF_BYTES = 8 * 1024
 
 /** 一个可浏览的工作区：项目主仓库，或某张卡派生出来的 worktree。 */
 export interface Workspace {
@@ -62,94 +51,16 @@ export interface FileContent {
   readonly path: string
   readonly relative: string
   readonly size: number
-  /** 超过 {@link MAX_FILE_BYTES} 时只回前一段。 */
+  /** 超过 {@link MAX_TEXT_BYTES} 时只回前一段。 */
   readonly truncated: boolean
   /** 二进制文件不回正文 —— 把它当 UTF-8 解出来只会是一屏乱码。 */
   readonly binary: boolean
   readonly content: string
 }
 
-/**
- * 目标是否落在根里面（含根本身）。
- *
- * 用 `relative` 而不是 `startsWith`：字符串前缀会把 `/repo-old` 当成 `/repo`
- * 的子目录。
- */
-export function contains(root: string, target: string): boolean {
-  const rel = relative(root, target)
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-}
-
-/**
- * 尽最大努力解出真实路径。
- *
- * 路径不存在时 `realpath` 直接失败，可界面上的清单总是慢一拍 —— 文件刚被
- * 删掉、目录刚被改名都会走到这里，而那该是一句「打不开」而不是「越界了」。
- * 于是退到**最近一个存在的祖先**上解析：那一截已经吃掉了路径里所有符号链接，
- * 剩下的部分是纯字面量，接回去不会把请求带到别处。
- */
-async function realResolve(target: string): Promise<string> {
-  const rest: string[] = []
-  let here = target
-  for (;;) {
-    const real = await realpath(here).catch(() => null)
-    if (real !== null) return rest.length === 0 ? real : join(real, ...rest.reverse())
-    const up = dirname(here)
-    // 一路走到文件系统根都解不出来（几乎不可能），原样返回，交给 containment 判。
-    if (up === here) return target
-    rest.push(basename(here))
-    here = up
-  }
-}
-
-/**
- * 把请求里的路径校验进围栏。
- *
- * 先 `resolve` 做字面归一（吃掉 `..`），再解真实路径 —— 顺序不能反：真正会
- * 被 `stat` / `readdir` 打开的正是归一之后的那个路径，所以判定必须针对它。
- *
- * @param roots - 允许的根，通常是所有已登记项目的仓库路径。
- * @param asked - 请求里给的绝对路径。
- * @returns 解析后的路径；不是绝对路径、或不在任何根里面时返回 null。
- *   路径存不存在**不在这里判** —— 那由随后的 `stat` 说了算，两种失败对
- *   调用方是不同的话。
- */
-export async function confine(roots: readonly string[], asked: string): Promise<string | null> {
-  if (!isAbsolute(asked)) return null
-  const target = await realResolve(resolve(asked))
-  for (const root of roots) {
-    // 仓库自己也可能挂在符号链接下（macOS 的 /tmp 就是），两边都要取真实路径。
-    const real = await realpath(root).catch(() => null)
-    if (real !== null && contains(real, target)) return target
-  }
-  return null
-}
-
-/** 围栏没放行时，到底是哪一种。 */
-export type Refusal = 'outside-project' | 'repo-missing'
-
-/**
- * 围栏拒绝的原因。
- *
- * 「路径在围栏外」和「仓库整个不见了」对用户是两件完全不同的事：后者说成前者，
- * 等于告诉他「你逛的不是你自己的项目」，而他逛的恰恰就是那个项目登记的路径 ——
- * 只是目录被移走或删掉了。这句话会把人往完全错误的方向带。
- *
- * 只在拒绝之后才调用，happy path 不为它多做一次 IO。
- *
- * @param roots - 允许的根，与 {@link confine} 拿到的是同一份。
- * @param asked - 被拒的那个路径。
- */
-export async function refusalFor(roots: readonly string[], asked: string): Promise<Refusal> {
-  if (!isAbsolute(asked)) return 'outside-project'
-  const target = resolve(asked)
-  for (const root of roots) {
-    // 字面上属于这个仓库，却 realpath 不出来 —— 那就是仓库自己没了。
-    if (!contains(resolve(root), target)) continue
-    if (await realpath(root).then(() => false, () => true)) return 'repo-missing'
-  }
-  return 'outside-project'
-}
+export type FileContentResult =
+  | { readonly ok: true; readonly file: FileContent }
+  | { readonly ok: false; readonly reason: TextFailure }
 
 /**
  * 一个项目下所有能逛的工作区：主仓库，加上卡片留下的 worktree。
@@ -194,7 +105,7 @@ export async function listWorkspaces(repoPath: string): Promise<Workspace[]> {
  * 正是看代码时要找的东西，藏起来只会逼人去开终端。唯独 `.git/` 不列 ——
  * 几百个对象文件对读代码毫无帮助，只会把真正的内容挤出屏幕。
  *
- * @param root - 工作区根，已经过 {@link confine} 校验。
+ * @param root - 工作区根，已经过 `confine` 校验。
  * @param path - 要列的目录，必须在根里面。
  */
 export async function listFiles(root: string, path: string): Promise<FileListing> {
@@ -237,32 +148,25 @@ export async function listFiles(root: string, path: string): Promise<FileListing
 /**
  * 读一个文件的正文。
  *
- * 只读前 {@link MAX_FILE_BYTES} 字节，且**先判二进制再解码**：把 PNG 按
- * UTF-8 解出来是一屏替换字符，既没用又很慢。
+ * 读取本身在 `../fs/text.ts`（上限、二进制判定、截断收尾都在那儿）；这里只添
+ * 界面要的那点上下文 —— 相对工作区根的路径。
  *
  * @param root - 工作区根，用来算相对路径。
- * @param path - 文件绝对路径，已经过 {@link confine} 校验。
+ * @param path - 文件绝对路径，已经过 `confine` 校验。
  */
-export async function readFileText(root: string, path: string): Promise<FileContent> {
+export async function readFileText(root: string, path: string): Promise<FileContentResult> {
   const here = resolve(path)
-  const info = await stat(here)
-  if (!info.isFile()) throw new Error(`${here} 不是文件`)
-
-  const handle = await open(here, 'r')
-  try {
-    const buffer = Buffer.alloc(Math.min(info.size, MAX_FILE_BYTES))
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    const head = buffer.subarray(0, Math.min(bytesRead, SNIFF_BYTES))
-    const binary = head.includes(0)
-    return {
+  const read = await readTextHead(here)
+  if (!read.ok) return read
+  return {
+    ok: true,
+    file: {
       path: here,
       relative: relative(root, here),
-      size: info.size,
-      truncated: info.size > MAX_FILE_BYTES,
-      binary,
-      content: binary ? '' : buffer.subarray(0, bytesRead).toString('utf8'),
-    }
-  } finally {
-    await handle.close()
+      size: read.head.size,
+      truncated: read.head.truncated,
+      binary: read.head.binary,
+      content: read.head.content,
+    },
   }
 }

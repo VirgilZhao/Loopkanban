@@ -7,7 +7,8 @@
  *
  * 三条硬性约束：
  *
- * - **cwd 必须落在已登记项目的仓库里**（由调用方用 `confine` 校验后传进来）。
+ * - **cwd 必须落在已登记项目的仓库里**（由调用方用 `../fs/fence.ts` 的 `confine`
+ *   校验后传进来）。
  *   命令本身当然能自己 `cd /`，拦不住也不打算拦 —— 这层围栏防的是路径拼接
  *   写错，不是防用户。
  * - **超时后收整棵进程树**。走 `spawnProcess` 而不是 `child_process.exec`：
@@ -22,6 +23,7 @@
  * `git push` 神秘地失败，而他根本不会想到是看板动的手。
  */
 
+import { decodeUtf8 } from '../fs/index.ts'
 import { spawnProcess } from '../subprocess/index.ts'
 
 /** 一条命令最多跑多久。够跑一次测试，又不至于让页面上挂一个永远不回来的请求。 */
@@ -64,6 +66,10 @@ function shellArgv(command: string): string[] {
  *
  * 早早 `destroy()` 掉流看似省事，实际会让子进程在下一次写入时拿到 EPIPE
  * 而死掉 —— 那是我们替它做的决定，不是它自己的结果。
+ *
+ * 封顶处按字节切，所以可能砍在一个多字节字符中间；`decodeUtf8` 削掉那半个。
+ * 这里必须等 `Buffer.concat` 之后再削 —— 输出是一块一块来的，chunk 的边界
+ * 本来就常落在字符中间，单独看每一块只会把好好的字也削掉。
  */
 async function drain(stream: NodeJS.ReadableStream | null, limit: number): Promise<{ text: string; truncated: boolean }> {
   if (stream === null) return { text: '', truncated: false }
@@ -83,7 +89,7 @@ async function drain(stream: NodeJS.ReadableStream | null, limit: number): Promi
       kept += buffer.length
     }
   }
-  return { text: Buffer.concat(chunks).toString('utf8'), truncated }
+  return { text: decodeUtf8(Buffer.concat(chunks), truncated), truncated }
 }
 
 /**

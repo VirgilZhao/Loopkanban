@@ -58,6 +58,28 @@ export interface Attachment {
   readonly at: number
 }
 
+/**
+ * 一条从卡片开出去的 Pull Request（的**投影**）。
+ *
+ * 真相在 GitHub 上，这里存的是最后一次问到的状态：界面照着它渲染，
+ * "合上了没有、要不要把卡收进 Done"也照着它判。一张卡可以有多条 ——
+ * Done 里再说一句就是下一轮，那一轮会开出另一条。
+ */
+export interface TaskPullRequest {
+  readonly id: string
+  readonly taskId: TaskId
+  readonly number: number
+  readonly url: string
+  /** 开这条 PR 时的任务分支。卡片标题改过之后分支名会变，所以要记当时那个。 */
+  readonly branch: string
+  readonly baseBranch: string
+  readonly state: 'open' | 'merged' | 'closed'
+  readonly mergeable: 'mergeable' | 'conflicting' | 'unknown'
+  readonly mergedAt?: number | undefined
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
 export type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
 
 export interface Run {
@@ -182,6 +204,40 @@ function toAttachment(row: AttachmentRow): Attachment {
   }
 }
 
+interface PullRequestRow {
+  id: string
+  task_id: string
+  number: number
+  url: string
+  branch: string
+  base_branch: string
+  state: string
+  mergeable: string
+  merged_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+function toPullRequest(row: PullRequestRow): TaskPullRequest {
+  const state = row.state === 'merged' ? 'merged' : row.state === 'closed' ? 'closed' : 'open'
+  const mergeable = row.mergeable === 'mergeable' ? 'mergeable'
+    : row.mergeable === 'conflicting' ? 'conflicting'
+    : 'unknown'
+  return {
+    id: row.id,
+    taskId: asTaskId(row.task_id),
+    number: row.number,
+    url: row.url,
+    branch: row.branch,
+    baseBranch: row.base_branch,
+    state,
+    mergeable,
+    ...(row.merged_at === null ? {} : { mergedAt: row.merged_at }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 function toRun(row: RunRow): Run {
   return {
     id: asRunId(row.id),
@@ -293,6 +349,7 @@ export class Storage {
       this.db.prepare('DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM task_comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM task_attachments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM task_prs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
       if (removed.changes !== 1) {
@@ -381,6 +438,59 @@ export class Storage {
     return this.db.prepare('DELETE FROM task_attachments WHERE id = ?').run(id).changes === 1
   }
 
+  // ── Pull Request ───────────────────────────────────────────────
+
+  /**
+   * 记下（或刷新）一条 PR 的状态。
+   *
+   * 按 `(task_id, number)` 幂等：同一条 PR 被查到多少次都只有一行，每次
+   * 覆盖成最新的状态。**`created_at` 不覆盖** —— 那是"这条 PR 什么时候
+   * 进入看板视野"的时间，刷新一次就把它推到现在，历史顺序就乱了。
+   *
+   * @param pr - 最新的投影值。
+   */
+  upsertPullRequest(pr: TaskPullRequest): void {
+    this.db.prepare(`
+      INSERT INTO task_prs (
+        id, task_id, number, url, branch, base_branch, state, mergeable, merged_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, number) DO UPDATE SET
+        url = excluded.url,
+        branch = excluded.branch,
+        base_branch = excluded.base_branch,
+        state = excluded.state,
+        mergeable = excluded.mergeable,
+        merged_at = excluded.merged_at,
+        updated_at = excluded.updated_at
+    `).run(
+      pr.id, pr.taskId, pr.number, pr.url, pr.branch, pr.baseBranch,
+      pr.state, pr.mergeable, pr.mergedAt ?? null, pr.createdAt, pr.updatedAt,
+    )
+  }
+
+  /** 一张卡的 PR，新的排在前面 —— 最近那一轮才是人此刻要看的。 */
+  listPullRequests(taskId: TaskId): TaskPullRequest[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_prs WHERE task_id = ? ORDER BY number DESC',
+    ).all(taskId) as unknown as PullRequestRow[]
+    return rows.map(toPullRequest)
+  }
+
+  /** 全部 PR。看板要在卡面上标出"这张卡合过几条"，一次读完比一张卡问一次划算。 */
+  listAllPullRequests(): TaskPullRequest[] {
+    const rows = this.db.prepare('SELECT * FROM task_prs ORDER BY task_id, number DESC')
+      .all() as unknown as PullRequestRow[]
+    return rows.map(toPullRequest)
+  }
+
+  /** 还没有终态的 PR。后台那轮"合上了没有"的巡检只需要问这些。 */
+  listOpenPullRequests(): TaskPullRequest[] {
+    const rows = this.db.prepare("SELECT * FROM task_prs WHERE state = 'open' ORDER BY task_id, number")
+      .all() as unknown as PullRequestRow[]
+    return rows.map(toPullRequest)
+  }
+
   // ── Task ───────────────────────────────────────────────────────
 
   createTask(task: Task): void {
@@ -467,6 +577,7 @@ export class Storage {
       // 顺序是外键定的：事件 → Run → 卡片。反过来第一步就会被 runs 的引用挡住。
       this.db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM task_attachments WHERE task_id = ?').run(id)
+      this.db.prepare('DELETE FROM task_prs WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)

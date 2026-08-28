@@ -8,7 +8,11 @@ import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
 import { AttachmentStore } from '../src/attachments/index.ts'
+import { GitHub } from '../src/pr/index.ts'
+import { Review } from '../src/review/index.ts'
 import { Storage } from '../src/storage/index.ts'
+import { capture } from '../src/agents/discover.ts'
+import { ensureWorktree } from '../src/worktree/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
 const T0 = 1_000_000
@@ -1507,5 +1511,196 @@ describe('静态资源路径（回归）', () => {
       await nested.close()
       await rm(sandbox, { recursive: true, force: true })
     }
+  })
+})
+
+describe('Pull Request 接口', () => {
+  /** 起一个带验收器、但本机"没装 gh"的 server —— 能力探测那条路要走得通。 */
+  const withReview = () => startServer({
+    storage: store, token: TOKEN,
+    review: new Review({ storage: store, github: new GitHub({ bin: null }) }),
+  })
+
+  const at = (server: RunningServer, path: string, init: RequestInit = {}) =>
+    fetch(`http://127.0.0.1:${String(server.port)}${path}`, {
+      ...init,
+      headers: { cookie: `loopkanban_token=${TOKEN}`, ...init.headers },
+    })
+
+  it('没配验收器时明确 503 —— 界面据此知道这台实例根本开不了 PR', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    expect((await api('/api/tasks/t1/prs')).status).toBe(503)
+  })
+
+  it('列 PR 时一并回"这个仓库能不能开 PR"，开不了要说清楚卡在哪儿', async () => {
+    const server2 = await withReview()
+    try {
+      store.createTask(task({ id: 't1', column: 'review' }))
+      const res = await at(server2, '/api/tasks/t1/prs')
+      expect(res.status).toBe(200)
+
+      const body = await res.json() as { prs: unknown[]; capability: Record<string, unknown> }
+      expect(body.prs).toEqual([])
+      expect(body.capability).toMatchObject({ gh: false, ready: false, reason: 'gh-missing' })
+      // 原因要能直接读给人看，不能只有一个 code。
+      expect(String(body.capability['detail'])).toContain('gh')
+    } finally {
+      await server2.close()
+    }
+  })
+
+  it('开 PR 被拒时是 422（这个请求本身不成立），不是 500', async () => {
+    const server2 = await withReview()
+    try {
+      store.createTask(task({ id: 't1', column: 'review' }))
+      store.createRun({
+        id: asRunId('run-1'), taskId: asTaskId('t1'), provider: 'codex', cliVersion: '0.1',
+        worktreePath: '/nope', branch: 'task/t1', status: 'completed', startedAt: T0,
+      })
+      const res = await at(server2, '/api/tasks/t1/prs', { method: 'POST' })
+      expect(res.status).toBe(422)
+      expect(await res.json()).toMatchObject({ error: 'no-worktree' })
+      expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+    } finally {
+      await server2.close()
+    }
+  })
+
+  it('看板状态里捎上每张卡的 PR —— 卡面上那枚标记靠它，不必一张卡问一次', async () => {
+    store.createTask(task({ id: 't1', column: 'done' }))
+    store.upsertPullRequest({
+      id: 'pr-1', taskId: asTaskId('t1'), number: 7, url: 'https://github.com/acme/demo/pull/7',
+      branch: 'task/t1', baseBranch: 'main', state: 'merged', mergeable: 'unknown',
+      mergedAt: T0 + 10, createdAt: T0, updatedAt: T0 + 10,
+    })
+
+    const body = await (await api('/api/state')).json() as { prs: Record<string, unknown[]> }
+    expect(body.prs['t1']).toMatchObject([{ number: 7, state: 'merged' }])
+  })
+})
+
+describe('开 PR 撞上冲突', () => {
+  let sandbox: string
+  let repo: string
+
+  /** gh 的替身：远端认成 GitHub，PR 一条都还没有。 */
+  const github = () => new GitHub({
+    bin: '/usr/local/bin/gh',
+    capture: (argv) => Promise.resolve(
+      argv.includes('get-url')
+        ? { stdout: 'git@github.com:acme/demo.git\n', stderr: '', code: 0 }
+        : { stdout: '', stderr: 'no pull requests found', code: 1 },
+    ),
+  })
+
+  const git = (cwd: string, ...args: string[]) => capture(['git', '-C', cwd, ...args])
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-pr-conflict-'))
+    repo = join(sandbox, 'repo')
+    await capture(['git', 'init', '-q', '-b', 'main', repo])
+    for (const args of [['config', 'user.email', 't@t'], ['config', 'user.name', 'T']]) await git(repo, ...args)
+    await writeFile(join(repo, 'README.md'), '# demo\n', 'utf8')
+    await git(repo, 'add', '-A')
+    await git(repo, 'commit', '-qm', 'init')
+    // 得有个真远端 —— 能力探测问的是 git，只有"这是不是 GitHub"才是假的。
+    const bare = join(sandbox, 'origin.git')
+    await capture(['git', 'init', '-q', '--bare', bare])
+    await git(repo, 'remote', 'add', 'origin', bare)
+    await git(repo, 'push', '-q', 'origin', 'main')
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('422 里带上冲突文件与"卡已经回队列"，界面据此知道下一步在哪儿', async () => {
+    const server2 = await startServer({
+      storage: store, token: TOKEN,
+      review: new Review({ storage: store, github: github() }),
+    })
+    try {
+      store.createTask(task({ id: 't1', column: 'review', repoPath: repo }))
+      const wt = await ensureWorktree(repo, 't1', 'task/t1', 'main')
+      await writeFile(join(wt.path, 'README.md'), '# 我改的\n', 'utf8')
+      store.createRun({
+        id: asRunId('run-1'), taskId: asTaskId('t1'), provider: 'codex', cliVersion: '0.1',
+        worktreePath: wt.path, branch: wt.branch, status: 'completed', startedAt: T0,
+      })
+      // 基线那边动了同一处，而且**已经推上去了** —— 这正是冲突的来处：
+      // 卡是从旧的基线派生的，主干在这期间往前走了。
+      await writeFile(join(repo, 'README.md'), '# 他改的\n', 'utf8')
+      await git(repo, 'commit', '-qam', 'base moved')
+      await git(repo, 'push', '-q', 'origin', 'main')
+
+      const res = await fetch(`http://127.0.0.1:${String(server2.port)}/api/tasks/t1/prs`, {
+        method: 'POST', headers: { cookie: `loopkanban_token=${TOKEN}` },
+      })
+      expect(res.status).toBe(422)
+      expect(await res.json()).toMatchObject({
+        error: 'merge-conflict', files: ['README.md'], requeued: true,
+      })
+      // 没配执行器就派不出去 —— 但结论不变：冲突这件事已经如实报了。
+      expect(store.getTask(asTaskId('t1'))?.column).toBe('ready')
+      expect(store.listComments(asTaskId('t1'))[0]?.body).toContain('README.md')
+    } finally {
+      await server2.close()
+    }
+  })
+
+  it('上一轮的冲突还没解完：照样 422，但明说卡没回队列（它还在 Review）', async () => {
+    const server2 = await startServer({
+      storage: store, token: TOKEN,
+      review: new Review({ storage: store, github: github() }),
+    })
+    try {
+      store.createTask(task({ id: 't1', column: 'review', repoPath: repo }))
+      const wt = await ensureWorktree(repo, 't1', 'task/t1', 'main')
+      store.createRun({
+        id: asRunId('run-1'), taskId: asTaskId('t1'), provider: 'codex', cliVersion: '0.1',
+        worktreePath: wt.path, branch: wt.branch, status: 'completed', startedAt: T0,
+      })
+      // 造出"解冲突那一轮跑砸了"的样子：工作区里还留着冲突标记。
+      await writeFile(join(wt.path, 'README.md'), '# 我改的\n', 'utf8')
+      await git(wt.path, 'add', '-A')
+      await git(wt.path, 'commit', '-qm', 'mine')
+      await writeFile(join(repo, 'README.md'), '# 他改的\n', 'utf8')
+      await git(repo, 'commit', '-qam', 'base moved')
+      await git(wt.path, 'merge', '--no-edit', 'main')
+
+      const res = await fetch(`http://127.0.0.1:${String(server2.port)}/api/tasks/t1/prs`, {
+        method: 'POST', headers: { cookie: `loopkanban_token=${TOKEN}` },
+      })
+      // 这一条以前是抛出去、被兜成 500 的"服务端出错"。
+      expect(res.status).toBe(422)
+      expect(await res.json()).toMatchObject({
+        error: 'merge-conflict', files: ['README.md'], requeued: false,
+      })
+      expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+    } finally {
+      await server2.close()
+    }
+  })
+})
+
+describe('Done 里的二次执行', () => {
+  it('对一张已完成的卡说一句，它就回队列 —— 合完才发现还差一条，是同一张卡的下一轮', async () => {
+    store.createTask(task({ id: 't1', column: 'done' }))
+
+    const res = await api('/api/tasks/t1/comments', {
+      method: 'POST', body: JSON.stringify({ body: '还差一个测试' }),
+    })
+    expect(res.status).toBe(201)
+    expect(await res.json()).toMatchObject({ requeued: true })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('ready')
+    // 话留着，下一轮带着整条讨论走。
+    expect(store.listComments(asTaskId('t1'))[0]?.body).toBe('还差一个测试')
+  })
+
+  it('别的列只是留个话，不动卡的位置', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const res = await api('/api/tasks/t1/comments', {
+      method: 'POST', body: JSON.stringify({ body: '记一笔' }),
+    })
+    expect(await res.json()).toMatchObject({ requeued: false })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
   })
 })

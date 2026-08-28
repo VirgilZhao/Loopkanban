@@ -299,6 +299,19 @@ async function main(): Promise<void> {
   // 没有它，一次崩溃就会让任务永远卡在 Running。
   scheduler.start()
 
+  /*
+   * PR 巡检：问一遍那些还开着的 PR 合上了没有，合上的把卡收进 Done。
+   *
+   * 必须有一条后台的路径，而不能只靠"打开卡片时刷一下"：人在 GitHub 上按下
+   * 合并之后，多半就去干别的了，看板这边不该等到下次有人点开那张卡才发现。
+   * 一分钟一轮 —— 再密就是在替用户浪费 GitHub 的额度，而这件事本来就不急。
+   * 没装 gh / 没有开着的 PR 时它一次网都不出。
+   */
+  const prSweep = setInterval(() => {
+    void review.syncPullRequests().catch(() => undefined)
+  }, 60_000)
+  prSweep.unref()
+
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
   const token = await resolveToken(dir, process.argv.includes('--new-token'))

@@ -8,15 +8,25 @@
 
 import type {
   Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
-  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent,
-  Task, TaskComment, TaskEdit, Workspace,
+  FilePreview, LiveLine, PrCapability, Project, PullRequest, Run, RunStats, SchedulerSettings,
+  SchedulerState, StreamEvent, Task, TaskComment, TaskEdit, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
 export type NextRound = Pick<TaskEdit, 'preferredProvider' | 'model'>
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly code: string, detail: string) {
+  /**
+   * @param body - 响应体原样带着。有些拒绝是**有结构的**：开 PR 撞上冲突时，
+   *   服务端还会给出冲突文件与那次自动派活的 id —— 只留一句 detail 的话，
+   *   界面就只能把服务端那句中文原样贴给英文用户看。
+   */
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    detail: string,
+    readonly body: Record<string, unknown> = {},
+  ) {
     super(detail)
     this.name = 'ApiError'
   }
@@ -30,7 +40,9 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   })
   const body = await res.json().catch(() => ({})) as Record<string, unknown>
   if (!res.ok) {
-    throw new ApiError(res.status, String(body['error'] ?? 'unknown'), String(body['detail'] ?? res.statusText))
+    throw new ApiError(
+      res.status, String(body['error'] ?? 'unknown'), String(body['detail'] ?? res.statusText), body,
+    )
   }
   return body as T
 }
@@ -53,6 +65,8 @@ export const api = {
     live: Record<string, LiveLine>
     /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
     attachments: Record<string, number>
+    /** 每张卡开过哪些 PR，新的在前；一条都没有的卡不在里面。 */
+    prs: Record<string, PullRequest[]>
   }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
@@ -197,12 +211,39 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ merge }) },
     ),
 
+  /** 一张卡开过的 PR，外加"这个仓库能不能开 PR"。 */
+  prs: (taskId: string) =>
+    call<{ prs: PullRequest[]; capability: PrCapability }>(`/api/tasks/${encodeURIComponent(taskId)}/prs`),
+
+  /**
+   * 开一条 PR：提交这一轮的改动 → 把基线合进任务分支 → 推上去 → `gh pr create`。
+   *
+   * **卡不会因此进 Done**。PR 开出来只说明改动到了该被评审的地方，合不合是
+   * GitHub 上那颗按钮说了算；合上之后由 {@link api.syncPrs} 或后台巡检把卡收进 Done。
+   *
+   * 冲突（`merge-conflict`）是**有下一步的失败**：改动已经在分支上，冲突留在
+   * 工作区里，卡自动回队列，服务端还会顺手把这一轮派出去解冲突 ——
+   * 响应里的 `files` 是冲突文件，`dispatched` 是那次执行的 id。
+   */
+  openPr: (taskId: string) =>
+    call<{ pr: PullRequest; created: boolean; commit: string | null; prs: PullRequest[]; task: Task }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/prs`,
+      { method: 'POST' },
+    ),
+
+  /** 问一遍这张卡的 PR 现在怎么样了。合上的会被收进 Done，`collected` 就是它们。 */
+  syncPrs: (taskId: string) =>
+    call<{ prs: PullRequest[]; collected: string[]; task: Task }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/prs/sync`,
+      { method: 'POST' },
+    ),
+
   /** 一张卡的讨论，按时间正序。 */
   comments: (taskId: string) =>
     call<{ comments: TaskComment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/comments`),
 
   /**
-   * 留一条言。**在 Review 里留言就是"再改一版"**：卡自动回队列，
+   * 留一条言。**在 Review 或 Done 里留言就是"再改一版"**：卡自动回队列，
    * 下一次执行会带着整条讨论走。`requeued` 说明这次有没有搬动卡片。
    *
    * `next` 是顺带改掉的「下一轮交给谁、用哪个模型」。只送真正变了的字段 ——

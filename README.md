@@ -32,6 +32,15 @@ loopkanban service install   # 确认无误再装
 - **worktree 隔离**。Agent 不碰你的主工作区，跑飞了删掉分支即可。
 - **卡片可以带附件**。截图、PDF、Word 拖进卡里，派活时它们会被拷进工作区并在
   TASK.md 里点名交给 CLI —— 说不清楚的需求，给它看。
+- **验收走 PR**。仓库有 GitHub 远端、本机装了 `gh`（用你自己的登录态，同样零
+  API Key）时，「通过并合并」会提交改动、把基线合进任务分支、推上去并开一条 PR。
+  **合不合始终是你在 GitHub 上的决定** —— 我们只在它真的合上之后把卡收进 Done，
+  卡上列着它合过的每一条 PR（一张卡可以有好几条）。合基线时撞上冲突，冲突就留在
+  这张卡自己的工作区里，卡自动回队列并派一轮去解 —— 那是 Agent 干的活，不是你的。
+  没有远端或没装 `gh` 时这颗按钮退回本地合并，并把原因写在按钮下面。
+- **做完了还能接着改**。Review 与 Done 的卡都能在讨论里再说一句，说完就回队列跑
+  下一轮 —— 合完才发现还差一条，本来就是同一张卡的事，不必另开一张把讨论、工作区
+  和已经合过的 PR 全丢掉。
 - **只监听 `127.0.0.1`**。远程访问走 SSH 端口转发。
 - **文件浏览与命令行**。顶栏可以从看板切到「文件浏览」：逛项目仓库、切到某张卡
   的 worktree 看 Agent 到底改了什么，底下还挂着一个命令行，命令就跑在你正看着的
@@ -43,7 +52,7 @@ loopkanban service install   # 确认无误再装
 
 ```
 packages/core   纯领域逻辑，无 IO，时间由参数传入 —— 状态机、CAS、租约、调度决策
-packages/host   Node 侧：CLI 探测与执行、worktree、SQLite、HTTP + SSE、验收
+packages/host   Node 侧：CLI 探测与执行、worktree、SQLite、HTTP + SSE、验收与 PR
 packages/web    React + Vite + shadcn/ui，产物由 host 托管
 ```
 
@@ -51,7 +60,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 433 个测试
+pnpm test            # 554 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

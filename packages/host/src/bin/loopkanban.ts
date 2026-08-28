@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
+import { AttachmentStore } from '../attachments/index.ts'
 import { createToken } from '../server/auth.ts'
 import { AgentPool, detectAgents, knownCommands, type DetectedAgent } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
@@ -284,6 +285,8 @@ async function main(): Promise<void> {
     artifactsRoot: join(dir, 'runs'),
   })
   const review = new Review({ storage })
+  // 附件的字节落在数据目录里，跟数据库同处一个信任级别。
+  const attachments = new AttachmentStore(join(dir, 'attachments'))
   const scheduler = new Scheduler({ storage, runner, agents: pool })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
@@ -312,6 +315,7 @@ async function main(): Promise<void> {
     agents: pool,
     runner,
     review,
+    attachments,
     scheduler,
     bus,
     token,

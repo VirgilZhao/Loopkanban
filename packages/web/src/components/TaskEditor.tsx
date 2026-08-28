@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ChevronRight, FolderGit2, Plus, X } from 'lucide-react'
+import { Attachments } from '@/components/Attachments.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
@@ -15,6 +16,9 @@ interface Props {
   agents: Agent[]
   busy: boolean
   onSave: (edit: TaskEdit) => void
+  /** 附件是即时生效的，不进草稿，所以它自己要能报错、能通知外面刷新。 */
+  onError: (code: string, detail: string) => void
+  onChanged: () => void
 }
 
 /** 表单里持有的草稿。`preferredProvider` 显式允许 undefined —— 「任意」就是它。 */
@@ -35,7 +39,9 @@ function draftOf(task: Task): Draft {
   }
 }
 
-export function TaskEditor({ task, project, agents, busy, onSave }: Props): React.JSX.Element {
+export function TaskEditor({
+  task, project, agents, busy, onSave, onError, onChanged,
+}: Props): React.JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState(() => draftOf(task))
   // 两种冻结，同一套只读：正在执行的、以及归档的。字段上的 disabled 全靠它。
@@ -128,6 +134,18 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
             </Button>
           </div>
         </Collapsible>
+
+        {/* 附件不折叠：它是"写需求"的一部分 —— 设计稿、报错截图、要照着做的
+            那份 PDF，收起来等于让人先想起有这回事才找得到。空着时也只是一行
+            提示加一个投放区，不占多少地方。 */}
+        <Field label={t('editor.attachments')} hint={t('editor.attachmentsHint')}>
+          <Attachments
+            taskId={task.id}
+            locked={locked}
+            onError={onError}
+            onChanged={onChanged}
+          />
+        </Field>
 
         <Field label={t('editor.provider')} hint={t('editor.providerHint')}>
           <div className="flex flex-wrap gap-2">

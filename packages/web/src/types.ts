@@ -42,6 +42,20 @@ export interface Task {
   updatedAt: number
 }
 
+/**
+ * 卡片带着的一个附件：图片、PDF、Word 文档之类。
+ *
+ * 内容不走 JSON —— 要拿它去 `/api/attachments/<id>`，那也是 `<img>` 的 src。
+ */
+export interface Attachment {
+  id: string
+  taskId: string
+  filename: string
+  mime: string
+  size: number
+  at: number
+}
+
 /** 允许人工编辑的字段。 */
 export interface TaskEdit {
   description?: string

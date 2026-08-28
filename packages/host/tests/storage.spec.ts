@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import {
   acquireLease, asProjectId, asRunId, asTaskId, moveTask, type Task,
 } from '@loopkanban/core'
-import { Storage, type Project, type Run } from '../src/storage/index.ts'
+import { Storage, type Attachment, type Project, type Run } from '../src/storage/index.ts'
 import { MIGRATIONS } from '../src/storage/schema.ts'
 
 const T0 = 1_000_000
@@ -219,6 +219,55 @@ describe('deleteTask', () => {
     store.createRun(run())
     store.deleteTask(asTaskId('t1'), 1)
     expect(() => { store.createTask(task({ id: 't1' })) }).not.toThrow()
+  })
+})
+
+describe('附件', () => {
+  const attachment = (patch: Partial<Attachment> = {}): Attachment => ({
+    id: 'a-1',
+    taskId: asTaskId('t1'),
+    filename: '设计稿.png',
+    mime: 'image/png',
+    size: 1024,
+    path: '/data/attachments/t1/a-1-设计稿.png',
+    at: T0,
+    ...patch,
+  })
+
+  beforeEach(() => { store.createTask(task({ id: 't1', column: 'backlog' })) })
+
+  it('往返一条附件', () => {
+    store.addAttachment(attachment())
+    expect(store.listAttachments(asTaskId('t1'))).toEqual([attachment()])
+    expect(store.getAttachment('a-1')).toEqual(attachment())
+  })
+
+  it('按上传顺序排 —— TASK.md 里的清单照这个顺序给 Agent', () => {
+    store.addAttachment(attachment({ id: 'a-2', filename: '第二个.pdf', at: T0 + 10 }))
+    store.addAttachment(attachment({ id: 'a-1', filename: '第一个.png', at: T0 }))
+    expect(store.listAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-1', 'a-2'])
+  })
+
+  it('删记录不碰别的卡', () => {
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.addAttachment(attachment())
+    store.addAttachment(attachment({ id: 'a-2', taskId: asTaskId('t2') }))
+    expect(store.deleteAttachment('a-1')).toBe(true)
+    expect(store.deleteAttachment('a-1')).toBe(false)
+    expect(store.listAttachments(asTaskId('t2'))).toHaveLength(1)
+  })
+
+  it('删卡时附件记录一起走，否则外键会挡住删除', () => {
+    store.addAttachment(attachment())
+    expect(store.deleteTask(asTaskId('t1'), 1)).toBe(true)
+    expect(store.getAttachment('a-1')).toBeNull()
+  })
+
+  it('删项目时同理，并且删之前还问得出该收拾哪些文件', () => {
+    store.addAttachment(attachment())
+    expect(store.listProjectAttachments(PROJECT).map((a) => a.path)).toEqual([attachment().path])
+    expect(store.deleteProject(PROJECT)).toBe(true)
+    expect(store.getAttachment('a-1')).toBeNull()
   })
 })
 

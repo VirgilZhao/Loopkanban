@@ -149,6 +149,18 @@ interface Task {
   archivedAt?: string              // 归档标记，正交于 column
 }
 
+// 卡片带着的材料：截图、PDF、Word。元数据进库，字节落在数据目录里；
+// 派活时拷进 worktree 的 .loopkanban/attachments/，并在 TASK.md 里点名。
+interface Attachment {
+  id: string
+  taskId: TaskId
+  filename: string                 // 用户原来的文件名，界面与 TASK.md 里显示的都是它
+  mime: string                     // 按扩展名定，客户端报什么不算数
+  size: number
+  path: string                     // 字节在磁盘上的绝对路径，不对前端暴露
+  at: number
+}
+
 interface Run {
   id: RunId
   taskId: TaskId
@@ -195,6 +207,39 @@ interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; 
 元素**的小渲染器：Agent 的输出里就算带着 `<script>` 也只是一段文本，没有注入面；
 换成 `marked` + `dangerouslySetInnerHTML` 就得再配一个消毒器，那是两个依赖加
 一处必须记得做对的地方。
+
+### 附件走文件，不走 prompt
+
+很多需求光靠打字说不清楚：一张设计稿、一份报错截图、一份要照着做的 PDF 或
+Word。所以卡片可以挂附件，派活时它们跟着一起交给 CLI。
+
+三个决定：
+
+**拷进 worktree，不塞进 prompt。** 把图片编码进命令行既受长度限制，又要为
+每家 CLI 各写一套多模态入参 —— 而三个 CLI 都会读文件。文件落在 worktree 的
+`.loopkanban/attachments/` 下，TASK.md 里列出相对路径、类型和大小，prompt 再
+点一次名（它是 CLI 唯一保证会读的东西）。**不点名等于没给** —— 光把文件放进
+目录，Agent 多半连看都不会看一眼。
+
+**放 `.loopkanban/` 下面是为了不进 diff。** 那条 `/.loopkanban/` 的排除规则
+本来就写在仓库的 `.git/info/exclude` 里，在每个 worktree 的根上同样生效。附件
+是输入不是产出，混进 patch 只会让人在一堆二进制噪音里找真正的改动，验收通过
+时还会被一并提交进仓库。
+
+**每次派活前先清空再拷。** worktree 属于任务而不是某次执行；撤回的附件若留在
+那儿，Agent 下一轮还会照着一个人已经不认的文件干活。
+
+元数据进库、字节进磁盘：几十 MB 的 PDF 塞进 SQLite 会让每一次读卡都拖着它走，
+而 Agent 要的本来就是一个能打开的路径。
+
+上传是**裸的请求体 + `x-filename` 头**，一次一个文件。手写 multipart 解析器是
+这个项目最不值得的那种代码，而"零运行时依赖"这条线又不允许引一个库进来。
+
+取回时类型按**扩展名**定（客户端报什么不算数），只有图片和 PDF 内联，其余一律
+`Content-Disposition: attachment` + `nosniff`。附件与看板同源，一个能在页面里
+跑起来的 HTML 附件就能拿着 cookie 调本机的执行接口。
+
+附件跟着「正在执行的卡不能改需求」一起冻结 —— 它就是需求的一部分。
 
 ### 卡片没有标题
 

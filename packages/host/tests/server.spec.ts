@@ -1480,8 +1480,20 @@ describe('GET /api/runs/:id/log', () => {
       { events: { seq: number }[]; truncated: boolean; lastSeq: number }
     expect(body.truncated).toBe(true)
     // 留的是最新的那一段：Agent 要的是"现在到哪儿了"。
+    expect(body.events).toHaveLength(200)
     expect(body.events[0]?.seq).toBe(61)
     expect(body.lastSeq).toBe(260)
+  })
+
+  it('游标不是数字时退回从头读，但 lastSeq 仍然是个数 —— null 会让调用方重头再来', async () => {
+    const empty = await (await api(`/api/runs/${RUN}/log?after=abc`)).json() as { lastSeq: number }
+    expect(empty.lastSeq).toBe(0)
+
+    store.appendEvent(RUN, 'text', { text: 'hi' }, T0)
+    const one = await (await api(`/api/runs/${RUN}/log?after=abc`)).json() as
+      { events: unknown[]; lastSeq: number }
+    expect(one.events).toHaveLength(1)
+    expect(one.lastSeq).toBe(1)
   })
 
   it('没有这次执行就是 404，而不是一个空日志', async () => {

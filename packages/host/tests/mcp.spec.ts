@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer as createHttpServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { Readable, Writable } from 'node:stream'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { BoardClient, discoverBoard, handleMessage, serveMcp, TOOLS } from '../src/mcp/index.ts'
@@ -168,6 +170,14 @@ describe('查询', () => {
     expect(all.data).toHaveLength(3)
   })
 
+  it('认不出来的列名当场拒绝 —— 筛成空数组会让 Agent 断定"看板是空的"', async () => {
+    store.createTask(task({ id: 't1', column: 'ready' }))
+    const result = await callTool('list_tasks', { column: 'todo' })
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('todo')
+    expect(result.text).toContain('ready')
+  })
+
   it('get_task 把关联的卡连正文一起展开 —— 只给 id 等于没给', async () => {
     store.createTask(task({ id: 't2', column: 'done', description: '统一错误码\n\n走 errors.ts' }))
     store.createTask(task({ id: 't1', relatedTo: [asTaskId('t2')] }))
@@ -267,6 +277,45 @@ describe('写入', () => {
     expect(store.getTask(asTaskId('t1'))?.column).toBe('ready')
   })
 
+  it('类型不对的参数当场拒绝，不送到服务端去炸成 500', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+
+    // 实测过的两种下场：字符串 acceptance 会让服务端 500（Agent 只看到
+    // 一句"详情见运行日志"），数字 description 会被 SQLite 的 TEXT 亲和性
+    // 悄悄存成 "12345.0"。两条都要在出门之前挡住。
+    const listy = await callTool('update_task', { taskId: 't1', acceptance: '一条字符串' })
+    expect(listy.isError).toBe(true)
+    expect(listy.text).toContain('acceptance')
+
+    const numeric = await callTool('update_task', { taskId: 't1', description: 12345 })
+    expect(numeric.isError).toBe(true)
+    expect(numeric.text).toContain('description')
+
+    // 库里一个字都没动。
+    const after = store.getTask(asTaskId('t1'))
+    expect(after?.revision).toBe(1)
+    expect(after?.description).toBe('t1 要做的事')
+  })
+
+  it('null 仍然是"清空"，缺席仍然是"这次没提到"', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog', preferredProvider: 'claude', model: 'opus' }))
+
+    await callTool('update_task', { taskId: 't1', description: '换个说法' })
+    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+
+    await callTool('update_task', { taskId: 't1', preferredProvider: null, model: null })
+    const cleared = store.getTask(asTaskId('t1'))
+    expect(cleared?.preferredProvider).toBeUndefined()
+    expect(cleared?.model).toBeUndefined()
+  })
+
+  it('acceptance 给空数组是合法的 —— 那是清空，不是类型错', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog', acceptance: ['旧判据'] }))
+    const result = await callTool('update_task', { taskId: 't1', acceptance: [] })
+    expect(result.isError).toBe(false)
+    expect(store.getTask(asTaskId('t1'))?.acceptance).toEqual([])
+  })
+
   it('comment_task：在 Review 里留言就是再改一版，卡回队列', async () => {
     store.createTask(task({ id: 't1', column: 'review' }))
     const { data } = await callTool('comment_task', { taskId: 't1', body: '标题被吃掉了' })
@@ -313,10 +362,16 @@ describe('找到正在跑的看板', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
+  /** 指向本次测试那台 server 的一条地址记录。 */
+  const liveEndpoint = () => ({
+    url: `http://127.0.0.1:${String(server.port)}`,
+    port: server.port,
+    pid: process.pid,
+    startedAt: T0,
+  })
+
   it('地址从 endpoint.json 来，token 从 token 文件来', async () => {
-    await writeEndpoint(dir, {
-      url: `http://127.0.0.1:${String(server.port)}`, port: server.port, pid: 1, startedAt: T0,
-    })
+    await writeEndpoint(dir, liveEndpoint())
     await writeFile(join(dir, 'token'), `${TOKEN}\n`, 'utf8')
 
     const found = await discoverBoard({ dataDir: dir })
@@ -331,19 +386,51 @@ describe('找到正在跑的看板', () => {
   })
 
   it('有地址没 token 时，说清楚缺的是 token', async () => {
-    await writeEndpoint(dir, { url: 'http://127.0.0.1:1', port: 1, pid: 1, startedAt: T0 })
+    await writeEndpoint(dir, { ...liveEndpoint(), url: 'http://127.0.0.1:1', port: 1 })
     await expect(discoverBoard({ dataDir: dir })).rejects.toThrow(/token/)
   })
 
   it('连不上时的错误里带着地址，并告诉人去起看板', async () => {
     await writeFile(join(dir, 'token'), TOKEN, 'utf8')
-    const dead = await discoverBoard({ dataDir: dir, url: 'http://127.0.0.1:1' })
-    const result = await handleMessage(dead, {
-      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_projects', arguments: {} },
+    await expect(discoverBoard({ dataDir: dir, url: 'http://127.0.0.1:1' }))
+      .rejects.toThrow(/127\.0\.0\.1:1[\s\S]*loopkanban/)
+  })
+
+  it('写下地址的那个进程已经不在时，连都不连 —— 那条记录是崩溃留下的', async () => {
+    await writeFile(join(dir, 'token'), TOKEN, 'utf8')
+    // 一个几乎不可能存在的 pid。真被占用了这条断言会松掉，但不会误报。
+    await writeEndpoint(dir, { ...liveEndpoint(), pid: 0x7ffffff0 })
+    await expect(discoverBoard({ dataDir: dir })).rejects.toThrow(/已经不在了/)
+  })
+
+  it('端口上应答的不是看板时，token 一个字都不发', async () => {
+    await writeFile(join(dir, 'token'), TOKEN, 'utf8')
+    await writeEndpoint(dir, liveEndpoint())
+
+    // 冒名顶替者：什么请求都回 200。看板在没有 token 时只会回 401
+    // missing-token，所以这一位露馅。
+    const seen: string[] = []
+    const impostor = await new Promise<{ port: number; close: () => Promise<void> }>((resolve) => {
+      const http = createHttpServer((req, res) => {
+        seen.push(String(req.headers.cookie ?? ''))
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"hello":"i am not loopkanban"}')
+      })
+      http.listen(0, '127.0.0.1', () => {
+        resolve({
+          port: (http.address() as AddressInfo).port,
+          close: () => new Promise((done) => { http.close(() => { done() }) }),
+        })
+      })
     })
-    const content = (result?.result as { content: { text: string }[]; isError: boolean })
-    expect(content.isError).toBe(true)
-    expect(content.content[0]?.text).toContain('127.0.0.1:1')
-    expect(content.content[0]?.text).toContain('loopkanban')
+    try {
+      await expect(discoverBoard({ dataDir: dir, url: `http://127.0.0.1:${String(impostor.port)}` }))
+        .rejects.toThrow(/不是 LoopKanban/)
+      // **这一条才是重点**：它收到过一次问话，但那次问话不带 token。
+      expect(seen).toHaveLength(1)
+      expect(seen[0]).not.toContain(TOKEN)
+    } finally {
+      await impostor.close()
+    }
   })
 })

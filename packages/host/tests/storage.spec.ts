@@ -436,6 +436,35 @@ describe('stats', () => {
   })
 })
 
+describe('readRecentEvents', () => {
+  const RUN = asRunId('r1')
+
+  beforeEach(() => {
+    store.createTask(task({ id: 't1' }))
+    store.createRun(run({ id: RUN, taskId: asTaskId('t1') }))
+  })
+
+  it('取的是游标之后最新的一段，按 seq 正序回', () => {
+    for (let index = 0; index < 10; index += 1) store.appendEvent(RUN, 'text', { index }, T0 + index)
+    const { events, total } = store.readRecentEvents(RUN, 0, 3)
+    expect(events.map((event) => event.seq)).toEqual([8, 9, 10])
+    // total 是游标之后的**全部**条数，调用方据此知道自己漏了多少。
+    expect(total).toBe(10)
+  })
+
+  it('游标之后不足一页时全给，total 与条数相等', () => {
+    store.appendEvent(RUN, 'text', { text: 'a' }, T0)
+    store.appendEvent(RUN, 'text', { text: 'b' }, T0 + 1)
+    const { events, total } = store.readRecentEvents(RUN, 1, 200)
+    expect(events.map((event) => event.seq)).toEqual([2])
+    expect(total).toBe(1)
+  })
+
+  it('一条都没有时是空的，不是 null', () => {
+    expect(store.readRecentEvents(RUN, 0, 10)).toEqual({ events: [], total: 0 })
+  })
+})
+
 describe('迁移', () => {
   /**
    * 造一个停在 `version` 版本上的真实旧库：只跑前 version 条迁移。

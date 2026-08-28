@@ -13,7 +13,7 @@
  * 复制出来的第二份规则迟早和第一份对不上。
  */
 
-import { taskTitle, type Task } from '@loopkanban/core'
+import { COLUMNS, taskTitle, type Task } from '@loopkanban/core'
 import type { BoardClient } from './client.ts'
 
 /** 一张卡在 MCP 里的摘要形状。列清单时用它，够 Agent 决定"接哪一张"。 */
@@ -84,6 +84,36 @@ function optionalStrList(args: Record<string, unknown>, key: string): string[] |
     throw new ToolInputError(`${key} 要给字符串数组`)
   }
   return value as string[]
+}
+
+/**
+ * 取一个"要么是新值、要么是 null（清空）"的字符串。
+ *
+ * 与 `optionalStr` 的区别正在 null 上：那边把 null 当成"没提到"，而改需求的
+ * 接口里 null 是**显式的清空**（JSON 里没有 undefined）。两者混用的话，
+ * "不再指定执行器"就永远存不下去。
+ */
+function nullableStr(args: Record<string, unknown>, key: string): string | null {
+  const value = args[key]
+  if (value === null) return null
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ToolInputError(`${key} 要给非空字符串，或者给 null 表示清空`)
+  }
+  return value
+}
+
+/** 取一个字符串数组。空数组是合法的 —— 那是"清空这一列"。 */
+function strList(args: Record<string, unknown>, key: string): string[] {
+  const value = args[key]
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new ToolInputError(`${key} 要给字符串数组（空数组表示清空）`)
+  }
+  return value as string[]
+}
+
+/** 同上，但允许 null —— 与空数组等效，都是清空。 */
+function nullableStrList(args: Record<string, unknown>, key: string): string[] {
+  return args[key] === null ? [] : strList(args, key)
 }
 
 function optionalNumber(args: Record<string, unknown>, key: string): number | undefined {
@@ -171,6 +201,11 @@ export const TOOLS: readonly ToolSpec[] = [
     run: async (client, args) => {
       const projectId = optionalStr(args, 'projectId')
       const column = optionalStr(args, 'column')
+      // 认不出来的列名要当场拒绝，不能筛成空数组：Agent 拿到 [] 会据此
+      // 断定"看板是空的"，而真相是它把 Ready 写成了 ready 之外的什么。
+      if (column !== undefined && !(COLUMNS as readonly string[]).includes(column)) {
+        throw new ToolInputError(`没有 ${column} 这一列，只能是：${COLUMNS.join(' / ')}`)
+      }
       const includeArchived = args['includeArchived'] === true
       const { tasks } = await client.get<StateResponse>('/api/state')
       return tasks
@@ -285,11 +320,24 @@ export const TOOLS: readonly ToolSpec[] = [
     run: async (client, args) => {
       const taskId = str(args, 'taskId')
       const expectedRevision = await revisionOf(client, taskId, optionalNumber(args, 'expectedRevision'))
+      /*
+       * 逐个校验，**不做原样透传**。
+       *
+       * 入参 schema 在 MCP 里是建议性的：没有任何东西拦着一个模型把
+       * `acceptance` 写成一句话。透传出去的下场实测过两种，都很难查：
+       * 一是服务端 500（回给 Agent 的只有一句"详情见运行日志"，它只会
+       * 原样重试），二是更糟的静默改写 —— 数字类型的描述会被 SQLite 的
+       * TEXT 亲和性存成 "12345.0"，需求就此变了样而没人报错。
+       *
+       * 键在不在仍然决定"这次提没提到它"，null 仍然是显式的清空 ——
+       * 这两条语义一个都不能丢。
+       */
       const patch: Record<string, unknown> = { expectedRevision }
-      for (const key of ['description', 'acceptance', 'relatedTo', 'preferredProvider', 'model']) {
-        // null 是"清空"，缺席是"这次没提到" —— 两者在服务端含义不同，不能混。
-        if (key in args) patch[key] = args[key]
-      }
+      if ('description' in args) patch['description'] = str(args, 'description')
+      if ('acceptance' in args) patch['acceptance'] = strList(args, 'acceptance')
+      if ('relatedTo' in args) patch['relatedTo'] = nullableStrList(args, 'relatedTo')
+      if ('preferredProvider' in args) patch['preferredProvider'] = nullableStr(args, 'preferredProvider')
+      if ('model' in args) patch['model'] = nullableStr(args, 'model')
       const { task } = await client.patch<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, patch)
       return { ...brief(task), description: task.description, acceptance: task.acceptance }
     },

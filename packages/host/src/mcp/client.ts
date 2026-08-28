@@ -12,7 +12,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { TOKEN_COOKIE } from '../server/auth.ts'
-import { readEndpoint } from '../server/endpoint.ts'
+import { endpointPath, readEndpoint } from '../server/endpoint.ts'
 
 /** 看板拒绝了这次调用。带着状态码与它自己的错误码，交给工具层照实回给 Agent。 */
 export class BoardError extends Error {
@@ -121,11 +121,67 @@ export interface DiscoverOptions {
 }
 
 /**
+ * 那个进程还在吗。
+ *
+ * `signal 0` 不真的发信号，只做一次"存在且我够得着"的检查。EPERM 表示进程
+ * 在、只是不归我们管，那也算活着。
+ */
+function isAlive(pid: number): boolean {
+  // 0 是"这条记录没写 pid"（旧版本或手写的文件），不知道就不拦。
+  if (pid <= 0) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * 先确认对面真的是 LoopKanban，**再把 token 交出去**。
+ *
+ * 地址文件是崩溃时留不下遗言的：被 SIGKILL 掉、机器断电，`clearEndpoint`
+ * 都没机会跑，文件就指着一个已经没人听的端口。而端口是会被回收的 —— 过一会儿
+ * 那个号码可能属于另一个本机服务。此时若直接带着 cookie 去请求，我们就把
+ * **一个能在这台机器上起 Agent、跑任意代码的凭据**递给了一个陌生进程；
+ * 而它还长期有效（token 存在数据目录里，跨重启不变）。
+ *
+ * 所以先不带 token 问一句：看板会用 401 `missing-token` 认领自己，而这次
+ * 问话一个秘密都不带 —— 端口真被别人占了的话，泄漏出去的只有"有人问过"。
+ *
+ * @param baseUrl - 待确认的地址。
+ * @param doFetch - 供测试注入。
+ * @throws BoardUnreachable 连不上，或者对面不是看板。
+ */
+async function probeBoard(baseUrl: string, doFetch: typeof globalThis.fetch): Promise<void> {
+  let res: Response
+  try {
+    res = await doFetch(`${baseUrl}/api/state`)
+  } catch (error) {
+    throw new BoardUnreachable(
+      `连不上 ${baseUrl}：${error instanceof Error ? error.message : String(error)}。`
+      + '看板可能没在跑 —— 先 `loopkanban` 起一个。',
+    )
+  }
+  const body = await res.json().catch(() => ({})) as Record<string, unknown>
+  if (res.status !== 401 || body['error'] !== 'missing-token') {
+    throw new BoardUnreachable(
+      `${baseUrl} 上应答的不是 LoopKanban（HTTP ${String(res.status)}）—— `
+      + '多半是看板已经退出、这个端口被别的程序占了。没把 token 发出去；'
+      + '先 `loopkanban` 起一个，或用 LOOPKANBAN_URL 指对地址。',
+    )
+  }
+}
+
+/**
  * 找到正在跑的看板。
  *
  * 顺序是「显式给的 → 数据目录里的记录」。找不到就抛，且**话要说到能照做**：
  * MCP server 是被客户端悄悄拉起来的，它的 stderr 多半没人看，一句"连接失败"
  * 会变成一个查不动的哑故障。
+ *
+ * 拿到地址之后还要过两道：写下它的进程还活着吗、那个端口上应答的真是看板吗。
+ * 两道都是为了同一件事 —— **不把 token 递给一个不是看板的东西**。
  *
  * @param options - 数据目录与覆盖项。
  */
@@ -140,6 +196,16 @@ export async function discoverBoard(options: DiscoverOptions): Promise<BoardClie
     )
   }
 
+  // 只在"照着地址文件走"时查 pid：显式给了 --url / LOOPKANBAN_URL 的人
+  // 知道自己在连什么，那条记录说的是别的进程。
+  if (options.url === undefined && endpoint !== null && !isAlive(endpoint.pid)) {
+    throw new BoardUnreachable(
+      `${endpointPath(dataDir)} 指向的进程 ${String(endpoint.pid)} 已经不在了 —— `
+      + '看板多半是崩掉或被 kill 的，地址文件没来得及删。先 `loopkanban` 起一个，'
+      + '它会把这个文件覆盖成新的。',
+    )
+  }
+
   const token = options.token
     ?? (await readFile(join(dataDir, 'token'), 'utf8').catch(() => null))?.trim()
   if (token === undefined || token === null || token.length === 0) {
@@ -149,9 +215,13 @@ export async function discoverBoard(options: DiscoverOptions): Promise<BoardClie
     )
   }
 
-  return new BoardClient({
+  const client = new BoardClient({
     baseUrl: url,
     token,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   })
+  // 握手在返回之前完成：调用方拿到的 client 是"已经确认过对面是谁"的，
+  // 第一次真正带着 token 的请求才不会打在陌生人身上。
+  await probeBoard(client.baseUrl, options.fetch ?? globalThis.fetch)
+  return client
 }

@@ -858,16 +858,8 @@ export class Storage {
   lastEvent(runId: RunId): RunEvent | null {
     const row = this.db.prepare(
       'SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1',
-    ).get(runId) as unknown as
-      { run_id: string; seq: number; kind: string; payload_json: string; at: number } | undefined
-    if (row === undefined) return null
-    return {
-      runId: asRunId(row.run_id),
-      seq: row.seq,
-      kind: row.kind,
-      payload: JSON.parse(row.payload_json) as unknown,
-      at: row.at,
-    }
+    ).get(runId) as unknown as EventRow | undefined
+    return row === undefined ? null : toEvent(row)
   }
 
   appendEvent(runId: RunId, kind: string, payload: unknown, at: number): number {
@@ -894,16 +886,55 @@ export class Storage {
   readEvents(runId: RunId, afterSeq = 0): RunEvent[] {
     const rows = this.db.prepare(
       'SELECT * FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq',
-    ).all(runId, afterSeq) as unknown as {
-      run_id: string; seq: number; kind: string; payload_json: string; at: number
-    }[]
-    return rows.map((row) => ({
-      runId: asRunId(row.run_id),
-      seq: row.seq,
-      kind: row.kind,
-      payload: JSON.parse(row.payload_json) as unknown,
-      at: row.at,
-    }))
+    ).all(runId, afterSeq) as unknown as EventRow[]
+    return rows.map(toEvent)
+  }
+
+  /**
+   * 读游标之后**最近的**若干条事件，外加游标之后一共有多少条。
+   *
+   * 与 `readEvents` 的分工在于谁在等：SSE 那边要的是"从断点起全部补上"，
+   * 而一次问一句的调用方（MCP 的 run_status）要的是"现在到哪儿了"。
+   *
+   * **截断在 SQL 里做，不在 JS 里做。** 一次执行几万条事件是常事，先全查
+   * 出来、逐条 JSON.parse、再切最后 200 条，等于每次轮询都把整张表读一遍 ——
+   * 而 host 是单线程的，它同时还在给别的 Run 推 SSE。
+   *
+   * @param runId - 所属 Run。
+   * @param afterSeq - 只看 seq 大于它的事件。
+   * @param limit - 最多回多少条，取的是最新的那一段。
+   * @returns 事件（按 seq **正序**，与 readEvents 一致）与游标之后的总条数。
+   */
+  readRecentEvents(runId: RunId, afterSeq: number, limit: number): {
+    events: RunEvent[]
+    total: number
+  } {
+    const counted = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND seq > ?',
+    ).get(runId, afterSeq) as unknown as { n: number }
+    const rows = this.db.prepare(
+      'SELECT * FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?',
+    ).all(runId, afterSeq, limit) as unknown as EventRow[]
+    // DESC 取的是最新的一段，回给调用方之前翻回正序。
+    return { events: rows.map(toEvent).reverse(), total: counted.n }
+  }
+}
+
+interface EventRow {
+  run_id: string
+  seq: number
+  kind: string
+  payload_json: string
+  at: number
+}
+
+function toEvent(row: EventRow): RunEvent {
+  return {
+    runId: asRunId(row.run_id),
+    seq: row.seq,
+    kind: row.kind,
+    payload: JSON.parse(row.payload_json) as unknown,
+    at: row.at,
   }
 }
 

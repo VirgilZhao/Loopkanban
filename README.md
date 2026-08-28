@@ -10,7 +10,7 @@ npx loopkanban
 启动后自动打开浏览器。规划文档见 [docs/PRD.md](docs/PRD.md)。
 
 需要 Node ≥ 22.5（用到内置的 `node:sqlite`），以及本机已装 `claude`、`codex`、
-`opencode` 其中之一。发布包 290 KB、**零运行时依赖**。
+`opencode` 其中之一。发布包 294 KB、**零运行时依赖**。
 
 想让它一直活着（自动认领的意义就在于你不用盯着）：
 
@@ -96,7 +96,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 738 个测试
+pnpm test            # 748 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

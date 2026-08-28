@@ -1565,16 +1565,18 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (method === 'GET' && logOf !== null) {
       const id = asRunId(decodeURIComponent(logOf))
       if (storage.getRun(id) === null) { sendJson(res, 404, { error: 'run-not-found' }); return }
-      const after = Number.parseInt(url.searchParams.get('after') ?? '0', 10)
-      const events = storage.readEvents(id, Number.isFinite(after) ? after : 0)
-      // 一次跑几万条事件是常事，整段回给调用方只会撑爆它的上下文。截断从
-      // **前面**切：Agent 要的是"现在到哪儿了"，最新的那几条才是答案，而且
-      // 说清楚丢了多少，下一次拿 lastSeq 接着问就是。
-      const kept = events.slice(-EVENT_PAGE)
+      const asked = Number.parseInt(url.searchParams.get('after') ?? '0', 10)
+      // 消毒过的游标只算一次，后面一律用它 —— 分两处算的话，`?after=abc`
+      // 会让 lastSeq 变成 NaN（JSON 里就是 null），调用方拿它回问等于从头重来。
+      const after = Number.isFinite(asked) ? asked : 0
+      // 一次跑几万条事件是常事，整段回给调用方只会撑爆它的上下文。截断在
+      // **SQL 里**做（见 readRecentEvents），并且留最新的那一段 —— Agent 要的是
+      // "现在到哪儿了"；说清楚丢了多少，下一次拿 lastSeq 接着问就是。
+      const { events, total } = storage.readRecentEvents(id, after, EVENT_PAGE)
       sendJson(res, 200, {
-        events: kept,
-        lastSeq: kept.at(-1)?.seq ?? after,
-        truncated: kept.length < events.length,
+        events,
+        lastSeq: events.at(-1)?.seq ?? after,
+        truncated: total > events.length,
       }, extraHeaders)
       return
     }

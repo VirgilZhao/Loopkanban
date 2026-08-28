@@ -47,7 +47,7 @@ describe('tokensEqual', () => {
 
 describe('readCookie', () => {
   it('从多个 cookie 里取出目标值', () => {
-    expect(readCookie('a=1; openkanban_token=xyz; b=2', TOKEN_COOKIE)).toBe('xyz')
+    expect(readCookie('a=1; loopkanban_token=xyz; b=2', TOKEN_COOKIE)).toBe('xyz')
   })
 
   it('缺席时返回 undefined', () => {
@@ -56,7 +56,7 @@ describe('readCookie', () => {
   })
 
   it('值被 URL 编码过也能取回', () => {
-    expect(readCookie('openkanban_token=a%2Fb', TOKEN_COOKIE)).toBe('a/b')
+    expect(readCookie('loopkanban_token=a%2Fb', TOKEN_COOKIE)).toBe('a/b')
   })
 })
 

@@ -5,7 +5,7 @@
  * 所以即使总线丢了一条消息，SSE 重连时的 `Last-Event-ID` 也能把窟窿填上。
  */
 
-import type { RunId } from '@openkanban/core'
+import type { RunId } from '@loopkanban/core'
 import type { RunEvent } from '../storage/index.ts'
 
 type Listener = (event: RunEvent) => void

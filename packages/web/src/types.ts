@@ -1,4 +1,4 @@
-/** 与 `@openkanban/core` 对应的线上形状。前端不直接依赖后端包，只依赖这份契约。 */
+/** 与 `@loopkanban/core` 对应的线上形状。前端不直接依赖后端包，只依赖这份契约。 */
 
 export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
 export type Column = (typeof COLUMNS)[number]

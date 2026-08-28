@@ -1,7 +1,7 @@
 /**
  * 自动认领调度器 —— 本项目的核心卖点。
  *
- * 决策本身是 `@openkanban/core` 里的纯函数 `planDispatch`：不读数据库、
+ * 决策本身是 `@loopkanban/core` 里的纯函数 `planDispatch`：不读数据库、
  * 不起进程、不看时钟。这里只负责把决策接到副作用上，以及按节拍反复执行。
  * 这样"并发上限、依赖阻塞、租约回收、provider 不可用"这些分支能用普通单测
  * 覆盖，不必真的去起十个 Agent。
@@ -14,7 +14,7 @@
  *   会永久吃掉一个位子，跑几天之后调度器会莫名其妙地停摆。
  */
 
-import { planDispatch, type Dispatch, type Skip, type TaskId } from '@openkanban/core'
+import { planDispatch, type Dispatch, type Skip, type TaskId } from '@loopkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Storage } from '../storage/index.ts'

@@ -11,8 +11,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@openkanban/core'
-import { asBoardId, asRunId, asTaskId } from '@openkanban/core'
+import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@loopkanban/core'
+import { asBoardId, asRunId, asTaskId } from '@loopkanban/core'
 import { migrate } from './schema.ts'
 
 export interface Board {

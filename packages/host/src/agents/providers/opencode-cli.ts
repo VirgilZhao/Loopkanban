@@ -1,7 +1,7 @@
 /**
  * opencode CLI provider —— 起本机 `PATH` 上的 `opencode run`，不走 API。
  *
- * 认证与配置完全交给 CLI 自身（`opencode auth`），OpenKanban 不接受、不存储、
+ * 认证与配置完全交给 CLI 自身（`opencode auth`），LoopKanban 不接受、不存储、
  * 不传递任何 key。
  *
  * 与另外两家的结构性差异（都是实测出来的，不是文档写的）：

@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto'
 import {
   archiveTask, asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
   unarchiveTask, type Column, type Task, type TaskEdit,
-} from '@openkanban/core'
+} from '@loopkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
@@ -153,7 +153,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       // 内部异常的原文可能带着文件路径等细节，只写进日志，不回给调用方。
-      console.error('[openkanban] 未处理的请求异常:', error)
+      console.error('[loopkanban] 未处理的请求异常:', error)
       sendJson(res, 500, { error: 'internal-error', detail: '服务端处理这次请求时出错，详情见运行日志' })
     })
   })

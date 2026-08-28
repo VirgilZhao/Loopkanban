@@ -55,11 +55,11 @@ const port = hostPort()
 // 打出来只会误导人去点它。压到 warn，让 host 打印的那一个 URL 成为唯一答案。
 const vite: ChildProcess = spawn(
   'pnpm',
-  ['--filter', '@openkanban/web', 'exec', 'vite', '--logLevel', 'warn'],
+  ['--filter', '@loopkanban/web', 'exec', 'vite', '--logLevel', 'warn'],
   {
     cwd: ROOT,
     stdio: 'inherit',
-    env: { ...process.env, OPENKANBAN_HMR_CLIENT_PORT: String(port) },
+    env: { ...process.env, LOOPKANBAN_HMR_CLIENT_PORT: String(port) },
     shell: process.platform === 'win32',
   },
 )
@@ -98,7 +98,7 @@ host = spawn(
   process.execPath,
   [
     '--experimental-strip-types',
-    join(ROOT, 'packages/host/src/bin/openkanban.ts'),
+    join(ROOT, 'packages/host/src/bin/loopkanban.ts'),
     '--web-dev', `http://127.0.0.1:${String(VITE_PORT)}`,
     '--port', String(port),
     ...passthrough,

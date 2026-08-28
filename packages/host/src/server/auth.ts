@@ -21,7 +21,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 
 /** cookie 名。带 `__Host-` 前缀在 https 下才有意义，本地 http 用普通名。 */
-export const TOKEN_COOKIE = 'openkanban_token'
+export const TOKEN_COOKIE = 'loopkanban_token'
 
 /** 只有这两个主机名被认为是"本机"。 */
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])

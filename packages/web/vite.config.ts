@@ -4,14 +4,14 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 /** 开发时前端跑在 5273，API 转发给 host server。 */
-const apiTarget = process.env['OPENKANBAN_API'] ?? 'http://127.0.0.1:7373'
+const apiTarget = process.env['LOOPKANBAN_API'] ?? 'http://127.0.0.1:7373'
 
 /**
  * `pnpm run dev` 时浏览器开的是 host 的端口，vite 只在背后被反代（见
  * scripts/dev.ts）。HMR 的 WebSocket 由页面自己发起，因此它要连的是 host
  * 那个端口，不是 vite 的 —— 不告诉它就会连回 5273，页面能开但永远不刷新。
  */
-const hmrClientPort = Number.parseInt(process.env['OPENKANBAN_HMR_CLIENT_PORT'] ?? '', 10)
+const hmrClientPort = Number.parseInt(process.env['LOOPKANBAN_HMR_CLIENT_PORT'] ?? '', 10)
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

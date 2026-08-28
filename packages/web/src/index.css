@@ -3,7 +3,7 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ─────────────────────────────────────────────────────────────
-   OpenKanban — Future Teal
+   LoopKanban — Future Teal
    配色取自 tweakcn「Future Teal」，令牌值与 shadcn 安装产物逐字一致。
    工业调度台的骨架（发丝线、状态灯、扫描轨、高信息密度）保留，
    底下第二段把调度台自己的语义色接到这套主题令牌上。

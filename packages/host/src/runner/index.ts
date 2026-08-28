@@ -23,7 +23,7 @@ import { createInterface } from 'node:readline'
 import {
   acquireLease, asRunId, consumeFeedback, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
   type RunId, type Task, type TaskId,
-} from '@openkanban/core'
+} from '@loopkanban/core'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
@@ -475,7 +475,7 @@ export class Runner {
       const seq = this.options.storage.appendEvent(runId, kind, payload, at)
       this.options.bus.publish({ runId, seq, kind, payload, at })
     } catch (error) {
-      console.error(`[openkanban] 事件落库失败 run=${runId} kind=${kind}:`, error)
+      console.error(`[loopkanban] 事件落库失败 run=${runId} kind=${kind}:`, error)
     }
   }
 }

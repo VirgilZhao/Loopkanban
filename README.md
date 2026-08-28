@@ -1,10 +1,10 @@
-# OpenKanban
+# LoopKanban
 
 一个看板：任务可以被**本机安装的** Claude Code / Codex / opencode CLI 认领并
 自动完成，人类只做定义和验收。
 
 ```bash
-npx openkanban
+npx loopkanban
 ```
 
 启动后自动打开浏览器。规划文档见 [docs/PRD.md](docs/PRD.md)。
@@ -15,8 +15,8 @@ npx openkanban
 想让它一直活着（自动认领的意义就在于你不用盯着）：
 
 ```bash
-openkanban service print     # 先看它要写什么，不做任何改动
-openkanban service install   # 确认无误再装
+loopkanban service print     # 先看它要写什么，不做任何改动
+loopkanban service install   # 确认无误再装
 ```
 
 ## 它是什么
@@ -25,7 +25,7 @@ openkanban service install   # 确认无误再装
 通过、打回还是废弃。打回会带着你的评审意见接续上一次会话继续改。
 
 - **零 API Key**。所有模型访问都发生在 `claude` / `codex` / `opencode` 子进程内部，用你
-  自己的登录态。OpenKanban 不接受、不存储、不传递任何 key，起子进程前还会
+  自己的登录态。LoopKanban 不接受、不存储、不传递任何 key，起子进程前还会
   清洗掉环境里的凭证形变量。
 - **不绑定 CLI 版本**。启动时解析 `--help` 得出能力矩阵，装的是什么版本就用
   什么版本；不支持的能力在界面上直接灰掉，不会等到运行时才失败。
@@ -46,10 +46,10 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 pnpm install
 pnpm test            # 284 个测试
 pnpm run typecheck
-pnpm run build       # 打出 dist/openkanban.js 与 dist/web/
+pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 
 # 从源码直接跑，不必构建
-node --experimental-strip-types packages/host/src/bin/openkanban.ts
+node --experimental-strip-types packages/host/src/bin/loopkanban.ts
 ```
 
 ### 两条容易踩的约束

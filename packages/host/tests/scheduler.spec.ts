@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
+import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
@@ -63,7 +63,7 @@ async function quiet(timeoutMs = 15_000): Promise<void> {
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'openkanban-sched-'))
+  sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-sched-'))
   repo = join(sandbox, 'repo')
   await capture(['git', 'init', '-q', '-b', 'main', repo])
   for (const args of [['config', 'user.email', 't@t'], ['config', 'user.name', 'T']]) {

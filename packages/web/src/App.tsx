@@ -48,7 +48,7 @@ const ERROR_HINT: Record<string, string> = {
 function notify(title: string, body: string): void {
   if (!('Notification' in window) || Notification.permission !== 'granted') return
   try {
-    new Notification(`OpenKanban · ${title}`, { body, tag: body })
+    new Notification(`LoopKanban · ${title}`, { body, tag: body })
   } catch {
     // 某些浏览器在非安全上下文下会直接抛，忽略即可。
   }

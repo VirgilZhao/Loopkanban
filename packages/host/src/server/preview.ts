@@ -40,8 +40,15 @@ export interface FilePreview {
 }
 
 export type PreviewFailure =
-  /** 路径不在这张卡够得着的目录里。 */
-  | 'path-outside-workspace'
+  /**
+   * 路径不在这张卡够得着的目录里。
+   *
+   * 与文件浏览用同一个码。两边的围栏范围不同（这里是这张卡的 worktree 与它的
+   * 仓库，那边是所有已登记项目的仓库），但**对用户是同一件事**：他点的东西
+   * 不在允许看的范围里。两个码就要两句话，而那两句话必然只在「范围是什么」
+   * 上有差别 —— 那个差别对着一条打不开的链接没有任何用处。
+   */
+  | 'outside-project'
   | 'no-such-file'
   /** 二进制。文本预览器展示它只会是一屏乱码。 */
   | 'not-text'
@@ -96,7 +103,7 @@ export async function readFilePreview(asked: string, roots: readonly string[]): 
 
   const tried = candidates(raw, roots.map((root) => resolve(root)))
   // 一个都落不进来，说明这条路径根本不属于这张卡 —— 与「文件不在」是两回事。
-  if (tried.length === 0) return { ok: false, reason: 'path-outside-workspace', detail: raw }
+  if (tried.length === 0) return { ok: false, reason: 'outside-project', detail: raw }
 
   for (const { root, path } of tried) {
     // 解完符号链接再判一次：`docs → /etc` 这种链接，只看字面路径是查不出来的。

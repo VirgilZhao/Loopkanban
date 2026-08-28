@@ -1058,7 +1058,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!found.ok) {
         // 越界是「这个请求本身不成立」，不是「东西不在」——分开报，不然
         // 界面只能笼统地说一句打不开。
-        const status = found.reason === 'path-outside-workspace' ? 422
+        const status = found.reason === 'outside-project' ? 422
           : found.reason === 'not-text' ? 415
           : found.reason === 'unreadable' ? 403
           : 404

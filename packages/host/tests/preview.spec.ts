@@ -64,13 +64,13 @@ describe('readFilePreview', () => {
     await writeFile(outside, 'nope')
 
     const found = await readFilePreview(outside, roots())
-    expect(found).toMatchObject({ ok: false, reason: 'path-outside-workspace' })
+    expect(found).toMatchObject({ ok: false, reason: 'outside-project' })
   })
 
   it('相对路径里的 ../ 爬不出去', async () => {
     await writeFile(join(sandbox, 'secret.txt'), 'nope')
     const found = await readFilePreview('../../../../secret.txt', roots())
-    expect(found).toMatchObject({ ok: false, reason: 'path-outside-workspace' })
+    expect(found).toMatchObject({ ok: false, reason: 'outside-project' })
   })
 
   it('符号链接指到外面去也拒绝 —— 只看字面路径是查不出来的', async () => {

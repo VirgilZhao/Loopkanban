@@ -72,6 +72,14 @@ export const api = {
 
   agents: () => call<{ agents: Agent[] }>('/api/agents'),
 
+  /**
+   * 重新探测本机装了哪些 CLI、各自什么版本、支持什么。
+   *
+   * 装了个新的、升级了版本、刚登录完 —— 这些都不该逼人重启看板。POST 是
+   * 因为它真的会去起一串子进程，不是一次读取。
+   */
+  refreshAgents: () => call<{ agents: Agent[] }>('/api/agents/refresh', { method: 'POST' }),
+
   runsOf: (taskId: string) => call<{ runs: Run[] }>(`/api/tasks/${encodeURIComponent(taskId)}/runs`),
 
   createTask: (input: {

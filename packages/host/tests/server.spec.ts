@@ -6,6 +6,7 @@ import { connect, type AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { AgentPool } from '../src/agents/index.ts'
 import { Storage } from '../src/storage/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
@@ -234,7 +235,7 @@ describe('GET /api/agents', () => {
 
   it('把权限警示如实传给界面 —— 只报档位名字会让人按别家的经验理解它', async () => {
     const withCaveat = await startServer({
-      storage: store, token: TOKEN, agents: [detected('opencode', CAVEAT)],
+      storage: store, token: TOKEN, agents: AgentPool.of([detected('opencode', CAVEAT)]),
     })
     try {
       const body = await fetch(`http://127.0.0.1:${String(withCaveat.port)}/api/agents`, {
@@ -246,9 +247,50 @@ describe('GET /api/agents', () => {
     }
   })
 
+  it('刷新会重新探测，并把新结果按同一份字段给出去', async () => {
+    let found = [detected('codex')]
+    const pool = new AgentPool(() => Promise.resolve(found), found)
+    const server = await startServer({ storage: store, token: TOKEN, agents: pool })
+    try {
+      // 装上了一个新的 CLI，此时不重启看板也该看得见。
+      found = [detected('codex'), detected('opencode', CAVEAT)]
+      const body = await fetch(`http://127.0.0.1:${String(server.port)}/api/agents/refresh`, {
+        method: 'POST',
+        headers: { cookie: `loopkanban_token=${TOKEN}` },
+      }).then((r) => r.json() as Promise<{ agents: { id: string; permissionCaveat?: typeof CAVEAT }[] }>)
+
+      expect(body.agents.map((a) => a.id)).toEqual(['codex', 'opencode'])
+      // 刷新与 GET 走同一份映射：警示这类字段不能只在其中一条路上出现。
+      expect(body.agents[1]?.permissionCaveat).toEqual(CAVEAT)
+      expect(body.agents[0]).not.toHaveProperty('help')
+
+      // 池子是活视图，之后的 GET 也该是新的 —— 派活的 runner 用的就是它。
+      const after = await fetch(`http://127.0.0.1:${String(server.port)}/api/agents`, {
+        headers: { cookie: `loopkanban_token=${TOKEN}` },
+      }).then((r) => r.json() as Promise<{ agents: { id: string }[] }>)
+      expect(after.agents.map((a) => a.id)).toEqual(['codex', 'opencode'])
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('刷新要 POST —— 它会真的去起一串子进程，不是一次读取', async () => {
+    const server = await startServer({
+      storage: store, token: TOKEN, agents: AgentPool.of([detected('codex')]),
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${String(server.port)}/api/agents/refresh`, {
+        headers: { cookie: `loopkanban_token=${TOKEN}` },
+      })
+      expect(res.status).toBe(404)
+    } finally {
+      await server.close()
+    }
+  })
+
   it('没有警示的 CLI 不会凭空多出这个字段', async () => {
     const plain = await startServer({
-      storage: store, token: TOKEN, agents: [detected('codex')],
+      storage: store, token: TOKEN, agents: AgentPool.of([detected('codex')]),
     })
     try {
       const body = await fetch(`http://127.0.0.1:${String(plain.port)}/api/agents`, {

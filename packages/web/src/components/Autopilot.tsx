@@ -5,7 +5,6 @@ import type { SchedulerSettings } from '@/types.ts'
 
 interface Props {
   settings: SchedulerSettings
-  running: number
   busy: boolean
   onChange: (patch: Partial<SchedulerSettings>) => void
 }
@@ -14,7 +13,7 @@ interface Props {
  * 自动驾驶开关，坐在侧边栏底部 —— 它决定 Agent 是否无人值守地动你的代码，
  * 所以给它一整块地方，而不是挤在工具条里当第七颗按钮。
  */
-export function Autopilot({ settings, running, busy, onChange }: Props): React.JSX.Element {
+export function Autopilot({ settings, busy, onChange }: Props): React.JSX.Element {
   const t = useT()
   const { autopilot, maxPerProvider } = settings
 
@@ -52,33 +51,24 @@ export function Autopilot({ settings, running, busy, onChange }: Props): React.J
         <span className="cjk-label !text-[10px] !text-current">{autopilot ? t('autopilot.on') : t('autopilot.off')}</span>
       </button>
 
-      <div className="flex items-center gap-1.5 px-0.5">
-        {/* 并发上限。开着自动驾驶时才有意义，所以关着就淡下去。 */}
-        <div className={cn('flex items-center gap-1', !autopilot && 'opacity-40')}>
-          {/* 上限是按执行器算的：claude 排满了不该顺带把 codex 也堵住。 */}
-          <span className="chrome-label" title={t('autopilot.limitHint')}>limit / agent</span>
-          <Step
-            label={t('autopilot.less')} disabled={busy || maxPerProvider <= 1}
-            onClick={() => { onChange({ maxPerProvider: maxPerProvider - 1 }) }}
-          >
-            <Minus className="size-2.5" />
-          </Step>
-          <span className="mono w-3 text-center text-[12px] text-ink">{maxPerProvider}</span>
-          <Step
-            label={t('autopilot.more')} disabled={busy}
-            onClick={() => { onChange({ maxPerProvider: maxPerProvider + 1 }) }}
-          >
-            <Plus className="size-2.5" />
-          </Step>
-        </div>
-
-        <span className="flex-1" />
-
-        <div className="flex items-center gap-1.5">
-          <span className="lamp" data-state={running > 0 ? 'running' : 'idle'} />
-          <span className="chrome-label">running</span>
-          <span className="mono text-[12px] text-ink">{running}</span>
-        </div>
+      {/* 并发上限。开着自动驾驶时才有意义，所以关着就淡下去。 */}
+      <div className={cn('flex items-center gap-1 px-0.5', !autopilot && 'opacity-40')}>
+        {/* 上限是按执行器算的：claude 排满了不该顺带把 codex 也堵住。
+            具体谁占了几个位子，就在下面那份本机 Agent 清单里逐个显示。 */}
+        <span className="chrome-label" title={t('autopilot.limitHint')}>limit / agent</span>
+        <Step
+          label={t('autopilot.less')} disabled={busy || maxPerProvider <= 1}
+          onClick={() => { onChange({ maxPerProvider: maxPerProvider - 1 }) }}
+        >
+          <Minus className="size-2.5" />
+        </Step>
+        <span className="mono w-3 text-center text-[12px] text-ink">{maxPerProvider}</span>
+        <Step
+          label={t('autopilot.more')} disabled={busy}
+          onClick={() => { onChange({ maxPerProvider: maxPerProvider + 1 }) }}
+        >
+          <Plus className="size-2.5" />
+        </Step>
       </div>
     </div>
   )

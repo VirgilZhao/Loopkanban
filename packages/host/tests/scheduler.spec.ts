@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { AgentPool } from '../src/agents/index.ts'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
@@ -26,13 +27,14 @@ function provider(id: string, lines: string[] = [JSON.stringify({ kind: 'finishe
   const script = `for (const l of ${JSON.stringify(lines)}) console.log(l)`
   return {
     id,
+    command: id,
     probe: () => Promise.resolve(null),
     buildStart: (run: RunContext): SpawnSpec => ({
       argv: [process.execPath, '-e', script], cwd: run.worktreePath, stderr: 'pipe',
     }),
     buildResume: () => null,
     parseLine: (line: string) => {
-      try { return JSON.parse(line) as never } catch { return { kind: 'raw', line } }
+      try { return [JSON.parse(line)] as never } catch { return [{ kind: 'raw', line }] }
     },
   }
 }
@@ -77,7 +79,7 @@ beforeEach(async () => {
   store = Storage.open(':memory:')
   store.createProject({ id: PROJECT, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
 
-  const agents = [{ provider: provider('alpha'), caps: caps('alpha') }]
+  const agents = AgentPool.of([{ provider: provider('alpha'), caps: caps('alpha') }])
   runner = new Runner({
     storage: store, bus: new RunBus(), agents,
     artifactsRoot: join(sandbox, 'artifacts'),
@@ -100,7 +102,7 @@ describe('设置', () => {
 
   it('设置写进存储，重启后仍在', () => {
     scheduler.updateSettings({ autopilot: true, maxPerProvider: 5 })
-    const revived = new Scheduler({ storage: store, runner, agents: [] })
+    const revived = new Scheduler({ storage: store, runner, agents: AgentPool.of([]) })
     expect(revived.settings).toMatchObject({ autopilot: true, maxPerProvider: 5 })
   })
 
@@ -233,7 +235,7 @@ describe('start / stop', () => {
     scheduler.updateSettings({ autopilot: true, maxPerProvider: 2, maxPerRepo: 2 })
     for (const [i, id] of ['a', 'b'].entries()) store.createTask(task({ id, position: i + 1 }))
 
-    scheduler = new Scheduler({ storage: store, runner, agents: [{ provider: provider('alpha'), caps: caps('alpha') }], tickMs: 50 })
+    scheduler = new Scheduler({ storage: store, runner, agents: AgentPool.of([{ provider: provider('alpha'), caps: caps('alpha') }]), tickMs: 50 })
     scheduler.start()
 
     const deadline = Date.now() + 15_000

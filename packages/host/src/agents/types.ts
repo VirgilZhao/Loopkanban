@@ -109,12 +109,49 @@ export type AgentEvent =
   /** 解析不了的行原样保留 —— 解析器绝不能成为执行的单点故障。 */
   | { readonly kind: 'raw'; readonly line: string }
 
+/**
+ * 一个 Agent CLI 的适配器。**接入一个新 CLI 就等于写一个这个**，
+ * 除了在 {@link ALL_PROVIDERS} 里加一行，别处不该再有它的名字 ——
+ * 宿主侧一切按 provider 声明的事实行事，不按 id 分支。
+ */
 export interface AgentProvider {
   readonly id: string
+  /**
+   * 可执行文件名，例如 `claude`。
+   *
+   * 单独声明而不是埋在 {@link probe} 里，是因为宿主也要用它：
+   * 没探测到任何 CLI 时得说出「我找过谁」，而那句话不该手抄一份 id。
+   */
+  readonly command: string
+  /**
+   * `PATH` 之外还该找的目录，例如 `~/.claude/local`。
+   *
+   * 这类"某家 CLI 惯用的安装位置"是**这家自己的事实**，放在公共的兜底清单里
+   * 会让每接一个 CLI 都得回去改 discover.ts —— 那正是这层抽象要消灭的东西。
+   */
+  readonly extraDirs?: readonly string[]
+  /**
+   * 这家在 models.dev 上的 provider 键，例如 `anthropic`。
+   *
+   * 只有**自己列不出模型**的 CLI 才需要（见 models-dev.ts）。能像 opencode
+   * 那样用 `models` 子命令自报的，不填 —— 它自己知道装了哪些、登录了哪几家，
+   * 比任何外部目录都准。
+   */
+  readonly catalogSource?: string
   /** 探测本机是否装了这个 CLI 以及它支持什么；没装返回 null。 */
   probe(explicitPath?: string): Promise<AgentCaps | null>
   buildStart(run: RunContext, caps: AgentCaps): SpawnSpec
   /** 该版本不支持续跑时返回 null，调用方据此降级。 */
   buildResume(run: RunContext, caps: AgentCaps, sessionId: string): SpawnSpec | null
-  parseLine(line: string, caps: AgentCaps): AgentEvent
+  /**
+   * 把一行原始输出翻译成归一化事件。
+   *
+   * **返回数组而不是单个事件**：一行里塞了两件事是常态而不是例外 —— claude 的
+   * `result` 同时是"这一轮结束了"和"这一轮花了多少钱"，codex 的 `turn.completed`
+   * 也一样。只能返回一个的时候，各家只好二选一，另一半要么被丢掉（claude 的
+   * 成本从未入库），要么走一条只有自己知道的旁路函数（于是宿主开始按 id 分支）。
+   *
+   * 认不出的行返回 `[{ kind: 'raw' }]`；解析器绝不能成为执行的单点故障。
+   */
+  parseLine(line: string, caps: AgentCaps): readonly AgentEvent[]
 }

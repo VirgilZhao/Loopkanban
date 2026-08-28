@@ -15,7 +15,6 @@ import { createInterface } from 'node:readline'
 import { capture } from '../agents/discover.ts'
 import { scrubEnv } from '../agents/env.ts'
 import { detectAgents, type DetectedAgent } from '../agents/index.ts'
-import { claudeUsage } from '../agents/providers/claude-cli.ts'
 import type { RunContext } from '../agents/types.ts'
 import { spawnProcess } from '../subprocess/index.ts'
 import { branchSlug, ensureWorktree, worktreeDiff } from '../worktree/index.ts'
@@ -156,48 +155,46 @@ async function main(): Promise<void> {
 
   for await (const line of createInterface({ input: handle.stdout })) {
     rawLines.push(line)
-    const event = provider.parseLine(line, caps)
-    switch (event.kind) {
-      case 'session':
-        sessionId = event.sessionId
-        console.log(`${C.magenta('[session]')} ${event.sessionId}`)
-        if (event.model !== undefined || event.apiKeySource !== undefined) {
-          console.log(C.dim(`          model=${event.model ?? '?'} permissionMode=${event.permissionMode ?? '?'} apiKeySource=${event.apiKeySource ?? '?'}`))
+    // 一行可以是好几件事（claude 的 result 同时是"结束"和"花了多少"）。
+    for (const event of provider.parseLine(line, caps)) {
+      switch (event.kind) {
+        case 'session':
+          sessionId = event.sessionId
+          console.log(`${C.magenta('[session]')} ${event.sessionId}`)
+          if (event.model !== undefined || event.apiKeySource !== undefined) {
+            console.log(C.dim(`          model=${event.model ?? '?'} permissionMode=${event.permissionMode ?? '?'} apiKeySource=${event.apiKeySource ?? '?'}`))
+          }
+          if (event.apiKeySource !== undefined && event.apiKeySource !== 'none') {
+            console.log(C.yellow(`          注意：CLI 报告 apiKeySource=${event.apiKeySource}，本项目要求全程零 API Key`))
+          }
+          break
+        case 'notice':
+          console.log(`${C.yellow('[notice]')} ${event.text}`)
+          break
+        case 'text':
+          console.log(`${C.green('[text]')} ${event.text.slice(0, 300)}`)
+          break
+        case 'tool':
+          toolCounts.set(event.name, (toolCounts.get(event.name) ?? 0) + 1)
+          console.log(`${C.yellow('[tool]')} ${event.name}`)
+          break
+        case 'usage':
+          console.log(C.dim(`[usage] in=${String(event.inputTokens)} out=${String(event.outputTokens)}${event.costUsd === undefined ? '' : ` cost=$${String(event.costUsd)}`}`))
+          break
+        case 'finished': {
+          finishedOk = event.ok
+          const tag = event.ok ? C.green('[finished]') : C.red('[finished]')
+          console.log(`${tag} ok=${String(event.ok)} ${event.summary?.slice(0, 300) ?? ''}`)
+          if (event.diagnostic !== undefined) console.log(C.red(`          诊断: ${event.diagnostic}`))
+          if (!event.ok && (event.summary ?? '').includes('OAuth')) {
+            console.log(C.yellow('          → 这是 CLI 侧的登录态过期，不是 LoopKanban 的问题。请先重新登录。'))
+          }
+          break
         }
-        if (event.apiKeySource !== undefined && event.apiKeySource !== 'none') {
-          console.log(C.yellow(`          注意：CLI 报告 apiKeySource=${event.apiKeySource}，本项目要求全程零 API Key`))
-        }
-        break
-      case 'notice':
-        console.log(`${C.yellow('[notice]')} ${event.text}`)
-        break
-      case 'text':
-        console.log(`${C.green('[text]')} ${event.text.slice(0, 300)}`)
-        break
-      case 'tool':
-        toolCounts.set(event.name, (toolCounts.get(event.name) ?? 0) + 1)
-        console.log(`${C.yellow('[tool]')} ${event.name}`)
-        break
-      case 'usage':
-        console.log(C.dim(`[usage] in=${String(event.inputTokens)} out=${String(event.outputTokens)}${event.costUsd === undefined ? '' : ` cost=$${String(event.costUsd)}`}`))
-        break
-      case 'finished': {
-        finishedOk = event.ok
-        const tag = event.ok ? C.green('[finished]') : C.red('[finished]')
-        console.log(`${tag} ok=${String(event.ok)} ${event.summary?.slice(0, 300) ?? ''}`)
-        if (event.diagnostic !== undefined) console.log(C.red(`          诊断: ${event.diagnostic}`))
-        if (!event.ok && (event.summary ?? '').includes('OAuth')) {
-          console.log(C.yellow('          → 这是 CLI 侧的登录态过期，不是 LoopKanban 的问题。请先重新登录。'))
-        }
-        const usage = provider.id === 'claude' ? claudeUsage(line) : null
-        if (usage?.kind === 'usage') {
-          console.log(C.dim(`[usage] in=${String(usage.inputTokens)} out=${String(usage.outputTokens)} cost=$${String(usage.costUsd)}`))
-        }
-        break
+        default:
+          if (line.trim().length > 0) console.log(C.dim(`[raw] ${line.slice(0, 140)}`))
+          break
       }
-      default:
-        if (line.trim().length > 0) console.log(C.dim(`[raw] ${line.slice(0, 140)}`))
-        break
     }
   }
 

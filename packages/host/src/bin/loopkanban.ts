@@ -4,7 +4,7 @@
  *   node --experimental-strip-types packages/host/src/bin/loopkanban.ts [--port N] [--no-open]
  *
  * 起本地 server、探测本机 Agent CLI、打开浏览器。全程零 API Key ——
- * 所有模型访问都发生在 claude / codex / opencode 子进程内部，用你自己的登录态。
+ * 所有模型访问都发生在 Agent CLI 子进程内部，用你自己的登录态。
  */
 
 import { spawn } from 'node:child_process'
@@ -15,7 +15,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
 import { createToken } from '../server/auth.ts'
-import { detectAgents } from '../agents/index.ts'
+import { AgentPool, detectAgents, knownCommands, type DetectedAgent } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
 import { startServer } from '../server/index.ts'
 import { Review } from '../review/index.ts'
@@ -234,25 +234,32 @@ async function main(): Promise<void> {
 
   console.log(C.bold('\n  LOOPKANBAN') + C.dim('  agent dispatch\n'))
 
-  // ── 探测本机 CLI ─────────────────────────────────────────
-  const detected = await detectAgents()
-
   /*
-   * 给 claude 与 codex 补上模型清单。
+   * ── 探测本机 CLI ─────────────────────────────────────────
    *
-   * 这是整个程序**唯一**的对外请求（别处只连 127.0.0.1），所以：一天最多一次、
-   * 结果落盘、`--no-models` 可以彻底关掉，取不到就当没这回事继续跑。
-   * opencode 不在此列 —— 它自己的 `models` 子命令比任何目录都准。
+   * 探完顺手给自己列不出模型的 CLI 补上清单。补给谁由 provider 自己声明
+   * （`catalogSource`），这里不点名 —— 见 agents/models-dev.ts。
+   *
+   * models.dev 是整个程序**唯一**的对外请求（别处只连 127.0.0.1），所以：
+   * 一天最多一次、结果落盘、`--no-models` 可以彻底关掉，取不到就当没这回事
+   * 继续跑。界面上点刷新走的也是这条路，那时缓存多半还热着，不会再出网。
    */
-  const catalog = process.argv.includes('--no-models')
-    ? {}
-    : await loadModelCatalog({ cachePath: join(dir, 'models-dev.json') })
-  const agents = detected.map((agent) => ({
-    ...agent,
-    caps: { ...agent.caps, models: mergeModels(agent.caps.models, catalog[agent.provider.id] ?? []) },
-  }))
+  const noModels = process.argv.includes('--no-models')
+  const detect = async (): Promise<readonly DetectedAgent[]> => {
+    const found = await detectAgents()
+    const catalog = noModels ? {} : await loadModelCatalog({ cachePath: join(dir, 'models-dev.json') })
+    return found.map((agent) => ({
+      ...agent,
+      caps: { ...agent.caps, models: mergeModels(agent.caps.models, catalog[agent.provider.id] ?? []) },
+    }))
+  }
+
+  // 一个池子交给 server / runner / scheduler 共用：界面上刷新一次，三边同时
+  // 换成新的探测结果，不必重启。
+  const pool = new AgentPool(detect)
+  const agents = await pool.refresh()
   if (agents.length === 0) {
-    console.log(`  ${C.red('✗')} 未探测到任何 Agent CLI（claude / codex / opencode）`)
+    console.log(`  ${C.red('✗')} 未探测到任何 Agent CLI（${knownCommands().join(' / ')}）`)
     console.log(C.dim('    装好其中之一再来，任务需要它们来执行。\n'))
   }
   for (const { provider, caps } of agents) {
@@ -273,11 +280,11 @@ async function main(): Promise<void> {
   // ── 执行器 ───────────────────────────────────────────────
   const bus = new RunBus()
   const runner = new Runner({
-    storage, bus, agents,
+    storage, bus, agents: pool,
     artifactsRoot: join(dir, 'runs'),
   })
   const review = new Review({ storage })
-  const scheduler = new Scheduler({ storage, runner, agents })
+  const scheduler = new Scheduler({ storage, runner, agents: pool })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
   const aborted = runner.reconcile()
@@ -302,7 +309,7 @@ async function main(): Promise<void> {
   }
   const server = await startServer({
     storage,
-    agents,
+    agents: pool,
     runner,
     review,
     scheduler,

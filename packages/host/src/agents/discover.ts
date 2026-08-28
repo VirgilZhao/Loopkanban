@@ -14,14 +14,17 @@ import { spawnProcess } from '../subprocess/index.ts'
 /** 探测命令的超时；探测不该让启动挂住。 */
 const PROBE_TIMEOUT_MS = 10_000
 
-/** `PATH` 之外的兜底查找目录。 */
+/**
+ * `PATH` 之外的兜底查找目录。
+ *
+ * 这里只放**与具体 CLI 无关**的通用位置。某家自己惯用的安装目录
+ * （`~/.claude/local` 之类）由该 provider 用 `extraDirs` 声明 ——
+ * 否则每接一个新 CLI 都得回来改这个函数。
+ */
 function fallbackDirs(): string[] {
   const home = homedir()
   return [
     join(home, '.local', 'bin'),
-    join(home, '.claude', 'local'),
-    join(home, '.codex', 'bin'),
-    join(home, '.opencode', 'bin'),
     join(home, '.bun', 'bin'),
     join(home, '.volta', 'bin'),
     '/opt/homebrew/bin',
@@ -41,11 +44,23 @@ function isExecutable(path: string): boolean {
 
 /**
  * 找到可执行文件的绝对路径。
+ *
+ * 顺序：`PATH` → 通用兜底目录 → 该 CLI 自己的安装位置。
+ *
+ * **`extraDirs` 排在最后**，不能提前：它们多半是某个版本的历史遗留
+ * （`~/.claude/local` 就是 `claude migrate-installer` 留下的），当代安装器
+ * 装到的是 `~/.local/bin`。谁在前面谁说了算，把遗留目录排到前面，等于让
+ * 同时装过两次的人静默地跑在旧版本上 —— 而这条兜底路径专为「从桌面启动器
+ * 拉起、拿不到 shell `PATH`」的场景准备，恰恰是平时不会有人发现的那条。
+ *
  * @param name - 可执行文件名，例如 `claude`。
  * @param explicitPath - 用户在设置里指定的绝对路径，优先于一切。
+ * @param extraDirs - 这个 CLI 自己惯用的安装位置，仅在别处都找不到时才用。
  * @returns 绝对路径；找不到返回 null。
  */
-export function findExecutable(name: string, explicitPath?: string): string | null {
+export function findExecutable(
+  name: string, explicitPath?: string, extraDirs: readonly string[] = [],
+): string | null {
   if (explicitPath !== undefined && explicitPath.length > 0) {
     // 显式指定却不可用时返回 null 而不是静默回退 —— 用户明确指了路径，
     // 偷偷用别的会让「我明明指向了新版本」变成难查的怪事。
@@ -53,7 +68,7 @@ export function findExecutable(name: string, explicitPath?: string): string | nu
   }
 
   const pathDirs = (process.env['PATH'] ?? '').split(delimiter).filter((d) => d.length > 0)
-  for (const dir of [...pathDirs, ...fallbackDirs()]) {
+  for (const dir of [...pathDirs, ...fallbackDirs(), ...extraDirs]) {
     const candidate = join(dir, name)
     if (isExecutable(candidate)) return candidate
   }

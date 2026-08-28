@@ -15,7 +15,7 @@
  */
 
 import { planDispatch, type Dispatch, type Skip, type TaskId } from '@loopkanban/core'
-import type { DetectedAgent } from '../agents/index.ts'
+import type { AgentPool } from '../agents/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Storage } from '../storage/index.ts'
 
@@ -52,7 +52,8 @@ export interface SchedulerState {
 export interface SchedulerOptions {
   readonly storage: Storage
   readonly runner: Runner
-  readonly agents: readonly DetectedAgent[]
+  /** 本机可用的执行器。是活视图不是快照 —— 刷新之后这里立刻跟着变。 */
+  readonly agents: AgentPool
   readonly tickMs?: number
   readonly now?: () => number
 }
@@ -163,7 +164,9 @@ export class Scheduler {
   }
 
   private async runTick(): Promise<TickReport> {
-    const { storage, runner, agents } = this.options
+    const { storage, runner } = this.options
+    // 每一轮都重新读，这样刷新过的探测结果下一拍就生效。
+    const agents = this.options.agents.list()
     const settings = this.settings
 
     const reclaimed = runner.reclaimExpired()

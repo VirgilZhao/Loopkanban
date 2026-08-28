@@ -31,7 +31,7 @@ const RUN: RunContext = {
 const lines = (): string[] =>
   fixture('opencode-run-json-success.jsonl').split('\n').filter((l) => l.trim().length > 0)
 
-const events = () => lines().map((l) => opencodeCliProvider.parseLine(l, CAPS))
+const events = () => lines().flatMap((l) => opencodeCliProvider.parseLine(l, CAPS))
 
 describe('opencodeCliProvider.buildStart', () => {
   it('拼出 run + json + auto + dir，提示词用 -- 隔开', () => {
@@ -159,7 +159,7 @@ describe('opencodeCliProvider.parseLine（真实 --format json 输出）', () =>
   })
 
   it('error 事件给出结构化诊断', () => {
-    const event = opencodeCliProvider.parseLine(
+    const [event] = opencodeCliProvider.parseLine(
       JSON.stringify({
         type: 'error',
         sessionID: 'ses_x',
@@ -175,7 +175,7 @@ describe('opencodeCliProvider.parseLine（真实 --format json 输出）', () =>
   // 1.18.23 实测不会发这种事件（连 12 秒的 bash 也只在 completed 时报一次），
   // 这条是前向兼容：真发了就压成一行提示，而不是当成噪音丢掉。
   it('万一出现进行中的工具事件，压成一行提示而不是丢掉', () => {
-    const event = opencodeCliProvider.parseLine(
+    const [event] = opencodeCliProvider.parseLine(
       JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'bash', state: { status: 'running', title: 'pnpm test' } } }),
       CAPS,
     )
@@ -184,7 +184,7 @@ describe('opencodeCliProvider.parseLine（真实 --format json 输出）', () =>
   })
 
   it('工具失败是解释「为什么没干完」的线索，不能当噪音丢掉', () => {
-    const event = opencodeCliProvider.parseLine(
+    const [event] = opencodeCliProvider.parseLine(
       JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'bash', state: { status: 'error', error: 'exit 1' } } }),
       CAPS,
     )
@@ -196,7 +196,7 @@ describe('opencodeCliProvider.parseLine（真实 --format json 输出）', () =>
     for (const line of ['{"type":"未来才有的事件"}', '不是 JSON', '', '{"broken":']) {
       expect(() => opencodeCliProvider.parseLine(line, CAPS)).not.toThrow()
     }
-    expect(opencodeCliProvider.parseLine('不是 JSON', CAPS).kind).toBe('raw')
+    expect(opencodeCliProvider.parseLine('不是 JSON', CAPS)[0]?.kind).toBe('raw')
   })
 })
 

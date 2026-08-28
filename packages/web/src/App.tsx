@@ -15,7 +15,7 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/s
 import { maybe, useT, type Translate } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
 import { taskTitle } from '@/lib/task.ts'
-import { cn } from '@/lib/utils.ts'
+import { cn, shortVersion } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunStats,
   type SchedulerState, type Skip, type Task,
@@ -63,6 +63,8 @@ export default function App(): React.JSX.Element {
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null)
   const [stats, setStats] = useState<RunStats | null>(null)
   const [schedulerBusy, setSchedulerBusy] = useState(false)
+  // 正在重新探测本机 CLI。按钮据此转起来，并挡住连点。
+  const [agentsBusy, setAgentsBusy] = useState(false)
   // 归档默认不显示 —— 归档的意义就是从视野里拿走。
   const [showArchived, setShowArchived] = useState(false)
   // 上一次看到的列，用来判断"刚刚有卡进了 Review/Failed"，据此发通知。
@@ -80,6 +82,35 @@ export default function App(): React.JSX.Element {
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
+
+  /**
+   * 重新探测本机装了哪些 CLI。
+   *
+   * 探测要为每个 CLI 起子进程，慢到看得见，所以要有"正在转"的状态；失败了
+   * 就说出来 —— 悄悄什么都不变，会让人以为自己刚装的东西没被认出来。
+   */
+  const refreshAgents = useCallback(async () => {
+    setAgentsBusy(true)
+    try {
+      const { agents: found } = await api.refreshAgents()
+      setAgents(found)
+      setNotice(found.length === 0
+        ? { text: t('sidebar.agentsNoneFound'), tone: 'warn' }
+        : {
+            text: t('sidebar.agentsRefreshed', {
+              list: found.map((a) => `${a.id} ${shortVersion(a.version)}`).join(t('sidebar.agentsSeparator')),
+            }),
+            tone: 'info',
+          })
+    } catch (error: unknown) {
+      setNotice({
+        text: error instanceof ApiError ? `${error.code} · ${error.message}` : t('sidebar.agentsRefreshFailed'),
+        tone: 'warn',
+      })
+    } finally {
+      setAgentsBusy(false)
+    }
+  }, [t])
 
   useEffect(() => {
     void refresh()
@@ -264,6 +295,8 @@ export default function App(): React.JSX.Element {
     <SidebarProvider>
       <AppSidebar
         agents={agents}
+        agentsBusy={agentsBusy}
+        onRefreshAgents={() => { void refreshAgents() }}
         runningByAgent={runningByAgent}
         projects={projects}
         counts={projectCounts}

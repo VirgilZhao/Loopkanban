@@ -25,7 +25,7 @@ import {
   taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
-import type { DetectedAgent } from '../agents/index.ts'
+import type { AgentPool, DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
 import type { Run, Storage, TaskComment } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
@@ -52,7 +52,8 @@ const IMMEDIATE_FAILURE_MS = 10_000
 export interface RunnerOptions {
   readonly storage: Storage
   readonly bus: RunBus
-  readonly agents: readonly DetectedAgent[]
+  /** 本机可用的执行器。是活视图不是快照 —— 刷新之后这里立刻跟着变。 */
+  readonly agents: AgentPool
   /** Run 产物（原始日志、last-message）目录。 */
   readonly artifactsRoot: string
   readonly leaseTtlMs?: number
@@ -106,7 +107,9 @@ export class Runner {
    * @returns 已发布的 Run，或明确的失败原因。
    */
   async start(taskId: TaskId, providerId?: string): Promise<StartResult> {
-    const { storage, agents } = this.options
+    const { storage } = this.options
+    // 每次派活都重新读：中途刷新过的话，装上的要能用，卸掉的不能再派。
+    const agents = this.options.agents.list()
     const task = storage.getTask(taskId)
     if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
 
@@ -200,7 +203,8 @@ export class Runner {
       permission: 'standard',
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
       ...(task.model === undefined ? {} : { model: task.model }),
-      // claude 支持预先指定会话 id；codex 只能事后从 thread.started 捞。
+      // 能不能钉住会话 id 是探测出来的事实，不按 CLI 的名字分支：
+      // 有的支持我们预先指定，有的只能事后从它自己的输出里捞。
       ...(caps.canPinSessionId ? { sessionId: randomUUID() } : {}),
     }
 
@@ -288,25 +292,27 @@ export class Runner {
     try {
       for await (const line of createInterface({ input: handle.stdout })) {
         rawLines.push(line)
-        const event = agent.provider.parseLine(line, agent.caps)
-        if (event.kind === 'session') {
-          // 有的 CLI 每条事件都带会话 id（opencode 就是），逐条广播会把面板刷满。
-          // 只有当这条 session 事件确实带来了新东西（第一次出现，或多了 model /
-          // apiKeySource 这类字段）才放行 —— 按整条负载比对，而不是只比 id，
-          // 免得把 claude 那条含 apiKeySource 的 init 事件误当重复吞掉。
-          const key = JSON.stringify(event)
-          if (key === lastSessionKey) continue
-          lastSessionKey = key
-          sessionId = event.sessionId
+        // 一行可以是好几件事：claude 的 result 同时是"结束"和"这一轮花了多少"。
+        for (const event of agent.provider.parseLine(line, agent.caps)) {
+          if (event.kind === 'session') {
+            // 有的 CLI 每条事件都带会话 id（opencode 就是），逐条广播会把面板刷满。
+            // 只有当这条 session 事件确实带来了新东西（第一次出现，或多了 model /
+            // apiKeySource 这类字段）才放行 —— 按整条负载比对，而不是只比 id，
+            // 免得把 claude 那条含 apiKeySource 的 init 事件误当重复吞掉。
+            const key = JSON.stringify(event)
+            if (key === lastSessionKey) continue
+            lastSessionKey = key
+            sessionId = event.sessionId
+          }
+          if (event.kind === 'text' || event.kind === 'tool') produced = true
+          if (event.kind === 'text' && event.text.trim().length > 0) lastText = event.text
+          if (event.kind === 'finished') {
+            finishedOk = event.ok
+            diagnostic = event.diagnostic
+            answer = event.summary
+          }
+          this.emit(run.id, event.kind, event as unknown as Record<string, unknown>)
         }
-        if (event.kind === 'text' || event.kind === 'tool') produced = true
-        if (event.kind === 'text' && event.text.trim().length > 0) lastText = event.text
-        if (event.kind === 'finished') {
-          finishedOk = event.ok
-          diagnostic = event.diagnostic
-          answer = event.summary
-        }
-        this.emit(run.id, event.kind, event as unknown as Record<string, unknown>)
       }
     } catch (error) {
       // 事件流中断（stdout EPIPE、落库失败…）时进程很可能还活着。
@@ -332,9 +338,20 @@ export class Runner {
       await writeFile(join(this.options.artifactsRoot, run.id, 'stderr.txt'), stderrText, 'utf8')
     }
 
-    // 完成判定：显式的 finished 事件优先；没有就退回退出码。
-    // 只信退出码是脆弱的，只信事件又不是所有 CLI 都给，所以两者都要。
-    const ok = finishedOk ?? (outcome.code === 0)
+    /*
+     * 完成判定：显式的 finished 事件优先，没有就退回退出码 —— 只信退出码是
+     * 脆弱的，只信事件又不是所有 CLI 都给，所以两者都要。
+     *
+     * 但退出码握有**一票否决**：CLI 说完"这一轮成了"之后进程仍然以非零码
+     * 结束，说明收尾阶段出了事（`-o` 落盘失败、清理时崩溃），那不是一次
+     * 干净的成功，不该悄悄记成 completed。反过来不成立 —— 说失败就是失败，
+     * 退出码是 0 也不翻案。
+     *
+     * 被信号杀掉（code 为 null）不算它自己报的错：主动取消与超时走的就是
+     * 这条路，而那时 CLI 若已经说过成功，这一轮的活确实干完了。
+     */
+    const exitReportedFailure = outcome.code !== null && outcome.code !== 0
+    const ok = (finishedOk ?? outcome.code === 0) && !exitReportedFailure
     const diff = await worktreeDiff(worktree, task.baseBranch).catch(() => '')
     const changed = diff.trim().length > 0
 
@@ -347,6 +364,12 @@ export class Runner {
       diagnostic
         ?? (stderrText.length > 0 ? stderrText.slice(0, 512) : undefined)
         ?? `exit=${String(outcome.code)}`,
+      // CLI 报了成功却非零退出 —— 不解释一句的话，Review 里只会看到一个
+      // 光秃秃的 exit=N，而上面的事件流明明写着「finished ok=true」。
+      finishedOk === true && exitReportedFailure
+        ? '（CLI 报告这一轮成功，但进程随后以非零码退出：收尾阶段出了事，'
+          + '本次不按干净的成功处理。改动仍在工作区里，可自行判读）'
+        : null,
       // 会话刚建立就死、一句话一个工具都没有 —— 这种形状的失败几乎都出在
       // CLI 自己那边（默认模型解析不出、配置有问题、没登录），而各家给的
       // 错误信息又往往含糊到没法照做。给一条能试的线索，不下结论。

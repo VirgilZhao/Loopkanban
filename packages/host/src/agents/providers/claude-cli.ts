@@ -6,6 +6,7 @@
  * LoopKanban 不接受、不存储、不传递任何 API Key。
  */
 
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { SpawnSpec } from '../../subprocess/index.ts'
 import { capture, findExecutable, probeVersion } from '../discover.ts'
@@ -89,11 +90,26 @@ function num(value: unknown, key: string): number | undefined {
   return typeof found === 'number' ? found : undefined
 }
 
+/** 可执行文件名。宿主也要用它来说"我找过谁"，所以是 provider 声明的事实。 */
+const COMMAND = 'claude'
+
+/**
+ * `PATH` 之外还该看一眼的地方。
+ *
+ * 不是可有可无的：macOS 上从桌面启动器（而非终端）拉起的进程往往拿不到用户
+ * shell 里的 `PATH`，而 claude 常常就装在这儿。
+ */
+const EXTRA_DIRS: readonly string[] = [join(homedir(), '.claude', 'local')]
+
 export const claudeCliProvider: AgentProvider = {
   id: 'claude',
+  command: COMMAND,
+  extraDirs: EXTRA_DIRS,
+  // claude 只能从 --help 的描述里捞几个别名，型号全名得靠 models.dev 补。
+  catalogSource: 'anthropic',
 
   async probe(explicitPath?: string): Promise<AgentCaps | null> {
-    const bin = findExecutable('claude', explicitPath)
+    const bin = findExecutable(COMMAND, explicitPath, EXTRA_DIRS)
     if (bin === null) return null
     const version = await probeVersion(bin)
     if (version === null) return null
@@ -131,16 +147,16 @@ export const claudeCliProvider: AgentProvider = {
     return { argv, cwd: run.worktreePath, env: scrubEnv(process.env, run.envOverrides).env, stderr: 'pipe' }
   },
 
-  parseLine(line: string, _caps: AgentCaps): AgentEvent {
+  parseLine(line: string, _caps: AgentCaps): readonly AgentEvent[] {
     const trimmed = line.trim()
-    if (trimmed.length === 0) return { kind: 'raw', line }
+    if (trimmed.length === 0) return [{ kind: 'raw', line }]
 
     let event: unknown
     try {
       event = JSON.parse(trimmed)
     } catch {
       // 解析器绝不能成为执行的单点故障：认不出就原样留着。
-      return { kind: 'raw', line }
+      return [{ kind: 'raw', line }]
     }
 
     const type = str(event, 'type')
@@ -154,38 +170,38 @@ export const claudeCliProvider: AgentProvider = {
         const model = str(event, 'model')
         const permissionMode = str(event, 'permissionMode')
         const apiKeySource = str(event, 'apiKeySource')
-        return {
+        return [{
           kind: 'session',
           sessionId,
           ...(model === undefined ? {} : { model }),
           ...(permissionMode === undefined ? {} : { permissionMode }),
           ...(apiKeySource === undefined ? {} : { apiKeySource }),
-        }
+        }]
       }
       if (subtype === 'permission_denied') {
         // 这是解释「Agent 为什么没干完」的关键线索，不能当噪音丢掉。
         const tool = str(event, 'tool_name') ?? '未知工具'
         const why = str(event, 'decision_reason_type')
-        return {
+        return [{
           kind: 'notice',
           level: 'warn',
           text: `权限拒绝：${tool}${why === undefined ? '' : ` (${why})`}`,
-        }
+        }]
       }
       if (subtype === 'api_retry') {
         const attempt = num(event, 'attempt')
         const max = num(event, 'max_retries')
         const status = num(event, 'error_status')
         const reason = str(event, 'error')
-        return {
+        return [{
           kind: 'notice',
           level: 'warn',
           text: `API 重试 ${String(attempt ?? '?')}/${String(max ?? '?')}`
             + `${status === undefined ? '' : ` status=${String(status)}`}`
             + `${reason === undefined ? '' : ` ${reason}`}`,
-        }
+        }]
       }
-      return { kind: 'raw', line }
+      return [{ kind: 'raw', line }]
     }
 
     if (type === 'rate_limit_event') {
@@ -194,12 +210,12 @@ export const claudeCliProvider: AgentProvider = {
       const window = str(info, 'rateLimitType')
       const resetsAt = num(info, 'resetsAt')
       // status 为 allowed 时只是额度播报，不值得打扰人。
-      return {
+      return [{
         kind: 'notice',
         level: status === 'allowed' ? 'info' : 'warn',
         text: `额度 ${status ?? '?'}${window === undefined ? '' : ` window=${window}`}`
           + `${resetsAt === undefined ? '' : ` resets=${new Date(resetsAt * 1000).toISOString()}`}`,
-      }
+      }]
     }
 
     if (type === 'assistant' || type === 'user') {
@@ -210,15 +226,15 @@ export const claudeCliProvider: AgentProvider = {
           const blockType = str(block, 'type')
           if (blockType === 'tool_use') {
             const name = str(block, 'name') ?? 'unknown'
-            return { kind: 'tool', name, input: (block as Record<string, unknown>)['input'] }
+            return [{ kind: 'tool', name, input: (block as Record<string, unknown>)['input'] }]
           }
           const text = str(block, 'text')
           if (blockType === 'text' && text !== undefined && text.trim().length > 0) {
-            return { kind: 'text', text }
+            return [{ kind: 'text', text }]
           }
         }
       }
-      return { kind: 'raw', line }
+      return [{ kind: 'raw', line }]
     }
 
     if (type === 'result') {
@@ -227,16 +243,44 @@ export const claudeCliProvider: AgentProvider = {
       const ok = (event as Record<string, unknown>)['is_error'] !== true
       const summary = str(event, 'result')
       const diagnostic = ok ? undefined : failureDiagnostic(event)
-      return {
-        kind: 'finished',
-        ok,
-        ...(summary === undefined ? {} : { summary }),
-        ...(diagnostic === undefined ? {} : { diagnostic }),
-      }
+      // 这一行同时是"结束"和"这一轮花了多少"。用量排在结束之前 ——
+      // 消费方看到 finished 往往就开始收尾了，后面的东西未必还有人收。
+      return [
+        ...usageOf(event),
+        {
+          kind: 'finished',
+          ok,
+          ...(summary === undefined ? {} : { summary }),
+          ...(diagnostic === undefined ? {} : { diagnostic }),
+        },
+      ]
     }
 
-    return { kind: 'raw', line }
+    return [{ kind: 'raw', line }]
   },
+}
+
+/**
+ * 从 `result` 事件里取这一轮的用量与成本。
+ *
+ * claude 是三家里唯一报美元成本的，而这笔数字此前从未入库 —— `result` 一行
+ * 只翻译得出一个事件，用量就在 finished 手里输掉了。现在它和 finished 一起
+ * 从同一行里出来。
+ *
+ * @returns 有用量则是单元素数组，没有则空数组（可直接展开）。
+ */
+function usageOf(event: unknown): AgentEvent[] {
+  const usage = (event as Record<string, unknown>)['usage']
+  const inputTokens = num(usage, 'input_tokens')
+  const outputTokens = num(usage, 'output_tokens')
+  const costUsd = num(event, 'total_cost_usd')
+  if (inputTokens === undefined && outputTokens === undefined && costUsd === undefined) return []
+  return [{
+    kind: 'usage',
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(costUsd === undefined ? {} : { costUsd }),
+  }]
 }
 
 /** 诊断字符串的长度上限：结构化事实优先，原始报错不外泄。 */
@@ -254,27 +298,6 @@ function failureDiagnostic(event: unknown): string {
   if (stop !== undefined) parts.push(`stop=${stop}`)
   if (subtype !== undefined) parts.push(`subtype=${subtype}`)
   return parts.join(' ').slice(0, DIAGNOSTIC_MAX)
-}
-
-/** 从 `result` 事件里另外取用量；供调用方在拿到 finished 时补记成本。 */
-export function claudeUsage(line: string): AgentEvent | null {
-  try {
-    const event: unknown = JSON.parse(line)
-    if (str(event, 'type') !== 'result') return null
-    const usage = (event as Record<string, unknown>)['usage']
-    const inputTokens = num(usage, 'input_tokens')
-    const outputTokens = num(usage, 'output_tokens')
-    const costUsd = num(event, 'total_cost_usd')
-    if (inputTokens === undefined && outputTokens === undefined && costUsd === undefined) return null
-    return {
-      kind: 'usage',
-      ...(inputTokens === undefined ? {} : { inputTokens }),
-      ...(outputTokens === undefined ? {} : { outputTokens }),
-      ...(costUsd === undefined ? {} : { costUsd }),
-    }
-  } catch {
-    return null
-  }
 }
 
 /** 该 Run 的产物目录里，我们约定放原始日志的位置。 */

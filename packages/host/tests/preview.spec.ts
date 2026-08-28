@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PREVIEW_MAX_BYTES, readFilePreview } from '../src/server/preview.ts'
+import { MAX_TEXT_BYTES } from '../src/fs/index.ts'
+import { readFilePreview } from '../src/server/preview.ts'
 
 let sandbox: string
 let repo: string
@@ -95,21 +96,21 @@ describe('readFilePreview', () => {
 
   it('过大的文件只给前一段，并如实说它被截了', async () => {
     const file = join(worktree, 'huge.md')
-    await writeFile(file, 'x'.repeat(PREVIEW_MAX_BYTES + 1_000))
+    await writeFile(file, 'x'.repeat(MAX_TEXT_BYTES + 1_000))
 
     const found = await readFilePreview(file, roots())
     expect(found.ok).toBe(true)
     if (!found.ok) return
     expect(found.file.truncated).toBe(true)
-    expect(found.file.content.length).toBeLessThanOrEqual(PREVIEW_MAX_BYTES)
+    expect(found.file.content.length).toBeLessThanOrEqual(MAX_TEXT_BYTES)
     // size 是文件真实大小，不是这次给出去的长度。
-    expect(found.file.size).toBe(PREVIEW_MAX_BYTES + 1_000)
+    expect(found.file.size).toBe(MAX_TEXT_BYTES + 1_000)
   })
 
   it('截断不会在多字节字符中间留半个 —— 中文文档不该以一个乱码收尾', async () => {
     const file = join(worktree, 'cjk.md')
     // 每个汉字 3 字节，上限不是 3 的倍数，截断处必然落在字符中间。
-    await writeFile(file, '中'.repeat(PREVIEW_MAX_BYTES))
+    await writeFile(file, '中'.repeat(MAX_TEXT_BYTES))
 
     const found = await readFilePreview(file, roots())
     expect(found.ok).toBe(true)

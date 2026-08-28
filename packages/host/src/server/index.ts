@@ -33,7 +33,8 @@ import { browseDirectory, defaultBrowseRoot } from './browse.ts'
 import { readFilePreview } from './preview.ts'
 import { RunBus } from './bus.ts'
 import { runCommand } from './exec.ts'
-import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
+import { confine, refusalFor } from '../fs/index.ts'
+import { listFiles, listWorkspaces, readFileText } from './files.ts'
 
 /** 只监听回环地址。**绝不 `0.0.0.0`** —— 那等于把执行任意代码的接口挂到局域网。 */
 const LOOPBACK = '127.0.0.1'
@@ -340,11 +341,12 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * @param outside - 真的越界时说什么。
      */
     const refuse = async (roots: readonly string[], asked: string, outside: string): Promise<void> => {
-      const reason = await refusalFor(roots, asked)
+      // 围栏那一层不知道根是「项目仓库」—— 那是这里的策略，措辞也就配在这里。
+      const missing = await refusalFor(roots, asked) === 'root-missing'
       // 410 而不是 422：路径没错，是它指向的东西整个不在了。
-      sendJson(res, reason === 'repo-missing' ? 410 : 422, {
-        error: reason,
-        detail: reason === 'repo-missing' ? `项目的仓库目录已经不在了：${asked}` : outside,
+      sendJson(res, missing ? 410 : 422, {
+        error: missing ? 'repo-missing' : 'outside-project',
+        detail: missing ? `项目的仓库目录已经不在了：${asked}` : outside,
       })
     }
 
@@ -369,11 +371,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (root === null) { await refuse(roots, askedRoot, '只能看已登记项目仓库里的文件'); return }
       const target = await confine([root], askedPath)
       if (target === null) { await refuse([root], askedPath, '只能看已登记项目仓库里的文件'); return }
-      try {
-        sendJson(res, 200, await readFileText(root, target), extraHeaders)
-      } catch {
-        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${target}` })
+      const read = await readFileText(root, target)
+      if (!read.ok) {
+        // 「读不动」跟「不在了」是两句不同的话：前者文件就在那儿，是权限不够，
+        // 说成「不在了」会让人去找一个根本没丢的文件。预览那条路径一直是分开
+        // 报的，这里跟上。
+        sendJson(res, read.reason === 'unreadable' ? 403 : 404, {
+          error: read.reason, detail: `打不开 ${target}`,
+        })
+        return
       }
+      sendJson(res, 200, read.file, extraHeaders)
       return
     }
 

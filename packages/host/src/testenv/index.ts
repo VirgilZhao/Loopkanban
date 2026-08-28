@@ -30,7 +30,7 @@ import { connect, createServer, type AddressInfo } from 'node:net'
 import { stat } from 'node:fs/promises'
 import type { TaskId } from '@loopkanban/core'
 import type { Storage } from '../storage/index.ts'
-import { shellArgv } from '../server/exec.ts'
+import { shellArgv } from '../server/shell.ts'
 import { spawnProcess, type ProcessHandle } from '../subprocess/index.ts'
 
 /** 没人看着多久就收掉。SSE 断开即开始计时 —— 关面板、关标签页、断网都算。 */
@@ -304,7 +304,7 @@ export class TestEnvs {
         argv: shellArgv(resolved),
         cwd,
         /*
-         * 环境**不清洗**，同 `server/exec.ts`：这是用户自己配的命令，跑的是他
+         * 环境**不清洗**，同 `server/shell.ts`：这是用户自己配的命令，跑的是他
          * 自己的项目，把 `GITHUB_TOKEN`、`AWS_PROFILE` 之类洗掉只会让服务以一种
          * 与看板毫无关系的方式起不来。
          *

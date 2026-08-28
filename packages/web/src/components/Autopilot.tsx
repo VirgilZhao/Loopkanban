@@ -38,7 +38,7 @@ export function Autopilot({ settings, running, busy, onChange }: Props): React.J
         onClick={() => { onChange({ autopilot: !autopilot }) }}
         title={autopilot ? '关闭后不再自动认领，已在跑的任务不受影响' : '打开后 Ready 里的卡会被自动派给 Agent'}
         className={cn(
-          'flex items-center gap-2 border px-2 py-1 transition-colors',
+          'flex items-center gap-2 rounded-md border px-2 py-1 transition-colors',
           'disabled:cursor-not-allowed disabled:opacity-50',
           autopilot
             ? 'border-sodium bg-sodium/10 text-sodium'
@@ -83,7 +83,7 @@ function Step({ children, onClick, disabled, label }: {
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        'flex size-4 items-center justify-center border border-hairline text-ink-faint',
+        'flex size-4 items-center justify-center rounded-sm border border-hairline text-ink-faint',
         'transition-colors hover:border-sodium hover:text-sodium',
         'disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:border-hairline disabled:hover:text-ink-faint',
       )}

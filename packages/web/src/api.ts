@@ -7,8 +7,8 @@
  */
 
 import type {
-  Agent, Attachment, BranchListing, DiffView, DirListing, LiveLine, Project, Run, RunStats,
-  SchedulerSettings, SchedulerState, StreamEvent, Task, TaskComment, TaskEdit,
+  Agent, Attachment, BranchListing, DiffView, DirListing, FilePreview, LiveLine, Project, Run,
+  RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task, TaskComment, TaskEdit,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -142,6 +142,15 @@ export const api = {
     call<SchedulerState>('/api/scheduler', { method: 'PATCH', body: JSON.stringify(patch) }),
 
   diff: (taskId: string) => call<{ diff: DiffView }>(`/api/tasks/${encodeURIComponent(taskId)}/diff`),
+
+  /**
+   * 读一个文件用于预览：Agent 写的方案文档就在它的 worktree 里，浏览器
+   * 打不开那条路径。够得着的只有这张卡的 worktree 与项目仓库。
+   */
+  file: (taskId: string, path: string) =>
+    call<{ file: FilePreview }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/file?path=${encodeURIComponent(path)}`,
+    ),
 
   /** 验收通过。merge 为真才会动主工作区，且前置条件不满足会被明确拒绝。 */
   accept: (taskId: string, merge = false) =>

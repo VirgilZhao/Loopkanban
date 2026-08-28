@@ -178,6 +178,11 @@ const zh = {
   'diff.empty': '这次执行没有产生任何改动',
   'diff.truncated': '改动过大，这里只显示了前一部分。完整补丁在产物目录里。',
 
+  // ── 文档预览 ───────────────────────────────────────────
+  'preview.close': '关闭预览 · esc',
+  'preview.loading': '读取中…',
+  'preview.truncated': '文件太大，这里只显示了前一部分。完整的那份在本机磁盘上。',
+
   // ── 新增 / 删除项目 ───────────────────────────────────
   'newProject.pickTitle': '选择项目文件夹',
   'newProject.pickHint': '逛的是跑着 LoopKanban 的那台机器上的目录。带 git 标记的才能当项目。',
@@ -257,6 +262,10 @@ const zh = {
   'err.no-attachments': '当前实例没有配置附件存储，传不了文件。',
   'err.attachment-not-found': '这个附件已经不在了，可能刚被删掉。',
   'err.attachment-gone': '这个附件的文件已经不在磁盘上了 —— 重新传一份。',
+  'err.no-such-file': '这个文件不在了 —— 多半是这次执行的工作区已经删掉，或者路径写错了。',
+  'err.path-outside-workspace': '这条路径不在这张卡够得着的地方（它的工作区与项目仓库），不给看。',
+  'err.not-text': '这是个二进制文件，在这儿预览只会是一屏乱码。',
+  'err.unreadable': '这个文件读不动 —— 多半是权限不够。它确实在那儿，但当前用户打不开它。',
 }
 
 export type MessageKey = keyof typeof zh
@@ -410,6 +419,10 @@ const en: Record<MessageKey, string> = {
   'diff.empty': 'This run produced no changes',
   'diff.truncated': 'The change is too large to show in full; only the first part is here. The complete patch is in the artifacts directory.',
 
+  'preview.close': 'Close preview · esc',
+  'preview.loading': 'Reading…',
+  'preview.truncated': 'The file is too large to show in full; only the first part is here. The whole thing is on disk.',
+
   'newProject.pickTitle': 'Pick a project folder',
   'newProject.pickHint': 'You’re browsing the machine running LoopKanban. Only git repos can be projects.',
   'newProject.title': 'Add project',
@@ -483,6 +496,10 @@ const en: Record<MessageKey, string> = {
   'err.no-attachments': 'This instance has no attachment storage configured, so files can’t be uploaded.',
   'err.attachment-not-found': 'That attachment is gone; it may have just been deleted.',
   'err.attachment-gone': 'That attachment’s file is no longer on disk — upload it again.',
+  'err.no-such-file': 'That file is gone — most likely the worktree for this run was removed, or the path is wrong.',
+  'err.path-outside-workspace': 'That path is outside what this card can reach (its worktree and the project repo).',
+  'err.not-text': 'That’s a binary file — previewing it here would just be a screen of noise.',
+  'err.unreadable': 'That file can’t be opened — most likely permissions. It is there, but this user can’t read it.',
 }
 
 const TABLES: Record<Lang, Record<MessageKey, string>> = { zh, en }

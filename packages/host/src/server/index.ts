@@ -30,6 +30,7 @@ import type { Attachment, Storage } from '../storage/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
+import { readFilePreview } from './preview.ts'
 import { RunBus } from './bus.ts'
 
 /** 只监听回环地址。**绝不 `0.0.0.0`** —— 那等于把执行任意代码的接口挂到局域网。 */
@@ -911,6 +912,38 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const view = await review.diff(asTaskId(decodeURIComponent(diffOf)))
       if (view === null) { sendJson(res, 404, { error: 'no-run', detail: '这张卡还没有执行记录' }); return }
       sendJson(res, 200, { diff: view }, extraHeaders)
+      return
+    }
+
+    /*
+     * 预览工作区里的一个文件。
+     *
+     * Agent 常常把方案写成一份文档再在讨论里给出路径 —— 那条路径指向的是它
+     * 自己的 worktree，浏览器打不开。够得着的范围只有这张卡历次执行的
+     * worktree 与项目仓库，越界一律拒绝（细则见 `preview.ts`）。
+     */
+    const fileOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file$/)
+    if (method === 'GET' && fileOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(fileOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      const roots = [...new Set([
+        ...storage.listRuns(taskId).map((run) => run.worktreePath),
+        task.repoPath,
+      ])]
+      const found = await readFilePreview(url.searchParams.get('path') ?? '', roots)
+      if (!found.ok) {
+        // 越界是「这个请求本身不成立」，不是「东西不在」——分开报，不然
+        // 界面只能笼统地说一句打不开。
+        const status = found.reason === 'path-outside-workspace' ? 422
+          : found.reason === 'not-text' ? 415
+          : found.reason === 'unreadable' ? 403
+          : 404
+        sendJson(res, status, { error: found.reason, detail: found.detail })
+        return
+      }
+      sendJson(res, 200, { file: found.file }, extraHeaders)
       return
     }
 

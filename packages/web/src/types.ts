@@ -19,6 +19,18 @@ export interface DiffView {
   truncated: boolean
 }
 
+/** 工作区里的一个文件。讨论里点开一条文档链接看的就是它。 */
+export interface FilePreview {
+  path: string
+  name: string
+  /** 相对所属根目录的路径 —— 界面上显示这个，绝对路径太长读不出重点。 */
+  relative: string
+  /** 文件真实大小（字节），不是 content 的长度。 */
+  size: number
+  truncated: boolean
+  content: string
+}
+
 export interface Task {
   id: string
   projectId: string

@@ -58,6 +58,8 @@ export default function App(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // 运行中卡片的最后一条事件，跟着看板轮询一起来 —— 详情弹窗关着也看得见。
   const [live, setLive] = useState<Record<string, LiveLine>>({})
+  // 每张卡挂了几个附件，跟着看板轮询一起来 —— 卡上那枚回形针靠它。
+  const [attachments, setAttachments] = useState<Record<string, number>>({})
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -72,7 +74,7 @@ export default function App(): React.JSX.Element {
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded, projects: known, live: lines }, state, summary] = await Promise.all([
+    const [{ tasks: loaded, projects: known, live: lines, attachments: clips }, state, summary] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
       api.stats().catch(() => null),
@@ -80,6 +82,7 @@ export default function App(): React.JSX.Element {
     setTasks(loaded)
     setProjects(known)
     setLive(lines)
+    setAttachments(clips)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -408,6 +411,7 @@ export default function App(): React.JSX.Element {
                 now={now}
                 selectedId={selectedId}
                 live={live}
+                attachments={attachments}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
                 // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。

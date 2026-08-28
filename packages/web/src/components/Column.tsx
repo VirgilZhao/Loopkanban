@@ -23,6 +23,8 @@ interface Props {
   index: number
   selectedId: string | null
   live: Record<string, LiveLine>
+  /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
+  attachments: Record<string, number>
   skips: Map<string, Skip>
   onSelect: (task: Task) => void
   /** 概览里同一列会来自不同仓库，给出项目名让卡片自报家门；单项目视图下不传。 */
@@ -32,7 +34,7 @@ interface Props {
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, live, skips, onSelect, projectName, onCreate,
+  column, tasks, now, index, selectedId, live, attachments, skips, onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const t = useT()
   const { setNodeRef, isOver } = useDroppable({ id: column })
@@ -89,6 +91,7 @@ export function Column({
             now={now}
             selected={selectedId === task.id}
             live={live[task.id]}
+            attachments={attachments[task.id]}
             skip={skips.get(task.id)}
             projectName={projectName?.(task.projectId)}
             onSelect={onSelect}

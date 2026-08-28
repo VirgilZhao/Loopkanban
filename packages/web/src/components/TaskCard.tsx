@@ -1,6 +1,6 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, PauseCircle } from 'lucide-react'
+import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, Paperclip, PauseCircle } from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
@@ -24,10 +24,14 @@ interface Props {
   skip?: Skip | undefined
   /** 所属项目名。只有概览里才给 —— 单项目视图下每张卡都一样，写了是噪音。 */
   projectName?: string | undefined
+  /** 挂了几个附件。0 就不显示那枚回形针。 */
+  attachments?: number | undefined
   onSelect: (task: Task) => void
 }
 
-export function TaskCard({ task, now, selected, live, skip, projectName, onSelect }: Props): React.JSX.Element {
+export function TaskCard({
+  task, now, selected, live, skip, projectName, attachments, onSelect,
+}: Props): React.JSX.Element {
   const t = useT()
   const archived = task.archivedAt !== undefined
   // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
@@ -125,6 +129,11 @@ export function TaskCard({ task, now, selected, live, skip, projectName, onSelec
             <Lock className="size-3" />{task.blockedBy.length}
           </span>
         ) : null}
+        {attachments === undefined || attachments === 0 ? null : (
+          <span className="mono flex items-center gap-1 text-[10px]">
+            <Paperclip className="size-3" />{attachments}
+          </span>
+        )}
         {projectName === undefined ? null : (
           <span className="flex min-w-0 items-center gap-1 truncate text-[10px]">
             <FolderGit2 className="size-3 flex-none" />{projectName}

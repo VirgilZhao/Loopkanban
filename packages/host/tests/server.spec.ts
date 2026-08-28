@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { connect, type AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
+import { AttachmentStore } from '../src/attachments/index.ts'
 import { Storage } from '../src/storage/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
@@ -16,6 +17,7 @@ const PROJECT = asProjectId('b1')
 
 let store: Storage
 let server: RunningServer
+let attachmentsRoot: string
 
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
@@ -48,13 +50,18 @@ function rawRequest(headers: Record<string, string>, path = '/api/state'): Promi
 beforeEach(async () => {
   store = Storage.open(':memory:')
   store.createProject({ id: PROJECT, name: '默认', repoPath: '/repo', baseBranch: 'main', createdAt: T0 })
+  attachmentsRoot = await mkdtemp(join(tmpdir(), 'loopkanban-server-attach-'))
   // 心跳调快，让「发现死连接」的延迟在测试里可控。
-  server = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50 })
+  server = await startServer({
+    storage: store, token: TOKEN, sseHeartbeatMs: 50,
+    attachments: new AttachmentStore(attachmentsRoot),
+  })
 })
 
 afterEach(async () => {
   await server.close()
   store.close()
+  await rm(attachmentsRoot, { recursive: true, force: true })
 })
 
 describe('POST /api/projects', () => {
@@ -671,6 +678,191 @@ describe('讨论', () => {
 
   it('卡不存在 404', async () => {
     expect((await say('nope', { body: 'x' })).status).toBe(404)
+  })
+})
+
+describe('附件', () => {
+  /** 传一个文件：裸的请求体 + x-filename 头，与前端走的是同一条路。 */
+  const put = (id: string, filename: string, body: string, type = 'text/plain') =>
+    api(`/api/tasks/${id}/attachments`, {
+      method: 'POST',
+      headers: { 'content-type': type, 'x-filename': encodeURIComponent(filename) },
+      body,
+    })
+
+  it('传上去、读回来，磁盘上确有其文件', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const res = await put('t1', '设计稿.png', 'PNGDATA', 'image/png')
+    expect(res.status).toBe(201)
+    const { attachment } = await res.json() as { attachment: { id: string; mime: string; size: number } }
+    expect(attachment.mime).toBe('image/png')
+    expect(attachment.size).toBe(7)
+
+    const listed = await (await api('/api/tasks/t1/attachments')).json() as
+      { attachments: { filename: string }[] }
+    expect(listed.attachments.map((a) => a.filename)).toEqual(['设计稿.png'])
+
+    const record = store.getAttachment(attachment.id)
+    if (record === null) throw new Error('setup')
+    expect(await readFile(record.path, 'utf8')).toBe('PNGDATA')
+  })
+
+  it('不把磁盘路径漏给前端 —— 那是服务端的内部事实', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', 'a.txt', 'x')).json() as { attachment: Record<string, unknown> }
+    expect(body.attachment['path']).toBeUndefined()
+  })
+
+  it('取内容时带上类型与 nosniff；图片内联，别的一律下载', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const png = await (await put('t1', '图.png', 'IMG', 'image/png')).json() as { attachment: { id: string } }
+    const doc = await (await put('t1', '页面.html', '<script>', 'text/html')).json() as
+      { attachment: { id: string } }
+
+    const first = await api(`/api/attachments/${png.attachment.id}`)
+    expect(first.headers.get('content-type')).toBe('image/png')
+    expect(first.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(first.headers.get('content-disposition')).toContain('inline')
+    expect(await first.text()).toBe('IMG')
+
+    // 上传的是 HTML，但扩展名不在允许清单里 —— 只能当二进制下载，
+    // 绝不能让它在本地源上跑起来（cookie 就在那儿）。
+    const second = await api(`/api/attachments/${doc.attachment.id}`)
+    expect(second.headers.get('content-type')).toBe('application/octet-stream')
+    expect(second.headers.get('content-disposition')).toContain('attachment')
+  })
+
+  it('文件名里的目录穿越落盘前就被压掉', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', '../../evil.sh', 'rm -rf')).json() as
+      { attachment: { id: string } }
+    const record = store.getAttachment(body.attachment.id)
+    if (record === null) throw new Error('setup')
+    expect(record.path.startsWith(attachmentsRoot)).toBe(true)
+    expect(record.path).not.toContain('..')
+  })
+
+  it('正在执行的卡不能加附件 —— 附件就是需求的一部分', async () => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    const res = await put('t1', 'a.txt', 'x')
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'task-running' })
+    expect(store.listAttachments(asTaskId('t1'))).toHaveLength(0)
+  })
+
+  it('归档的卡同理，冻结就是冻结', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog', archivedAt: T0 }))
+    expect((await put('t1', 'a.txt', 'x')).status).toBe(422)
+  })
+
+  it('缺文件名 400、空文件 400', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const noName = await api('/api/tasks/t1/attachments', {
+      method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x',
+    })
+    expect(noName.status).toBe(400)
+    expect((await put('t1', 'a.txt', '')).status).toBe(400)
+  })
+
+  it('删掉之后记录与磁盘上的字节一起没', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', 'a.txt', 'x')).json() as { attachment: { id: string } }
+    const record = store.getAttachment(body.attachment.id)
+    if (record === null) throw new Error('setup')
+
+    expect((await api(`/api/attachments/${body.attachment.id}`, { method: 'DELETE' })).status).toBe(200)
+    expect(store.getAttachment(body.attachment.id)).toBeNull()
+    await expect(readFile(record.path, 'utf8')).rejects.toThrow()
+  })
+
+  /*
+   * 读不出来的附件曾经能把整个进程带走：老代码先 stat 再 createReadStream，
+   * 两步之间的失败会变成一个没人接的 'error' 事件 —— pipe 不转发源端错误，
+   * 路由外面的 try/catch 也接不到，于是 uncaughtException 直接杀掉 host。
+   * 这条用例真的会跑挂整个测试进程，所以它比断言本身更值钱。
+   */
+  it('打不开的附件回 410，而不是把整个 host 带走（回归）', async () => {
+    // root 无视文件权限位，这条用例在 root 下测不出东西。
+    if (process.getuid?.() === 0) return
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', 'a.txt', 'x')).json() as { attachment: { id: string } }
+    const record = store.getAttachment(body.attachment.id)
+    if (record === null) throw new Error('setup')
+    await chmod(record.path, 0o000)
+
+    try {
+      const res = await api(`/api/attachments/${body.attachment.id}`)
+      expect(res.status).toBe(410)
+      // 进程还活着，下一个请求照常服务 —— 这才是这条用例真正在测的东西。
+      expect((await api('/api/state')).status).toBe(200)
+    } finally {
+      await chmod(record.path, 0o600)
+    }
+  })
+
+  it('归档的卡不能删附件 —— 和不能加附件是同一条规矩（回归）', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', 'a.txt', 'x')).json() as { attachment: { id: string } }
+    // 传完再归档：归档的卡本来就传不上去。
+    const fresh = store.getTask(asTaskId('t1'))
+    if (fresh === null) throw new Error('setup')
+    store.commitTask({ ...fresh, archivedAt: T0, revision: fresh.revision + 1 })
+
+    const res = await api(`/api/attachments/${body.attachment.id}`, { method: 'DELETE' })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'task-archived' })
+    expect(store.getAttachment(body.attachment.id)).not.toBeNull()
+  })
+
+  it('文件被外力删掉时说清楚是哪一种缺失，而不是回一个空响应', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', 'a.txt', 'x')).json() as { attachment: { id: string } }
+    const record = store.getAttachment(body.attachment.id)
+    if (record === null) throw new Error('setup')
+    await rm(record.path)
+    const res = await api(`/api/attachments/${body.attachment.id}`)
+    expect(res.status).toBe(410)
+    expect(await res.json()).toMatchObject({ error: 'attachment-gone' })
+  })
+
+  it('看板状态捎上每张卡的附件数，卡片上那枚回形针靠它', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    await put('t1', 'a.txt', 'x')
+    const state = await (await api('/api/state')).json() as { attachments: Record<string, number> }
+    expect(state.attachments).toEqual({ t1: 1 })
+  })
+
+  it('删卡时磁盘上的字节跟着走', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const body = await (await put('t1', 'a.txt', 'x')).json() as { attachment: { id: string } }
+    const record = store.getAttachment(body.attachment.id)
+    if (record === null) throw new Error('setup')
+
+    const removed = await api('/api/tasks/t1?expectedRevision=1', { method: 'DELETE' })
+    expect(removed.status).toBe(200)
+    await expect(readFile(record.path, 'utf8')).rejects.toThrow()
+  })
+
+  it('卡不存在 404，附件不存在也是 404', async () => {
+    expect((await put('nope', 'a.txt', 'x')).status).toBe(404)
+    expect((await api('/api/attachments/a-nope')).status).toBe(404)
+  })
+
+  it('没配附件存储时明确 503，而不是让上传看起来成功了', async () => {
+    const bare = await startServer({ storage: store, token: TOKEN })
+    try {
+      store.createTask(task({ id: 't1', column: 'backlog' }))
+      const res = await fetch(`http://127.0.0.1:${String(bare.port)}/api/tasks/t1/attachments`, {
+        method: 'POST',
+        headers: { cookie: `loopkanban_token=${TOKEN}`, 'x-filename': 'a.txt', 'content-type': 'text/plain' },
+        body: 'x',
+      })
+      expect(res.status).toBe(503)
+      expect(store.listAttachments(asTaskId('t1'))).toHaveLength(0)
+    } finally {
+      await bare.close()
+    }
   })
 })
 

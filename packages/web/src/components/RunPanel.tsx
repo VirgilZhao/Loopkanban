@@ -377,6 +377,10 @@ export function RunPanel({
               project={project}
               agents={agents}
               busy={busy}
+              onError={onError}
+              // 附件是即时生效的：传完 / 删完要让看板知道，卡片上那枚回形针
+              // 的数字才跟得上。**不关弹窗** —— 人多半还要接着写需求。
+              onChanged={onChanged}
               onSave={(edit: TaskEdit) => {
                 // 存完就收工，回到看板；存失败留在原地，让人看见错误再决定。
                 void act(() => api.edit(task.id, task.revision, edit)).then((ok) => { if (ok) onClose() })

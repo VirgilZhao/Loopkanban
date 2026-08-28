@@ -65,8 +65,24 @@ export interface Attachment {
   readonly size: number
   /** 字节在磁盘上的绝对路径。 */
   readonly path: string
+  /**
+   * 挂在讨论的哪条留言上。三态，缺一不可：
+   *
+   * - `undefined` —— 规格附件，需求的一部分；
+   * - `DRAFT_COMMENT`（空串）—— 讨论里传上来了、那条留言还没发出去；
+   * - 其它 —— 那条留言带的文件。
+   */
+  readonly commentId?: string | undefined
   readonly at: number
 }
+
+/**
+ * 草稿附件的 `commentId`：已经落盘、但还没跟着任何一条留言发出去。
+ *
+ * 之所以有这个中间态：文件是**选完就传**的（传上去了却因为没点发送而丢掉，
+ * 是最让人恼火的那种意外），而留言的 id 要等它真发出去才存在。
+ */
+export const DRAFT_COMMENT = ''
 
 /**
  * 一条从卡片开出去的 Pull Request（的**投影**）。
@@ -163,6 +179,7 @@ interface AttachmentRow {
   mime: string
   size: number
   path: string
+  comment_id: string | null
   at: number
 }
 
@@ -214,6 +231,8 @@ function toAttachment(row: AttachmentRow): Attachment {
     mime: row.mime,
     size: row.size,
     path: row.path,
+    // NULL 与空串是两回事：前者是规格附件，后者是还没发出去的草稿。
+    ...(row.comment_id === null ? {} : { commentId: row.comment_id }),
     at: row.at,
   }
 }
@@ -426,19 +445,67 @@ export class Storage {
 
   addAttachment(attachment: Attachment): void {
     this.db.prepare(
-      'INSERT INTO task_attachments (id, task_id, filename, mime, size, path, at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO task_attachments (id, task_id, filename, mime, size, path, comment_id, at)'
+      + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
       attachment.id, attachment.taskId, attachment.filename,
-      attachment.mime, attachment.size, attachment.path, attachment.at,
+      attachment.mime, attachment.size, attachment.path,
+      attachment.commentId ?? null, attachment.at,
     )
   }
 
-  /** 一张卡的附件，按上传顺序 —— TASK.md 里的清单也照这个顺序排。 */
+  /**
+   * 一张卡的**规格附件**，按上传顺序 —— TASK.md 里的清单也照这个顺序排。
+   *
+   * 讨论里带的文件不在其中：它们属于某一条留言，跟着那句话一起读才有意义，
+   * 混进规格清单只会让「需求是什么」越读越糊。要它们走 `listCommentAttachments`。
+   */
   listAttachments(taskId: TaskId): Attachment[] {
     const rows = this.db.prepare(
-      'SELECT * FROM task_attachments WHERE task_id = ? ORDER BY at, id',
+      'SELECT * FROM task_attachments WHERE task_id = ? AND comment_id IS NULL ORDER BY at, id',
     ).all(taskId) as unknown as AttachmentRow[]
     return rows.map(toAttachment)
+  }
+
+  /** 一张卡的讨论里**已经发出去**的附件，按上传顺序。 */
+  listCommentAttachments(taskId: TaskId): Attachment[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_attachments WHERE task_id = ? AND comment_id IS NOT NULL AND comment_id <> \'\''
+      + ' ORDER BY at, id',
+    ).all(taskId) as unknown as AttachmentRow[]
+    return rows.map(toAttachment)
+  }
+
+  /**
+   * 讨论里传上来、还没跟着留言发出去的那些。
+   *
+   * 界面重新打开时要拿它把草稿摆回去 —— 文件已经在服务器上了，不摆出来
+   * 人只会以为传丢了，然后再传一遍。
+   */
+  listDraftAttachments(taskId: TaskId): Attachment[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_attachments WHERE task_id = ? AND comment_id = \'\' ORDER BY at, id',
+    ).all(taskId) as unknown as AttachmentRow[]
+    return rows.map(toAttachment)
+  }
+
+  /**
+   * 把几个草稿附件认领给一条刚发出去的留言。
+   *
+   * **只认这张卡自己的草稿**：条件里的 `comment_id = ''` 同时挡住了"把别人
+   * 留言上的附件搬过来"和"重复认领"，所以这一句本身就是幂等的。
+   *
+   * @param taskId - 附件必须属于这张卡。
+   * @param ids - 要认领的附件 id。
+   * @param commentId - 认领到哪条留言。
+   * @returns 真正认领到的条数；期间被删掉的那些自然不在其中。
+   */
+  attachToComment(taskId: TaskId, ids: readonly string[], commentId: string): number {
+    if (ids.length === 0) return 0
+    const holes = ids.map(() => '?').join(', ')
+    return Number(this.db.prepare(
+      `UPDATE task_attachments SET comment_id = ? WHERE task_id = ? AND comment_id = '' AND id IN (${holes})`,
+    ).run(commentId, taskId, ...ids).changes)
   }
 
   /**

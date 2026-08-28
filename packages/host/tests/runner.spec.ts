@@ -203,7 +203,7 @@ describe('关联任务', () => {
 
 describe('附件', () => {
   /** 造一个真的附件文件，并把记录挂到卡上。 */
-  async function attach(taskId: string, filename: string, body: string): Promise<void> {
+  async function attach(taskId: string, filename: string, body: string, commentId?: string): Promise<void> {
     const path = join(sandbox, `blob-${filename}`)
     await writeFile(path, body, 'utf8')
     store.addAttachment({
@@ -213,6 +213,7 @@ describe('附件', () => {
       mime: 'text/plain',
       size: body.length,
       path,
+      ...(commentId === undefined ? {} : { commentId }),
       at: T0,
     })
   }
@@ -273,6 +274,47 @@ describe('附件', () => {
     if (!second.ok) return
     await settle(second.run.id)
     expect(await listStaged(worktreeDir(repo, 't1'))).toEqual([])
+  })
+
+  it('讨论里带的文件也拷进去，并且摆在它那条留言底下', async () => {
+    store.createTask(task({ id: 't1' }))
+    await attach('t1', '需求.txt', '照着这个做')
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '这儿为什么长这样？', at: T0 })
+    await attach('t1', '截图.txt', 'PNG', 'c1')
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const wt = worktreeDir(repo, 't1')
+    // 只把需求里的文件放进去，等于让 Agent 读着一句指着图说的话却看不见图。
+    expect(await readFile(join(wt, '.loopkanban/attachments/截图.txt'), 'utf8')).toBe('PNG')
+
+    const spec = await readFile(join(wt, 'TASK.md'), 'utf8')
+    // 讨论里贴的图不进「附件」一节：摆进需求清单会被当成一条新要求。
+    const attachmentsSection = spec.slice(spec.indexOf('## 附件'), spec.indexOf('## 讨论'))
+    expect(attachmentsSection).toContain('需求.txt')
+    expect(attachmentsSection).not.toContain('截图.txt')
+    // 它跟着那句话走。
+    expect(spec.slice(spec.indexOf('这儿为什么长这样？'))).toContain('.loopkanban/attachments/截图.txt')
+  })
+
+  it('最新这条反馈带的文件在 prompt 里单独点一次名 —— 它就是这一轮要看的东西', () => {
+    const comments = [
+      { id: 'c1', taskId: asTaskId('t1'), author: 'human' as const, body: '照着这张图改', at: T0 },
+    ]
+    const prompt = renderPrompt(task({ id: 't1' }), comments, false, [
+      { filename: '需求.txt', mime: 'text/plain', size: 3, relPath: '.loopkanban/attachments/需求.txt' },
+      {
+        filename: '截图.png', mime: 'image/png', size: 9,
+        relPath: '.loopkanban/attachments/截图.png', commentId: 'c1',
+      },
+    ])
+    expect(prompt).toContain('这条反馈带了 1 个文件')
+    expect(prompt).toContain('.loopkanban/attachments/截图.png')
+    // 卡自己的附件仍然照旧点名，两者说的不是同一件事。
+    expect(prompt).toContain('这张卡带了 1 个附件')
   })
 
   it('没有附件时 TASK.md 里不摆一个空的「附件」节', () => {

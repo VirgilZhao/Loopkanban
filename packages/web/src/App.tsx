@@ -16,7 +16,7 @@ import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { maybe, useT, type MessageKey, type Translate } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
-import { doneOrder, isUntouchedDraft, taskTitle } from '@/lib/task.ts'
+import { doneOrder, isUntouchedDraft, projectActivity, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type PullRequest,
@@ -220,15 +220,8 @@ export default function App(): React.JSX.Element {
     return counted
   }, [tasks])
 
-  /** 侧边栏上的项目计数。归档的卡不算 —— 归档就是从视野里拿走。 */
-  const projectCounts = useMemo(() => {
-    const counted: Record<string, number> = {}
-    for (const task of tasks) {
-      if (task.archivedAt !== undefined) continue
-      counted[task.projectId] = (counted[task.projectId] ?? 0) + 1
-    }
-    return counted
-  }, [tasks])
+  /** 侧边栏上每个项目的计数、活动灯和 review 角标。 */
+  const activity = useMemo(() => projectActivity(tasks), [tasks])
 
   const projectById = useMemo(
     () => new Map(projects.map((project) => [project.id, project])),
@@ -383,7 +376,7 @@ export default function App(): React.JSX.Element {
         onRefreshAgents={() => { void refreshAgents() }}
         runningByAgent={runningByAgent}
         projects={projects}
-        counts={projectCounts}
+        activity={activity}
         total={tasks.filter((t) => t.archivedAt === undefined).length}
         view={view}
         onView={setView}

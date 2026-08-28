@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Archive, Bot, FolderGit2, LayoutGrid, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Archive, Bot, Eye, FolderGit2, LayoutGrid, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import { LanguageToggle } from '@/components/LanguageToggle.tsx'
 import {
@@ -8,6 +8,7 @@ import {
   SidebarMenuItem,
 } from '@/components/ui/sidebar.tsx'
 import { useT } from '@/lib/i18n.tsx'
+import type { ProjectActivity } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import type { Agent, Project, SchedulerState, SchedulerSettings } from '@/types.ts'
 
@@ -23,8 +24,8 @@ interface Props {
   /** 每个执行器当前跑着几张卡。 */
   runningByAgent: Record<string, number>
   projects: Project[]
-  /** 每个项目的任务数；概览用 total。 */
-  counts: Record<string, number>
+  /** 每个项目的卡都停在哪儿：右边那个计数、活动灯、review 角标都从这儿来。 */
+  activity: Record<string, ProjectActivity>
   total: number
   view: View
   onView: (view: View) => void
@@ -44,7 +45,7 @@ interface Props {
 }
 
 export function AppSidebar({
-  agents, agentsBusy, onRefreshAgents, runningByAgent, projects, counts, total, view, onView, onNewProject, onDeleteProject, onRenameProject,
+  agents, agentsBusy, onRefreshAgents, runningByAgent, projects, activity, total, view, onView, onNewProject, onDeleteProject, onRenameProject,
   onCreate, canCreate, archivedCount, showArchived, onToggleArchived,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
@@ -157,20 +158,13 @@ export function AppSidebar({
                       }}
                     />
                   ) : (
-                  <SidebarMenuButton
+                  <ProjectRow
+                    project={project}
+                    activity={activity[project.id]}
                     isActive={view.kind === 'project' && view.id === project.id}
-                    onClick={() => { onView({ kind: 'project', id: project.id }) }}
-                    onDoubleClick={() => { setRenaming(project.id) }}
-                    title={t('sidebar.projectHint', { path: project.repoPath, branch: project.baseBranch })}
-                  >
-                    <FolderGit2 />
-                    <span>{project.name}</span>
-                    {/* 鼠标移上来时计数让位给删除按钮 —— 240px 宽的边栏里
-                        塞不下两个东西，而此刻你要的是那颗按钮。 */}
-                    <SidebarMenuBadge className="group-hover/menu-item:invisible">
-                      {counts[project.id] ?? 0}
-                    </SidebarMenuBadge>
-                  </SidebarMenuButton>
+                    onOpen={() => { onView({ kind: 'project', id: project.id }) }}
+                    onRename={() => { setRenaming(project.id) }}
+                  />
                   )}
                   {renaming === project.id ? null : (
                     <SidebarMenuAction
@@ -322,6 +316,73 @@ export function AppSidebar({
         </SidebarGroup>
       </SidebarFooter>
     </Sidebar>
+  )
+}
+
+/**
+ * 项目列表里的一行。
+ *
+ * 除了名字，它还得回答两件在这一层看不见、点进去才知道的事：
+ *
+ * 一、这个项目**眼下动着没有**。有卡在跑、或有卡排着队等执行位，就给一盏
+ * 会呼吸的灯 —— 无人值守的意义是你不用盯着看板，那余光扫过边栏时至少要
+ * 认得出"机器还没停"。跑着的那盏亮且快，排队的那盏灰而慢，两者分得开。
+ *
+ * 二、有没有**东西在等你**。跑完的卡停在 Review 上不会自己往前走，所以那
+ * 个数字得一直挂在行上。它不随鼠标躲开 —— 删除按钮压在最右边那个计数上，
+ * 够不着它。
+ */
+function ProjectRow({ project, activity, isActive, onOpen, onRename }: {
+  project: Project
+  /** 一张卡都没有的项目根本不在这张表里，所以可能是 undefined。 */
+  activity: ProjectActivity | undefined
+  isActive: boolean
+  onOpen: () => void
+  onRename: () => void
+}): React.JSX.Element {
+  const t = useT()
+  const { total = 0, ready = 0, running = 0, review = 0 } = activity ?? {}
+  // 跑着的压过排着队的：两样都有时，"在跑"才是这一行此刻的实情。
+  const pulse = running > 0 ? 'running' : ready > 0 ? 'queued' : null
+  // 灯和角标都只是一个形状，说不出自己是什么意思 —— 悬停时把话补齐。
+  const title = [
+    t('sidebar.projectHint', { path: project.repoPath, branch: project.baseBranch }),
+    running > 0 ? t('sidebar.projectRunning', { n: running }) : null,
+    ready > 0 ? t('sidebar.projectQueued', { n: ready }) : null,
+    review > 0 ? t('sidebar.projectReview', { n: review }) : null,
+  ].filter((line) => line !== null).join('\n')
+
+  return (
+    <SidebarMenuButton
+      isActive={isActive}
+      onClick={onOpen}
+      onDoubleClick={onRename}
+      title={title}
+    >
+      <FolderGit2 />
+      {/* 名字让位给右边那两个数字：长名字截断，不把它们挤出可视区。 */}
+      <span className="min-w-0 flex-1 truncate">{project.name}</span>
+      {pulse === null ? null : (
+        <span
+          className="lamp group-data-[state=collapsed]/sidebar:hidden"
+          data-state={pulse}
+          aria-hidden
+        />
+      )}
+      {review === 0 ? null : (
+        <SidebarMenuBadge className="gap-0.5 bg-lamp-review/15 px-1.5 !text-lamp-review">
+          <Eye className="size-3" />
+          {/* 眼睛是装饰（lucide 自带 aria-hidden），数字自己也说不清是什么数
+              —— 读屏念到这一行会是"项目名 1 3"，两个数字分不出谁是谁。
+              所以把看得见的那个数藏出无障碍树，改念完整那句话。 */}
+          <span aria-hidden>{review}</span>
+          <span className="sr-only">{t('sidebar.projectReview', { n: review })}</span>
+        </SidebarMenuBadge>
+      )}
+      {/* 鼠标移上来时计数让位给删除按钮 —— 240px 宽的边栏里塞不下两个东西，
+          而此刻你要的是那颗按钮。 */}
+      <SidebarMenuBadge className="group-hover/menu-item:invisible">{total}</SidebarMenuBadge>
+    </SidebarMenuButton>
   )
 }
 

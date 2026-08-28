@@ -735,6 +735,26 @@ export class Storage {
     return (rows as unknown as RunRow[]).map(toRun)
   }
 
+  /**
+   * 每张卡最近一次执行，没跑过的卡不在里面。
+   *
+   * 看板要一眼看出哪张卡「这一轮跑挂了」，而它每几秒就刷一遍 —— 逐张卡
+   * 查一次是几十次往返，所以一条 SQL 把最新的那批一起端回来。
+   *
+   * started_at 撞车时两条都会回来，后写进 Map 的那条胜出 —— 同一毫秒起的
+   * 两次执行本来就分不出先后，随便哪条都是"最近一次"。
+   */
+  latestRuns(): Map<TaskId, Run> {
+    const rows = this.db.prepare(`
+      SELECT r.* FROM runs r
+      JOIN (SELECT task_id, MAX(started_at) AS at FROM runs GROUP BY task_id) latest
+        ON latest.task_id = r.task_id AND latest.at = r.started_at
+    `).all() as unknown as RunRow[]
+    const byTask = new Map<TaskId, Run>()
+    for (const row of rows) byTask.set(asTaskId(row.task_id), toRun(row))
+    return byTask
+  }
+
   /** 启动时对账用：上次进程崩溃时留下的、状态仍是 running 的 Run。 */
   listOrphanRuns(): Run[] {
     const rows = this.db.prepare("SELECT * FROM runs WHERE status = 'running'").all()

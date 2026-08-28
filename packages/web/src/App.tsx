@@ -14,12 +14,13 @@ import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
-import { maybe, useT, type MessageKey, type Translate } from '@/lib/i18n.tsx'
+import { explain, useT, type MessageKey } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
 import { doneOrder, isUntouchedDraft, projectActivity, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type PullRequest,
+  type RunFailure,
   type RunStats, type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
@@ -38,17 +39,6 @@ const PAGES: readonly { key: Page; label: MessageKey }[] = [
   { key: 'tasks', label: 'header.tabTasks' },
   { key: 'files', label: 'header.tabFiles' },
 ]
-
-/**
- * 领域错误码 → 用户能照做的说明。
- *
- * 拖拽被拒时卡片会弹回原位，如果不解释清楚，用户只会觉得"拖不动"。
- * 所以这里给的不是错误名，而是下一步该做什么。文案在 `lib/i18n` 的
- * `err.*` 里，两种语言各一份；没有对应文案的码原样端出来。
- */
-function explain(t: Translate, code: string, detail: string): string {
-  return maybe(t, `err.${code}`, `${code} · ${detail}`)
-}
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
 function notify(title: string, body: string): void {
@@ -78,6 +68,10 @@ export default function App(): React.JSX.Element {
   // 每张卡开过哪些 PR，同样跟着轮询来 —— Done 的卡要在卡面上标出它是靠
   // 哪几条 PR 进主干的，不必点开。
   const [prs, setPrs] = useState<Record<string, PullRequest[]>>({})
+  // Review 里上一轮没跑成的卡。那一列成败同处，不标出来就得一张张点开看。
+  const [failures, setFailures] = useState<Record<string, RunFailure>>({})
+  // 看板自己的那条通知：拖拽被拒、改项目、探测 CLI。**任务弹窗里的错误不走
+  // 这儿** —— 那条横幅在弹窗背后，说了也看不见，它自己会显示（见 RunPanel）。
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -98,7 +92,7 @@ export default function App(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     const [
-      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls },
+      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls, failures: broken },
       state, summary,
     ] = await Promise.all([
       api.state(),
@@ -110,6 +104,7 @@ export default function App(): React.JSX.Element {
     setLive(lines)
     setAttachments(clips)
     setPrs(pulls)
+    setFailures(broken)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -509,6 +504,7 @@ export default function App(): React.JSX.Element {
                 live={live}
                 attachments={attachments}
                 prs={prs}
+                failures={failures}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
                 // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
@@ -547,9 +543,6 @@ export default function App(): React.JSX.Element {
               // 等它 —— 否则刚保存的卡会被当成空白草稿收走。
               draftId.current = null
               void refresh()
-            }}
-            onError={(code, detail) => {
-              setNotice({ text: explain(t, code, detail), tone: 'warn' })
             }}
             onClose={() => { closeTask(selected) }}
           />

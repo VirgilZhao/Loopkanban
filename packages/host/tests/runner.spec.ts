@@ -835,6 +835,36 @@ describe('异常路径的收尾（回归）', () => {
     expect(store.listOrphanRuns()).toEqual([])
   })
 
+  it('worktree 都没建出来也要留下一条失败的 Run —— 否则 Review 里这张卡看着像跑成了', async () => {
+    // 基线分支不存在 → ensureWorktree 在 createRun 之前就抛。
+    store.createTask(task({ id: 't1', baseBranch: '没有这条分支' }))
+    const r = runner(scriptedProvider([]))
+
+    const result = await r.start(asTaskId('t1'))
+    expect(result).toMatchObject({ ok: false, reason: 'launch-failed' })
+    // 卡照样进 Review，所以那一列里必须看得出它是"没跑成"的那种。
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+
+    const runs = store.listRuns(asTaskId('t1'))
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ status: 'failed', provider: 'scripted' })
+    expect(runs[0]?.diagnostic).toContain('没有这条分支')
+    expect(store.listOrphanRuns()).toEqual([])
+  })
+
+  it('上一轮跑成过的卡，这一轮起不来时不许再顶着那条 completed', async () => {
+    store.createTask(task({ id: 't1', baseBranch: '没有这条分支' }))
+    store.createRun({
+      id: asRunId('r-old'), taskId: asTaskId('t1'), provider: 'scripted', cliVersion: '9.9.9',
+      worktreePath: '/wt', branch: 'task/t1', status: 'completed', startedAt: T0, endedAt: T0 + 1_000,
+    })
+
+    await runner(scriptedProvider([])).start(asTaskId('t1'))
+
+    // 「最近一次执行」是这一轮的失败，不是上一轮的成功 —— 看板的失败标记看的就是它。
+    expect(store.latestRuns().get(asTaskId('t1'))).toMatchObject({ status: 'failed' })
+  })
+
   it('主动取消记为 aborted，不混进失败率', async () => {
     store.createTask(task({ id: 't1' }))
     const r = runner(scriptedProvider([

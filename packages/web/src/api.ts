@@ -8,8 +8,9 @@
 
 import type {
   Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
-  FilePreview, LiveLine, PrCapability, Project, PullRequest, Run, RunStats, SchedulerSettings,
-  SchedulerState, StreamEvent, Task, TaskComment, TaskEdit, TestEnv, TestEnvEvent, Workspace,
+  FilePreview, LiveLine, PrCapability, Project, PullRequest, Run, RunFailure, RunStats,
+  SchedulerSettings, SchedulerState, StreamEvent, Task, TaskComment, TaskEdit, TestEnv,
+  TestEnvEvent, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
@@ -67,6 +68,8 @@ export const api = {
     attachments: Record<string, number>
     /** 每张卡开过哪些 PR，新的在前；一条都没有的卡不在里面。 */
     prs: Record<string, PullRequest[]>
+    /** Review 里上一轮没跑成的卡；跑成了的、以及别的列的卡不在里面。 */
+    failures: Record<string, RunFailure>
   }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),

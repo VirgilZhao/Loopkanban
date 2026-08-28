@@ -10,7 +10,7 @@ import type { Attachment } from '@/types.ts'
 const MAX = 20
 
 /** 人看得懂的大小。 */
-function humanSize(bytes: number): string {
+export function humanSize(bytes: number): string {
   if (bytes < 1024) return `${String(bytes)} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
@@ -187,6 +187,61 @@ export function Attachments({ taskId, locked, onError, onChanged }: Props): Reac
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * 一个附件的紧凑样子：缩略图 / 图标 + 文件名 + 大小，一行里能并排摆好几个。
+ *
+ * 讨论里的输入框底下和留言气泡里摆的是同一种东西，所以只画一次 —— 两处
+ * 各写一遍的结果一定是它们慢慢长歪。上面那个竖排列表是规格表单的样子，
+ * 那儿一屏只有几个文件，摆得开。
+ *
+ * @param file - 要显示的附件。
+ * @param onRemove - 给了才有那个叉。已经跟着留言发出去的附件撤不回来
+ *   （讨论是一份记录），所以旧留言里的那些不给。
+ */
+export function AttachmentChip({ file, onRemove, removeLabel }: {
+  file: Attachment
+  onRemove?: (() => void) | undefined
+  removeLabel?: string
+}): React.JSX.Element {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-hairline bg-sunken/40 py-1 pl-1 pr-2">
+      {/* 图片给缩略图：一眼认出"是哪张截图"，比读文件名快得多。 */}
+      {file.mime.startsWith('image/') ? (
+        <img
+          src={attachmentUrl(file.id)}
+          alt=""
+          className="size-6 flex-none rounded border border-hairline object-cover"
+        />
+      ) : (
+        <span className="flex size-6 flex-none items-center justify-center text-ink-faint">
+          <Icon mime={file.mime} />
+        </span>
+      )}
+      <a
+        href={attachmentUrl(file.id)}
+        target="_blank"
+        rel="noreferrer"
+        title={file.filename}
+        className="max-w-[13rem] truncate text-[12px] text-ink hover:text-sodium hover:underline"
+      >
+        {file.filename}
+      </a>
+      <span className="mono flex-none text-[10px] text-ink-faint">{humanSize(file.size)}</span>
+      {onRemove === undefined ? null : (
+        <button
+          type="button"
+          aria-label={removeLabel}
+          title={removeLabel}
+          onClick={onRemove}
+          className="flex-none text-ink-faint transition-colors hover:text-lamp-fail"
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
+    </span>
   )
 }
 

@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
-import { AttachmentStore } from '../src/attachments/index.ts'
+import { AttachmentStore, MAX_ATTACHMENTS_PER_COMMENT } from '../src/attachments/index.ts'
 import { Storage } from '../src/storage/index.ts'
 import { GitHub } from '../src/pr/index.ts'
 import { Review } from '../src/review/index.ts'
@@ -856,6 +856,108 @@ describe('讨论', () => {
 
   it('卡不存在 404', async () => {
     expect((await say('nope', { body: 'x' })).status).toBe(404)
+  })
+})
+
+describe('讨论里的附件', () => {
+  /** 走讨论那一路传一个文件：`scope=draft`，先落地、等留言发出去再认领。 */
+  const put = (id: string, filename: string, body: string, type = 'text/plain') =>
+    api(`/api/tasks/${id}/attachments?scope=draft`, {
+      method: 'POST',
+      headers: { 'content-type': type, 'x-filename': encodeURIComponent(filename) },
+      body,
+    })
+
+  const say = (id: string, body: unknown) =>
+    api(`/api/tasks/${id}/comments`, { method: 'POST', body: JSON.stringify(body) })
+
+  it('传上去先是草稿，发出去才挂到那条留言上', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const { attachment } = await (await put('t1', '截图.png', 'IMG', 'image/png')).json() as
+      { attachment: { id: string; commentId: string } }
+    // 空串 = 还没发出去。前端靠它分辨这个文件撤不撤得回。
+    expect(attachment.commentId).toBe('')
+
+    // 规格清单里没有它 —— 讨论里贴的图不是需求的一部分。
+    const spec = await (await api('/api/tasks/t1/attachments')).json() as { attachments: unknown[] }
+    expect(spec.attachments).toHaveLength(0)
+    // 草稿清单里有：重新打开面板要靠它把没发出去的文件摆回去。
+    const draft = await (await api('/api/tasks/t1/attachments?scope=draft')).json() as
+      { attachments: { id: string }[] }
+    expect(draft.attachments.map((a) => a.id)).toEqual([attachment.id])
+
+    const res = await say('t1', { body: '这儿为什么长这样？', attachmentIds: [attachment.id] })
+    expect(res.status).toBe(201)
+    const { comments } = await res.json() as
+      { comments: { id: string; attachments?: { filename: string }[] }[] }
+    // 附件跟着那条话一起回来：前端不必自己对齐两份列表。
+    expect(comments[0]?.attachments?.map((a) => a.filename)).toEqual(['截图.png'])
+    expect(store.getAttachment(attachment.id)?.commentId).toBe(comments[0]?.id)
+    // 认领完就不再是草稿了，下次打开不该又冒出来。
+    expect(store.listDraftAttachments(asTaskId('t1'))).toHaveLength(0)
+  })
+
+  it('执行中的卡也能在讨论里带文件 —— 它和那句话一起等下一轮', async () => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    // 规格附件此刻是冻的（需求不能改），讨论不受这条约束 —— 留言本来就不受。
+    expect((await api('/api/tasks/t1/attachments', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', 'x-filename': 'a.txt' },
+      body: 'x',
+    })).status).toBe(422)
+    expect((await put('t1', 'b.txt', 'x')).status).toBe(201)
+  })
+
+  it('草稿撤得回，发出去的撤不回 —— 讨论是一份记录', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const first = await (await put('t1', 'a.txt', 'x')).json() as { attachment: { id: string } }
+    const second = await (await put('t1', 'b.txt', 'y')).json() as { attachment: { id: string } }
+
+    expect((await api(`/api/attachments/${first.attachment.id}`, { method: 'DELETE' })).status).toBe(200)
+
+    await say('t1', { body: '看这个', attachmentIds: [second.attachment.id] })
+    const res = await api(`/api/attachments/${second.attachment.id}`, { method: 'DELETE' })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'attachment-sent' })
+    expect(store.getAttachment(second.attachment.id)).not.toBeNull()
+  })
+
+  it('id 太多在留言落库之前就拒掉 —— 不然留言写进去了却回一个 500', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const ids = Array.from({ length: MAX_ATTACHMENTS_PER_COMMENT + 1 }, (_, n) => `a-${String(n)}`)
+    const res = await say('t1', { body: '带一堆', attachmentIds: ids })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'too-many-attachments' })
+    // 关键在这儿：话没留下、卡也没被搬走，重试一次不会多出一条重复留言。
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(0)
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+  })
+
+  it('只认自己这张卡的草稿：别处的 id 塞进来不生效', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    store.createTask(task({ id: 't2', column: 'review' }))
+    const other = await (await put('t2', 'a.txt', 'x')).json() as { attachment: { id: string } }
+
+    await say('t1', { body: '试图搬走别人的文件', attachmentIds: [other.attachment.id] })
+    // 它还在 t2 的草稿里，没被 t1 那条留言领走。
+    expect(store.getAttachment(other.attachment.id)?.commentId).toBe('')
+  })
+
+  it('一条留言带的文件数有上限，挡的是"把整个文件夹拖进来"', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    for (let n = 0; n < MAX_ATTACHMENTS_PER_COMMENT; n += 1) {
+      expect((await put('t1', `f${String(n)}.txt`, 'x')).status).toBe(201)
+    }
+    const res = await put('t1', 'one-more.txt', 'x')
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'too-many-attachments' })
+    // 这道闸不占规格附件的名额：讨论是一轮轮长出来的，让它去分一份固定额度，
+    // 结果就是聊到第五轮突然传不了图了。
+    expect((await api('/api/tasks/t1/attachments', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', 'x-filename': 'spec.txt' },
+      body: 'x',
+    })).status).toBe(201)
   })
 })
 

@@ -7,18 +7,6 @@ import { Textarea } from '@/components/ui/textarea.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
-/**
- * 枚举不出模型时的占位提示。
- *
- * 只在 CLI 自己列不出清单（目前是 codex）时才用得上，给的是"长什么样"，
- * 不是一份要维护的清单。
- */
-const MODEL_PLACEHOLDER: Record<string, string> = {
-  claude: '例如 opus / sonnet',
-  codex: '例如 gpt-5-codex',
-  opencode: '例如 anthropic/claude-sonnet-4-5',
-}
-
 interface Props {
   task: Task
   /** 任务所属项目；卡片就在它派生出来的 worktree 里干活。 */
@@ -60,6 +48,15 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(task))
   /** 选定的执行器；没选就没有模型这一说。 */
   const picked = agents.find((agent) => agent.id === draft.preferredProvider)
+  /**
+   * 下拉里的选项。卡上原有的模型即使不在探测清单里也补进去 —— 清单会随
+   * CLI 升级、随 models.dev 变，不该因为它变了就把一张老卡的选择抹掉。
+   */
+  const options = picked === undefined
+    ? []
+    : draft.model !== undefined && !picked.models.includes(draft.model)
+      ? [draft.model, ...picked.models]
+      : picked.models
 
   const setAcceptance = (index: number, value: string): void => {
     setDraft((d) => ({ ...d, acceptance: d.acceptance.map((item, i) => (i === index ? value : item)) }))
@@ -170,38 +167,41 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
 
         {/* 只有选定了执行器、且那个 CLI 认 --model 时才出现这一栏。
             能不能指定模型是**探测**出来的，不是写死的。 */}
-        {picked === undefined ? null : picked.canPickModel ? (
-          <Field
-            label="模型"
-            hint={picked.models.length > 0
-              ? `${picked.id} 报了 ${String(picked.models.length)} 个可用模型；留空就用它自己的默认`
-              : `留空用 ${picked.id} 自己的默认模型`}
-          >
-            {/* 有清单就给建议，但仍然允许自由输入：清单可能不全也可能过期，
-                真正认不认由 CLI 说了算。 */}
-            <Input
-              value={draft.model ?? ''}
-              disabled={locked}
-              className="mono"
-              list={picked.models.length > 0 ? `models-${picked.id}` : undefined}
-              placeholder={picked.models.length > 0 ? '点开选，或直接输入' : MODEL_PLACEHOLDER[picked.id] ?? '模型名'}
-              onChange={(e) => {
-                const next = e.target.value.trim()
-                setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
-              }}
-            />
-            {picked.models.length === 0 ? null : (
-              <datalist id={`models-${picked.id}`}>
-                {picked.models.map((model) => <option key={model} value={model} />)}
-              </datalist>
-            )}
-          </Field>
-        ) : (
+        {picked === undefined ? null : !picked.canPickModel ? (
           <Field label="模型">
             <p className="text-xs text-ink-faint">
               这个版本的 {picked.id} 没有 <span className="mono">--model</span> 参数，
               只能用它自己的默认模型。
             </p>
+          </Field>
+        ) : options.length === 0 ? (
+          <Field label="模型">
+            <p className="text-xs text-ink-faint">
+              没能列出 {picked.id} 的可选模型（离线或它报不出来），这次只能用它自己的默认。
+            </p>
+          </Field>
+        ) : (
+          <Field label="模型" hint={`${String(picked.models.length)} 个可选；不选就用 ${picked.id} 自己的默认`}>
+            {/* 只可选、不可填：能选的都是探测出来的，手打一个 CLI 不认的名字
+                只会在派活那一刻才炸。卡上原有的模型即使不在清单里也留着，
+                免得打开一张老卡就把它的选择悄悄抹掉。 */}
+            <select
+              value={draft.model ?? ''}
+              disabled={locked}
+              onChange={(e) => {
+                const next = e.target.value
+                setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
+              }}
+              className={cn(
+                'mono border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+                'transition-[color,box-shadow] outline-none dark:bg-input/30',
+                'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+                'disabled:cursor-not-allowed disabled:opacity-50',
+              )}
+            >
+              <option value="">（默认模型）</option>
+              {options.map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
           </Field>
         )}
 

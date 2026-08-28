@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { useT } from '@/lib/i18n.tsx'
+import { modelOptions } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
@@ -54,15 +55,8 @@ export function TaskEditor({
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(task))
   /** 选定的执行器；没选就没有模型这一说。 */
   const picked = agents.find((agent) => agent.id === draft.preferredProvider)
-  /**
-   * 下拉里的选项。卡上原有的模型即使不在探测清单里也补进去 —— 清单会随
-   * CLI 升级、随 models.dev 变，不该因为它变了就把一张老卡的选择抹掉。
-   */
-  const options = picked === undefined
-    ? []
-    : draft.model !== undefined && !picked.models.includes(draft.model)
-      ? [draft.model, ...picked.models]
-      : picked.models
+  /** 下拉里的选项；卡上原有的模型即使不在探测清单里也留着。 */
+  const options = picked === undefined ? [] : modelOptions(picked, draft.model)
 
   const setAcceptance = (index: number, value: string): void => {
     setDraft((d) => ({ ...d, acceptance: d.acceptance.map((item, i) => (i === index ? value : item)) }))

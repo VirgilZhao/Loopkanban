@@ -650,12 +650,42 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       if (method === 'POST') {
-        const body = await readJsonBody(req) as Partial<{ body: string }> | undefined
+        const body = await readJsonBody(req) as
+          (Partial<{ body: string }> & Record<string, unknown>) | undefined
         const text = body?.body?.trim() ?? ''
         if (text.length === 0) {
           sendJson(res, 400, { error: 'bad-request', detail: '留言不能为空' })
           return
         }
+
+        // 留言可以顺带改「下一轮交给谁、用哪个模型」—— 说"再改一版"和"这次换个人干"
+        // 本来就是同一句话，不该逼人先去规格里存一遍再回来发言。
+        // 同 PATCH：字段缺席只意味着"这次没提到"，显式 null 才是"清空"。
+        const edit: TaskEdit = {
+          ...(body !== undefined && 'preferredProvider' in body
+            ? { preferredProvider: (body['preferredProvider'] as string | null) ?? undefined }
+            : {}),
+          ...(body !== undefined && 'model' in body
+            ? { model: (body['model'] as string | null) ?? undefined }
+            : {}),
+        }
+        // 改在留言落库之前：被拒的换人不该留下一条已经发出去的话。
+        let current = task
+        if (Object.keys(edit).length > 0) {
+          const edited = editTask(current, { expectedRevision: current.revision, edit, now: Date.now() })
+          if (!edited.ok) {
+            sendJson(res, edited.reason === 'revision-conflict' ? 409 : 422, {
+              error: edited.reason, detail: edited.detail,
+            })
+            return
+          }
+          if (!storage.commitTask(edited.value)) {
+            sendJson(res, 409, { error: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' })
+            return
+          }
+          current = edited.value
+        }
+
         storage.addComment({
           id: `c-${randomUUID().slice(0, 8)}`,
           taskId,
@@ -666,8 +696,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         // 在 Review 里留言就是"再改一版"：卡自动回队列，下一次执行带着
         // 整条讨论走。别的列只是留个话，不动卡的位置。
         let moved = false
-        if (task.column === 'review') {
-          const next = moveTask(task, { expectedRevision: task.revision, to: 'ready', now: Date.now() })
+        if (current.column === 'review') {
+          const next = moveTask(current, {
+            expectedRevision: current.revision, to: 'ready', now: Date.now(),
+          })
           if (next.ok) moved = storage.commitTask(next.value)
         }
         sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)

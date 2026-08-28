@@ -6,14 +6,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.t
 import {
   Archive, ArchiveRestore, Bot, Check, GitMerge, Play, Send, Square, Trash2, TriangleAlert, User, X,
 } from 'lucide-react'
-import { api, ApiError, subscribeRun } from '@/api.ts'
+import { api, ApiError, subscribeRun, type NextRound } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { summarize } from '@/lib/events.ts'
 import { useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
-import { taskTitle } from '@/lib/task.ts'
+import { modelOptions, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type {
   Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskComment, TaskEdit,
@@ -29,6 +29,10 @@ const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
   finished: { label: 'FINISH',   tone: 'text-lamp-ok' },
   raw:      { label: 'RAW',      tone: 'text-ink-faint/60' },
 }
+
+/** 面板里的分页，顺序即翻卡的顺序。`talk` 要等讨论里有话才出现。 */
+const TABS = ['spec', 'talk', 'diff', 'stream', 'runs'] as const
+type Tab = (typeof TABS)[number]
 
 interface Props {
   task: Task
@@ -54,6 +58,7 @@ export function RunPanel({
   const [preview, setPreview] = useState<string | null>(null)
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [tab, setTab] = useState<Tab>('spec')
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
   // 跑过几轮 = 这张卡有几条执行记录。第二轮起 Agent 接的是同一个会话（见
@@ -64,6 +69,17 @@ export function RunPanel({
   const pinned = agents.find((agent) => agent.id === task.preferredProvider)
   // 只有想法池与队列里的卡能删。再往后 Agent 已经动过仓库，该走的是终止 / 废弃。
   const deletable = task.column === 'backlog' || task.column === 'ready'
+  /**
+   * 这张卡的讨论里有没有话。没有就没有讨论 tab —— 新建的卡那儿一片空白，
+   * 摆着只会让人以为漏看了什么；要交代什么去规格里写。
+   *
+   * 看的是「有没有」而不是「Agent 回没回」：只有 Agent 回过才显示的话，
+   * 一条早于首轮执行的人类留言就成了看不见的东西 —— 而它照样会被塞进
+   * 下一次执行的 prompt 与 TASK.md 里。看不见的输入最难查。
+   */
+  const discussed = comments.length > 0
+  /** 此刻真正摆出来的分页。 */
+  const visible = TABS.filter((value) => value !== 'talk' || discussed)
 
   // 依赖 revision 而不只是 id：派活之后卡片 id 不变，只有 revision 会动。
   // 只看 id 的话，刚派出去的 Run 永远不会被拉到，事件流会一直空着。
@@ -80,12 +96,17 @@ export function RunPanel({
     return () => { cancelled = true }
   }, [task.id, task.revision])
 
+  // 换了一张卡先把上一张的讨论清掉，免得新卡的请求回来之前串台。
+  useEffect(() => { setComments([]) }, [task.id])
+
   // 讨论跟着卡的 revision 走：跑完一轮 Agent 会往里加一条回复。
   useEffect(() => {
     let cancelled = false
     void api.comments(task.id)
       .then(({ comments: loaded }) => { if (!cancelled) setComments(loaded) })
-      .catch(() => { if (!cancelled) setComments([]) })
+      // 拉失败就留着手上这份：清空会让整条线程连同讨论 tab 一起消失，
+      // 而一次网络抖动不是"这张卡没有讨论"。
+      .catch(() => {})
     return () => { cancelled = true }
   }, [task.id, task.revision, runs.length])
 
@@ -107,8 +128,8 @@ export function RunPanel({
   }, [task.id, task.revision, latest])
 
   // 换了一张卡就把"上膛"收回去 —— 上一张卡的危险状态不该跟着漂到下一张。
-  // 预览同理：上一张卡的文档不该盖在这一张上面。
-  useEffect(() => { setConfirmDelete(false); setPreview(null) }, [task.id])
+  // 预览与分页同理：上一张卡的文档不该盖在这一张上面，新卡也该从规格看起。
+  useEffect(() => { setConfirmDelete(false); setPreview(null); setTab('spec') }, [task.id])
 
   // 上膛也不该一直挂着：手滑点开之后忘了，下一次随手一点就把卡删了。
   useEffect(() => {
@@ -412,14 +433,20 @@ export function RunPanel({
             </div>
           ) : null}
 
-          {/* 顺序即翻卡的顺序：先看要做什么，再看做成了什么，最后才是过程。 */}
-          <Tabs defaultValue="spec" className="flex min-h-0 flex-1 flex-col gap-0">
+          {/* 顺序即翻卡的顺序：先看要做什么，再看做成了什么，最后才是过程。
+              讨论 tab 会随线程有无进出，选中的那个可能中途消失 —— 受控着来，
+              并在它不在了的时候退回规格；否则面板底下就是一片空白。 */}
+          <Tabs
+            value={visible.includes(tab) ? tab : 'spec'}
+            onValueChange={(value) => { setTab(value as Tab) }}
+            className="flex min-h-0 flex-1 flex-col gap-0"
+          >
             <div className="flex-none border-b border-hairline px-4 py-2.5">
               <TabsList>
-                {(['spec', 'talk', 'diff', 'stream', 'runs'] as const).map((value) => (
+                {visible.map((value) => (
                   <TabsTrigger key={value} value={value} className="px-3">
                     {t(`panel.tab.${value}`)}
-                    {value === 'talk' && comments.length > 0 ? (
+                    {value === 'talk' ? (
                       <span className="mono text-[10px] text-ink-faint">{comments.length}</span>
                     ) : null}
                   </TabsTrigger>
@@ -444,30 +471,40 @@ export function RunPanel({
               />
             </TabsContent>
 
-            <TabsContent value="talk" className="mt-0 flex min-h-0 flex-1 flex-col">
-              <Discussion
-                comments={comments}
-                busy={busy}
-                onOpenFile={setPreview}
-                /** Review 里留言会把卡送回队列，按钮上得先说清楚。 */
-                requeues={task.column === 'review'}
-                onSend={(body) => {
-                  setBusy(true)
-                  void api.comment(task.id, body)
-                    .then(({ comments: next }) => {
+            {discussed ? (
+              <TabsContent value="talk" className="mt-0 flex min-h-0 flex-1 flex-col">
+                <Discussion
+                  task={task}
+                  agents={agents}
+                  comments={comments}
+                  busy={busy}
+                  onOpenFile={setPreview}
+                  /** Review 里留言会把卡送回队列，按钮上得先说清楚。 */
+                  requeues={task.column === 'review'}
+                  onSend={async (body, edit) => {
+                    setBusy(true)
+                    try {
+                      const { comments: next } = await api.comment(task.id, body, edit)
                       setComments(next)
                       onChanged()
                       // 说完就收工，回到看板 —— 话已经带给下一轮了，留在这儿没事可做。
-                      // 失败则留在原地，让人看见错误再决定（同保存）。
                       onClose()
-                    })
-                    .catch((error: unknown) => {
-                      if (error instanceof ApiError) onError(error.code, error.message)
-                    })
-                    .finally(() => { setBusy(false) })
-                }}
-              />
-            </TabsContent>
+                      return null
+                    } catch (error) {
+                      // 失败留在原地。看板上那条通知在弹窗背后，所以错误还要
+                      // 回给输入框自己显示一遍 —— 否则只看得见一个空框。
+                      if (error instanceof ApiError) {
+                        onError(error.code, error.message)
+                        return error.message
+                      }
+                      return t('talk.sendFailed')
+                    } finally {
+                      setBusy(false)
+                    }
+                  }}
+                />
+              </TabsContent>
+            ) : null}
 
             <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
               {diff === null ? <Empty text={t('panel.noDiff')} /> : <DiffView diff={diff} />}
@@ -577,6 +614,37 @@ function Action({ icon, label, onClick, busy, tone }: {
   )
 }
 
+/**
+ * 讨论区那两个小下拉。
+ *
+ * 只可选、不可填 —— 能选的都是探测出来的，手打一个 CLI 不认的名字
+ * 只会在派活那一刻才炸。
+ */
+function Picker({ value, label, disabled, onChange, children }: {
+  value: string
+  label: string
+  disabled: boolean
+  onChange: (value: string) => void
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <select
+      value={value}
+      aria-label={label}
+      disabled={disabled}
+      onChange={(event) => { onChange(event.target.value) }}
+      className={cn(
+        'mono border-input h-8 max-w-[220px] rounded-md border bg-transparent px-2 text-xs shadow-xs',
+        'transition-[color,box-shadow] outline-none dark:bg-input/30',
+        'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+        'disabled:cursor-not-allowed disabled:opacity-50',
+      )}
+    >
+      {children}
+    </select>
+  )
+}
+
 function Empty({ text }: { text: string }): React.JSX.Element {
   return <p className="cjk-label p-6 text-center">{text}</p>
 }
@@ -586,34 +654,68 @@ function Empty({ text }: { text: string }): React.JSX.Element {
  *
  * 这条线程不只是给人看的记录 —— 下一次执行会把它整段交给 Agent，所以
  * 「说了什么」和「什么时候说的」都要能对上号。
+ *
+ * 输入框上还带着「下一轮交给谁、用哪个模型」：说"再改一版"和"这次换个人干"
+ * 本来就是同一句话，不该逼人先去规格里存一遍再回来发言。改动跟着这条留言
+ * 一起发出去 —— 光换个下拉不发言，等于什么都没说。
  */
-function Discussion({ comments, busy, requeues, onOpenFile, onSend }: {
+function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend }: {
+  task: Task
+  agents: Agent[]
   comments: TaskComment[]
   busy: boolean
   requeues: boolean
   /** 点开回复里的一条文档链接。 */
   onOpenFile: (path: string) => void
-  onSend: (body: string) => void
+  /** 发出去；成功回 null，失败回一句能显示给人看的话（草稿会原样留着）。 */
+  onSend: (body: string, next: NextRound) => Promise<string | null>
 }): React.JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState('')
+  const [failure, setFailure] = useState<string | null>(null)
+  const [provider, setProvider] = useState(task.preferredProvider)
+  const [model, setModel] = useState(task.model)
   const bottomRef = useRef<HTMLDivElement>(null)
+  // 同规格表单的两种冻结：执行中的卡改了也存不进去，归档的卡内容是冻的。
+  const locked = task.column === 'running' || task.archivedAt !== undefined
+  const lockReason = task.column === 'running' ? t('editor.lockedRunning') : t('editor.lockedArchived')
+  /** 选定的执行器；没选（"任意"）或本机没探测到，就没有模型这一说。 */
+  const picked = agents.find((agent) => agent.id === provider)
+  const models = picked === undefined ? [] : modelOptions(picked, model)
+  // 卡上指定的执行器本机没探测到时也要能选回来 —— 下拉里少了它，
+  // 一打开就等于把这张卡的选择改成了别人。
+  const providers = provider !== undefined && picked === undefined
+    ? [provider, ...agents.map((agent) => agent.id)]
+    : agents.map((agent) => agent.id)
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: 'end' }) }, [comments.length])
+
+  // 卡被外部改动（跑完一轮、别处改了规格）后跟上，别拿着旧值去覆盖新状态。
+  useEffect(() => {
+    setProvider(task.preferredProvider)
+    setModel(task.model)
+  }, [task.id, task.revision])
 
   const send = (): void => {
     const body = draft.trim()
     if (body.length === 0) return
-    onSend(body)
-    setDraft('')
+    setFailure(null)
+    // 只送真正变了的字段：没动过就别提它，免得白白顶掉一个 revision。
+    void onSend(body, {
+      ...(provider === task.preferredProvider ? {} : { preferredProvider: provider }),
+      ...(model === task.model ? {} : { model }),
+    }).then((error) => {
+      // 发不出去就把话留在框里。这一段是人一个字一个字敲的，
+      // 而"卡刚被人认领了"这种拒绝重试一次就过去了 —— 不该让他重打一遍。
+      if (error === null) setDraft('')
+      else setFailure(error)
+    })
   }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
-        {comments.length === 0 ? (
-          <Empty text={t('talk.empty')} />
-        ) : comments.map((comment) => (
+        {comments.map((comment) => (
           <div key={comment.id} className="space-y-1.5">
             <div className="flex items-center gap-1.5">
               {comment.author === 'agent'
@@ -654,10 +756,51 @@ function Discussion({ comments, busy, requeues, onOpenFile, onSend }: {
           }}
           className="min-h-20"
         />
+
+        {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}
+        {providers.length === 0 ? null : (
+          <div
+            className="flex flex-wrap items-center gap-2"
+            {...(locked ? { title: lockReason } : {})}
+          >
+            <span className="flex-none text-xs text-ink-faint">{t('talk.nextRound')}</span>
+            <Picker
+              value={provider ?? ''}
+              disabled={busy || locked}
+              label={t('editor.provider')}
+              onChange={(next) => {
+                // 换人就把模型清掉：模型名是各家 CLI 自己的说法，
+                // 留着一个别人不认识的名字只会在派活时炸。（同规格表单）
+                setProvider(next.length === 0 ? undefined : next)
+                setModel(undefined)
+              }}
+            >
+              <option value="">{t('editor.providerAny')}</option>
+              {providers.map((id) => <option key={id} value={id}>{id}</option>)}
+            </Picker>
+            {/* 能不能指定模型是**探测**出来的：不认 --model 的 CLI 这儿就没有这一栏。 */}
+            {picked === undefined || !picked.canPickModel || models.length === 0 ? null : (
+              <Picker
+                value={model ?? ''}
+                disabled={busy || locked}
+                label={t('editor.model')}
+                onChange={(next) => { setModel(next.length === 0 ? undefined : next) }}
+              >
+                <option value="">{t('editor.modelDefault')}</option>
+                {models.map((id) => <option key={id} value={id}>{id}</option>)}
+              </Picker>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-2">
-          <p className="flex-1 text-xs text-ink-faint">
-            {requeues ? t('talk.noteRequeue') : t('talk.note')}
-          </p>
+          {failure === null ? (
+            <p className="flex-1 text-xs text-ink-faint">
+              {requeues ? t('talk.noteRequeue') : t('talk.note')}
+            </p>
+          ) : (
+            <p className="flex-1 text-xs text-lamp-fail">{failure}</p>
+          )}
           <Button size="sm" disabled={busy || draft.trim().length === 0} onClick={send}>
             <Send />{t('talk.send')}
           </Button>

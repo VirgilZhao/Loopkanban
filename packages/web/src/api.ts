@@ -12,6 +12,9 @@ import type {
   Task, TaskComment, TaskEdit, Workspace,
 } from './types.ts'
 
+/** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
+export type NextRound = Pick<TaskEdit, 'preferredProvider' | 'model'>
+
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, detail: string) {
     super(detail)
@@ -39,7 +42,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
  * 「清空指定执行器」在服务端看起来和「这次没提到它」一模一样，永远存不下去。
  * null 是"请把它清空"的显式说法。
  */
-function clearable(edit: TaskEdit): Record<string, unknown> {
+function clearable(edit: TaskEdit | NextRound): Record<string, unknown> {
   return Object.fromEntries(Object.entries(edit).map(([key, value]) => [key, value ?? null]))
 }
 
@@ -201,11 +204,15 @@ export const api = {
   /**
    * 留一条言。**在 Review 里留言就是"再改一版"**：卡自动回队列，
    * 下一次执行会带着整条讨论走。`requeued` 说明这次有没有搬动卡片。
+   *
+   * `next` 是顺带改掉的「下一轮交给谁、用哪个模型」。只送真正变了的字段 ——
+   * 没变就别提它，免得白白顶掉一个 revision。**这个口子只认这两个字段**，
+   * 所以类型也只开这两个：写成整个 TaskEdit 的话，多送的描述会被静静吃掉。
    */
-  comment: (taskId: string, body: string) =>
+  comment: (taskId: string, body: string, next: NextRound = {}) =>
     call<{ comments: TaskComment[]; requeued: boolean }>(
       `/api/tasks/${encodeURIComponent(taskId)}/comments`,
-      { method: 'POST', body: JSON.stringify({ body }) },
+      { method: 'POST', body: JSON.stringify({ body, ...clearable(next) }) },
     ),
 
   /** 一张卡的附件，按上传顺序。 */

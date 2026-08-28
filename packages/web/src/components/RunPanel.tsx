@@ -12,7 +12,7 @@ import { AttachmentChip } from '@/components/Attachments.tsx'
 import { DiffView } from '@/components/DiffView.tsx'
 import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
-import { TestEnvPanel } from '@/components/TestEnvPanel.tsx'
+import { TestEnvBar, TestEnvLogPane, useTestEnv } from '@/components/TestEnvPanel.tsx'
 import { summarize } from '@/lib/events.ts'
 import { explain, maybe, useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
@@ -67,6 +67,9 @@ export function RunPanel({
   // 讨论里点开的那份文档。Agent 写的方案就在它自己的 worktree 里，
   // 链接在浏览器里是死的 —— 这里把它读回来盖在弹窗上。
   const [preview, setPreview] = useState<string | null>(null)
+  // 测试环境的日志开着没有。**和预览共用右边那一栏** —— 同时开两栏的话，
+  // 卡片本身会被挤成一条缝，而它才是这张弹窗的主语。
+  const [logOpen, setLogOpen] = useState(false)
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [tab, setTab] = useState<Tab>('spec')
@@ -212,25 +215,6 @@ export function RunPanel({
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [events])
 
-  /*
-   * 预览开着的时候，esc 关的是预览，不是整张卡。
-   *
-   * 听 esc 的一共有两处，都要拦下来：Radix 的 Dialog 在 document 的**捕获
-   * 阶段**听（所以后挂的监听抢不到它前面，只能靠下面 onEscapeKeyDown 里的
-   * preventDefault），App 还在 window 上另听一份（捕获阶段 stopPropagation
-   * 就到不了它那儿）。少拦一处，看完一份文档整张卡就跟着关了。
-   */
-  useEffect(() => {
-    if (preview === null) return undefined
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      event.stopPropagation()
-      setPreview(null)
-    }
-    document.addEventListener('keydown', onKey, true)
-    return () => { document.removeEventListener('keydown', onKey, true) }
-  }, [preview])
-
   /**
    * 把一次失败摆到面板顶上。
    *
@@ -241,6 +225,50 @@ export function RunPanel({
   const report = (error: unknown): void => {
     if (error instanceof ApiError) reportCode(error.code, error.message)
   }
+
+  /*
+   * 测试环境挂在这一层而不是挂在日志那一栏上：那一栏可以合上，而日志那条
+   * SSE 一断，服务端就开始收环境。合上一栏日志不该等于"我验完了"。
+   */
+  const testEnv = useTestEnv({
+    taskId: task.id,
+    project,
+    enabled: !archived && task.column === 'review',
+    onChanged,
+    onError: reportCode,
+  })
+  const side = preview !== null ? 'preview' : logOpen ? 'testenv' : null
+
+  /*
+   * 亲手按下"停止"之后，那一栏自动合上 —— 它已经没有下文了，留着只是占地方。
+   *
+   * **只认这一种收场**。进程自己崩了、闲置被回收、跑满 30 分钟被收掉，日志
+   * 恰恰是唯一能说明"刚才发生了什么"的东西，那种时候合上等于把证据收走。
+   */
+  useEffect(() => {
+    if (testEnv.env?.status === 'exited' && testEnv.env.stoppedBy === 'manual') setLogOpen(false)
+  }, [testEnv.env?.status, testEnv.env?.stoppedBy])
+
+  /*
+   * 预览开着的时候，esc 关的是预览，不是整张卡。
+   *
+   * 听 esc 的一共有两处，都要拦下来：Radix 的 Dialog 在 document 的**捕获
+   * 阶段**听（所以后挂的监听抢不到它前面，只能靠下面 onEscapeKeyDown 里的
+   * preventDefault），App 还在 window 上另听一份（捕获阶段 stopPropagation
+   * 就到不了它那儿）。少拦一处，看完一份文档整张卡就跟着关了。
+   */
+  useEffect(() => {
+    if (side === null) return undefined
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      // 预览压在日志上面（后开的那个），所以先关它 —— 关完还能看见日志。
+      if (preview !== null) setPreview(null)
+      else setLogOpen(false)
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => { document.removeEventListener('keydown', onKey, true) }
+  }, [side, preview])
 
   /** 删除这张卡。删完面板里已经没有可看的东西了，直接关掉。 */
   const remove = (): void => {
@@ -357,13 +385,13 @@ export function RunPanel({
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent
         showCloseButton={false}
-        onEscapeKeyDown={(event) => { if (preview !== null) event.preventDefault() }}
+        onEscapeKeyDown={(event) => { if (side !== null) event.preventDefault() }}
         className={cn(
           'flex h-[82vh] max-h-[820px] gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg',
           // 预览是在右边**新开一栏**，不是盖在卡上面：文档和需求本来就要对着
           // 看 —— 盖上去的话，读到一半想核对验收标准还得先把文档关掉。
           // 任务那栏缩到正常的一半，弹窗整体让出地方给文档。
-          preview === null
+          side === null
             ? 'w-[860px] max-w-[92vw] sm:max-w-[92vw]'
             : 'w-[1320px] max-w-[96vw] sm:max-w-[96vw]',
           'transition-[width,max-width] duration-200',
@@ -372,7 +400,7 @@ export function RunPanel({
         {/* 任务这一栏。开着预览时缩到 430px —— 正好是它平时的一半。 */}
         <div className={cn(
           'flex min-w-0 flex-col',
-          preview === null ? 'flex-1' : 'w-[430px] max-w-[45%] flex-none',
+          side === null ? 'flex-1' : 'w-[430px] max-w-[45%] flex-none',
         )}>
           {/* 缩到半幅时按钮挤不下就整组换行 —— 标题给一个下限，不然
               `min-w-0` 会让它一路被压成一条窄缝，而按钮仍旧赖在同一行。 */}
@@ -562,7 +590,7 @@ export function RunPanel({
               放在验收动作**上面** —— 先验，再判。反过来的话，按钮的顺序是在
               暗示可以先盖章再验货。 */}
           {!archived && task.column === 'review' ? (
-            <TestEnvPanel task={task} project={project} onChanged={onChanged} onError={reportCode} />
+            <TestEnvBar handle={testEnv} logOpen={logOpen} onLogOpen={setLogOpen} />
           ) : null}
 
           {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
@@ -836,14 +864,17 @@ export function RunPanel({
           </Tabs>
         </div>
 
-        {preview === null ? null : (
+        {side === 'preview' && preview !== null ? (
           <FilePreviewPane
             taskId={task.id}
             path={preview}
             onOpen={setPreview}
             onClose={() => { setPreview(null) }}
           />
-        )}
+        ) : null}
+        {side === 'testenv' ? (
+          <TestEnvLogPane handle={testEnv} onClose={() => { setLogOpen(false) }} />
+        ) : null}
       </DialogContent>
     </Dialog>
   )

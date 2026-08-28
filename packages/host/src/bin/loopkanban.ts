@@ -330,7 +330,8 @@ async function main(): Promise<void> {
   console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
   console.log(C.dim(`    数据 ${join(dir, 'loopkanban.db')}`))
   console.log(scheduler.settings.autopilot
-    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 每个执行器并发 ${String(scheduler.settings.maxPerProvider)}`)}\n`
+    // 两道闸都报出来：只报执行器那道的话，同一个仓库里的卡被仓库那道拦下来时看不出原因。
+    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 每个执行器并发 ${String(scheduler.settings.maxPerProvider)} · 每个仓库并发 ${String(scheduler.settings.maxPerRepo)}`)}\n`
     : C.dim('    自动认领当前关闭，可在界面左侧边栏底部打开。\n'))
 
   if (!process.argv.includes('--no-open')) openBrowser(server.url)

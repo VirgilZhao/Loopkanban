@@ -109,6 +109,9 @@ const zh = {
   'autopilot.limitHint': '每个执行器的并发上限',
   'autopilot.less': '减少每个执行器的并发',
   'autopilot.more': '增加每个执行器的并发',
+  'autopilot.repoLimitHint': '同一个仓库同时跑几个任务。每个 Run 有自己的 worktree，调大是安全的；默认 1 是为了少几次合并冲突',
+  'autopilot.repoLess': '减少每个仓库的并发',
+  'autopilot.repoMore': '增加每个仓库的并发',
 
   // ── 列 ─────────────────────────────────────────────────
   'column.backlog.hint': '想法池 · Agent 不可领',
@@ -127,7 +130,7 @@ const zh = {
   'skip.provider-unavailable': '本机没有探测到任何可用的 Agent CLI',
   'skip.provider-unavailable.pinned': '指定的 {0} 未探测到',
   'skip.provider-limit-reached': '{0} 并发已满 ({1})',
-  'skip.repo-limit-reached': '{0} 并发已满 ({1})',
+  'skip.repo-limit-reached': '{0} 仓库并发已满 ({1})',
 
   // ── 任务弹窗 ───────────────────────────────────────────
   'panel.unknownProject': '未知项目',
@@ -404,6 +407,9 @@ const en: Record<MessageKey, string> = {
   'autopilot.limitHint': 'Concurrency limit per agent',
   'autopilot.less': 'Fewer concurrent runs per agent',
   'autopilot.more': 'More concurrent runs per agent',
+  'autopilot.repoLimitHint': 'Concurrent runs in one repository. Each run gets its own worktree, so raising this is safe; the default of 1 just keeps merge conflicts down',
+  'autopilot.repoLess': 'Fewer concurrent runs per repository',
+  'autopilot.repoMore': 'More concurrent runs per repository',
 
   'column.backlog.hint': 'Idea pool · agents can’t claim',
   'column.ready.hint': 'Queue · waiting to be claimed',
@@ -419,7 +425,7 @@ const en: Record<MessageKey, string> = {
   'skip.provider-unavailable': 'No agent CLI detected on this machine',
   'skip.provider-unavailable.pinned': 'Pinned agent {0} was not detected',
   'skip.provider-limit-reached': '{0} is at its concurrency limit ({1})',
-  'skip.repo-limit-reached': '{0} is at its concurrency limit ({1})',
+  'skip.repo-limit-reached': '{0} is at its per-repository limit ({1})',
 
   'panel.unknownProject': 'Unknown project',
   'panel.baseLabel': 'base',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isUntouchedDraft } from '../src/lib/task.ts'
+import { isUntouchedDraft, taskClockFrom } from '../src/lib/task.ts'
 
 describe('isUntouchedDraft', () => {
   it('刚建出来的空白卡是草稿', () => {
@@ -20,5 +20,23 @@ describe('isUntouchedDraft', () => {
 
   it('存过一次的卡不是草稿 —— 哪怕存进去的内容是空的', () => {
     expect(isUntouchedDraft({ revision: 2, description: '', acceptance: [] })).toBe(false)
+  })
+})
+
+describe('taskClockFrom', () => {
+  const lease = { runId: 'r-1', provider: 'codex', acquiredAt: 1_000, expiresAt: 91_000 }
+
+  it('running 的卡从拿到租约那一刻起算 —— 续租不该把计时清零', () => {
+    // 跑了半小时、刚续过租：updatedAt 是心跳，acquiredAt 才是这一轮的开始。
+    expect(taskClockFrom({ column: 'running', lease, updatedAt: 1_800_000 })).toBe(1_000)
+  })
+
+  it('其余的卡看 updatedAt —— 它们没有心跳在往前推这个数', () => {
+    expect(taskClockFrom({ column: 'review', lease, updatedAt: 1_800_000 })).toBe(1_800_000)
+    expect(taskClockFrom({ column: 'ready', lease: undefined, updatedAt: 42 })).toBe(42)
+  })
+
+  it('running 却没有租约时退回 updatedAt，而不是显示一个空数字', () => {
+    expect(taskClockFrom({ column: 'running', lease: undefined, updatedAt: 42 })).toBe(42)
   })
 })

@@ -866,6 +866,95 @@ describe('附件', () => {
   })
 })
 
+describe('GET /api/tasks/:id/file', () => {
+  let sandbox: string
+  let repo: string
+  let worktree: string
+
+  const ask = (id: string, path: string) =>
+    api(`/api/tasks/${id}/file?path=${encodeURIComponent(path)}`)
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-file-'))
+    repo = join(sandbox, 'repo')
+    worktree = join(repo, '.loopkanban', 'worktrees', 't-1')
+    await mkdir(join(worktree, 'docs'), { recursive: true })
+
+    store.createTask(task({ id: 't1', column: 'review', repoPath: repo }))
+    store.createRun({
+      id: asRunId('run-1'), taskId: asTaskId('t1'), provider: 'claude', cliVersion: '2.1.247',
+      worktreePath: worktree, branch: 'task/t1', status: 'completed', startedAt: T0,
+    })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('把 Agent 写在自己 worktree 里的文档读回来 —— 那条链接浏览器打不开', async () => {
+    await writeFile(join(worktree, 'docs', '方案.md'), '# 方案\n\n照着这个做。\n')
+
+    const res = await ask('t1', join(worktree, 'docs', '方案.md'))
+    expect(res.status).toBe(200)
+    const body = await res.json() as { file: { name: string; relative: string; content: string } }
+    expect(body.file.name).toBe('方案.md')
+    expect(body.file.relative).toBe('docs/方案.md')
+    expect(body.file.content).toContain('照着这个做')
+  })
+
+  it('项目仓库里的文件也够得着 —— 合并之后文档就在那儿', async () => {
+    await mkdir(join(repo, 'docs'), { recursive: true })
+    await writeFile(join(repo, 'docs', 'prd.md'), 'PRD')
+
+    const res = await ask('t1', 'docs/prd.md')
+    expect(res.status).toBe(200)
+    expect((await res.json() as { file: { content: string } }).file.content).toBe('PRD')
+  })
+
+  it('工作区之外的路径 422 —— 这不是「文件不在」，是这个请求本身不成立', async () => {
+    await writeFile(join(sandbox, 'secret.txt'), 'nope')
+    const res = await ask('t1', join(sandbox, 'secret.txt'))
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'path-outside-workspace' })
+  })
+
+  it('二进制 415，不给一屏乱码', async () => {
+    await writeFile(join(worktree, 'shot.png'), Buffer.from([0x89, 0x50, 0x00, 0x01]))
+    const res = await ask('t1', 'shot.png')
+    expect(res.status).toBe(415)
+    expect(await res.json()).toMatchObject({ error: 'not-text' })
+  })
+
+  it('读不动的文件 403 —— 说清楚是权限，别让它变成一条 500', async () => {
+    if (process.getuid?.() === 0) return
+    const locked = join(worktree, 'locked.md')
+    await writeFile(locked, 'secret')
+    await chmod(locked, 0o000)
+
+    const res = await ask('t1', 'locked.md')
+    expect(res.status).toBe(403)
+    expect(await res.json()).toMatchObject({ error: 'unreadable' })
+  })
+
+  it('不存在的文件 404', async () => {
+    const res = await ask('t1', 'docs/nope.md')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: 'no-such-file' })
+  })
+
+  it('卡不存在就 404，不去读任何文件', async () => {
+    expect((await ask('t404', 'docs/x.md')).status).toBe(404)
+  })
+
+  it('只够得着自己那张卡的地方 —— 别人的 worktree 不算', async () => {
+    const other = join(sandbox, 'other-repo')
+    await mkdir(other, { recursive: true })
+    await writeFile(join(other, 'plan.md'), '别人的')
+    store.createTask(task({ id: 't2', repoPath: other }))
+
+    const res = await ask('t1', join(other, 'plan.md'))
+    expect(res.status).toBe(422)
+  })
+})
+
 describe('DELETE /api/tasks/:id', () => {
   const del = (id: string, body?: unknown, query = '') =>
     api(`/api/tasks/${id}${query}`, {

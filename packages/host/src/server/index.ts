@@ -256,6 +256,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           streaming: caps.streaming,
           canPinSessionId: caps.canPinSessionId,
           canResume: caps.canResume,
+          canPickModel: caps.canPickModel,
           permissionTiers: caps.permissionTiers,
           // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
           ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
@@ -344,17 +345,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     // ── 新建任务 ────────────────────────────────────────────
     if (method === 'POST' && pathname === '/api/tasks') {
       const body = await readJsonBody(req) as Partial<{
-        projectId: string; subject: string; description: string; acceptance: string[]
-        preferredProvider: string
+        projectId: string; description: string; acceptance: string[]
+        preferredProvider: string; model: string
       }> | undefined
-      if (body?.subject === undefined || body.subject.trim().length === 0) {
-        sendJson(res, 400, { error: 'bad-request', detail: '需要 subject' })
-        return
-      }
       // 仓库与基线跟着项目走，不由建卡方指定 —— 任务干活的地方是这个项目
       // 派生出来的 worktree，两者对不上就没有意义。
       const projects = storage.listProjects()
-      const project = projects.find((p) => p.id === body.projectId) ?? projects[0]
+      const project = projects.find((p) => p.id === body?.projectId) ?? projects[0]
       if (project === undefined) { sendJson(res, 400, { error: 'no-project' }); return }
 
       const now = Date.now()
@@ -366,12 +363,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         // 新卡一律先落 backlog：验收标准没写全就不该进队列。
         column: 'backlog',
         position: Math.max(0, ...tasks.map((t) => t.position)) + 1,
-        subject: body.subject.trim(),
-        description: body.description ?? '',
-        acceptance: (body.acceptance ?? []).filter((a) => a.trim().length > 0),
+        // 建一张空白卡是正常的：先落地，再在弹窗里慢慢写。
+        description: body?.description ?? '',
+        acceptance: (body?.acceptance ?? []).filter((a) => a.trim().length > 0),
         repoPath: project.repoPath,
         baseBranch: project.baseBranch,
-        ...(body.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
+        ...(body?.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
+        ...(body?.model === undefined ? {} : { model: body.model }),
         blockedBy: [],
         createdAt: now,
         updatedAt: now,
@@ -394,12 +392,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const task = storage.getTask(asTaskId(decodeURIComponent(editId)))
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
       const body = await readJsonBody(req) as
-        ({ expectedRevision?: number } & TaskEdit) | undefined
+        ({ expectedRevision?: number } & Record<string, unknown>) | undefined
       if (body?.expectedRevision === undefined) {
         sendJson(res, 400, { error: 'bad-request', detail: '需要 expectedRevision' })
         return
       }
-      const { expectedRevision, ...edit } = body
+      const { expectedRevision, ...rest } = body
+      // null 意为"清空这个字段"。字段缺席只意味着"这次没提到它"，两者不能混为
+      // 一谈 —— JSON 里没有 undefined，客户端要清空只能显式送 null。
+      const edit = Object.fromEntries(
+        Object.entries(rest).map(([key, value]) => [key, value === null ? undefined : value]),
+      ) as TaskEdit
       const edited = editTask(task, { expectedRevision, edit, now: Date.now() })
       if (!edited.ok) {
         sendJson(res, edited.reason === 'revision-conflict' ? 409 : 422, {

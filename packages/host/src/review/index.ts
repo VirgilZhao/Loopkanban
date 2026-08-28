@@ -8,7 +8,7 @@
  */
 
 import { access, rm } from 'node:fs/promises'
-import { moveTask, requestChanges, type Task, type TaskId } from '@loopkanban/core'
+import { moveTask, requestChanges, taskTitle, type Task, type TaskId } from '@loopkanban/core'
 import type { Run, Storage } from '../storage/index.ts'
 import {
   commitAll, mergeBranch, removeWorktree, worktreeDiff, worktreeDir, type Worktree,
@@ -227,5 +227,5 @@ export class Review {
 
 /** 提交信息带上执行者，日后 blame 时看得出这段是谁写的。 */
 function commitMessage(task: Task, run: Run): string {
-  return [task.subject, '', `Task: ${task.id}`, `Agent: ${run.provider} ${run.cliVersion}`].join('\n')
+  return [taskTitle(task), '', `Task: ${task.id}`, `Agent: ${run.provider} ${run.cliVersion}`].join('\n')
 }

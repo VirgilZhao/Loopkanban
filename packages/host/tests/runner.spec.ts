@@ -54,7 +54,7 @@ function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvid
 
 const caps = (): AgentCaps => ({
   id: 'scripted', bin: '/fake', version: '9.9.9',
-  streaming: true, canPinSessionId: true, canResume: false,
+  streaming: true, canPinSessionId: true, canResume: false, canPickModel: true,
   permissionTiers: ['standard'], help: parseHelp(''),
 })
 
@@ -62,7 +62,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
-    subject: '加个 greet 函数', description: '要有测试',
+    description: '加个 greet 函数\n\n要有测试',
     acceptance: ['greet.js 存在', '有单测'],
     repoPath: repo, baseBranch: 'main',
     blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,

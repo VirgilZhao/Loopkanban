@@ -13,6 +13,7 @@ import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { insertPosition } from '@/lib/position.ts'
+import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type Project, type RunStats, type SchedulerState,
@@ -29,7 +30,6 @@ const CLOCK_MS = 5_000
  * 所以这里给的不是错误名，而是下一步该做什么。
  */
 const ERROR_HINT: Record<string, string> = {
-  'acceptance-required': '这张卡还没有验收标准。补上之后才能进 Ready —— 否则 Agent 干完了也没人能判定对不对。',
   'illegal-transition': '不允许这样跨列。流转顺序是 Backlog → Ready → Running → Review → Done。',
   'blocked-by-dependency': '它依赖的任务还没完成。',
   'lease-held': '这张卡正被某个 Agent 持有，等它跑完或超时释放。',
@@ -130,7 +130,7 @@ export default function App(): React.JSX.Element {
       previous.set(task.id, task.column)
       if (first || before === undefined || before === task.column) continue
       if (task.column !== 'review' || task.archivedAt !== undefined) continue
-      notify('待验收', task.subject)
+      notify('待验收', taskTitle(task))
     }
   }, [tasks])
 
@@ -195,7 +195,8 @@ export default function App(): React.JSX.Element {
     if (activeProject === null) return
     void (async () => {
       try {
-        const { task } = await api.createTask({ projectId: activeProject.id, subject: '新任务' })
+        // 建一张空白卡，内容在弹窗里写 —— 先落地，再动笔。
+        const { task } = await api.createTask({ projectId: activeProject.id })
         await refresh()
         setSelectedId(task.id)
       } catch (error) {
@@ -374,7 +375,7 @@ export default function App(): React.JSX.Element {
             {dragged === null ? null : (
               <div className="rounded-xl border border-sodium bg-panel px-3 py-2.5 shadow-lg">
                 <span className="tag">{dragged.id}</span>
-                <p className="mt-1.5 line-clamp-2 font-medium text-ink">{dragged.subject}</p>
+                <p className="mt-1.5 line-clamp-2 text-ink">{taskTitle(dragged)}</p>
               </div>
             )}
           </DragOverlay>

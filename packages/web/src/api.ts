@@ -31,6 +31,17 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T
 }
 
+/**
+ * 把 `undefined` 换成 `null` 再上路。
+ *
+ * JSON 里没有 undefined —— `JSON.stringify` 会把这种键**整条丢掉**，于是
+ * 「清空指定执行器」在服务端看起来和「这次没提到它」一模一样，永远存不下去。
+ * null 是"请把它清空"的显式说法。
+ */
+function clearable(edit: TaskEdit): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(edit).map(([key, value]) => [key, value ?? null]))
+}
+
 export const api = {
   state: () => call<{ projects: Project[]; tasks: Task[] }>('/api/state'),
 
@@ -65,10 +76,10 @@ export const api = {
 
   createTask: (input: {
     projectId: string
-    subject: string
     description?: string
     acceptance?: string[]
     preferredProvider?: string
+    model?: string
   }) =>
     call<{ task: Task }>('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
 
@@ -86,7 +97,7 @@ export const api = {
   /** 编辑任务内容。执行中的卡片会被拒绝。 */
   edit: (taskId: string, expectedRevision: number, edit: TaskEdit) =>
     call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
-      method: 'PATCH', body: JSON.stringify({ expectedRevision, ...edit }),
+      method: 'PATCH', body: JSON.stringify({ expectedRevision, ...clearable(edit) }),
     }),
 
   /**

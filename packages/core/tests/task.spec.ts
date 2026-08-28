@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   acquireLease, archiveTask, asProjectId, asRunId, asTaskId, canTransition, COLUMNS, deleteTask,
   dropDependency, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease, requestChanges,
-  unarchiveTask, type Task,
+  unarchiveTask, type Task, taskTitle,
 } from '../src/index.ts'
 
 const T0 = 1_000_000
@@ -14,8 +14,7 @@ function task(patch: Partial<Task> = {}): Task {
     revision: 1,
     column: 'ready',
     position: 0,
-    subject: '加个函数',
-    description: '',
+    description: '加个函数',
     acceptance: ['函数存在并有测试'],
     repoPath: '/repo',
     baseBranch: 'main',
@@ -74,12 +73,12 @@ describe('moveTask', () => {
     expect(result.ok && result.value.updatedAt).toBe(T0 + 5)
   })
 
-  it('没有验收标准的任务进不了 ready —— 干完了也没人能判定对不对', () => {
+  it('验收标准是可选的：没写也能进队列', () => {
     const result = moveTask(
       task({ column: 'backlog', acceptance: [] }),
       { expectedRevision: 1, to: 'ready', now: T0 },
     )
-    expect(result).toMatchObject({ ok: false, reason: 'acceptance-required' })
+    expect(result).toMatchObject({ ok: true })
   })
 
   it('离开 running 时一并释放租约，否则卡片会永远显示被占用', () => {
@@ -215,31 +214,36 @@ describe('editTask', () => {
   const edit = (t: Task, patch: Parameters<typeof editTask>[1]['edit'], rev = t.revision) =>
     editTask(t, { expectedRevision: rev, edit: patch, now: T0 + 9 })
 
-  it('改标题与验收标准并自增 revision', () => {
-    const result = edit(task({ column: 'backlog' }), { subject: '  新标题  ', acceptance: ['A', ' ', 'B'] })
+  it('改描述与验收标准并自增 revision', () => {
+    const result = edit(task({ column: 'backlog' }), { description: '新内容', acceptance: ['A', ' ', 'B'] })
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.value.subject).toBe('新标题')
+    expect(result.value.description).toBe('新内容')
     // 空白项被剔除，免得验收清单里出现空条目。
     expect(result.value.acceptance).toEqual(['A', 'B'])
     expect(result.value.revision).toBe(2)
   })
 
   it('正在执行的卡片不能改需求 —— 否则人和 Agent 对着两份规格', () => {
-    expect(edit(task({ column: 'running' }), { subject: '改一下' }))
+    expect(edit(task({ column: 'running' }), { description: '改一下' }))
       .toMatchObject({ ok: false, reason: 'task-running' })
   })
 
-  it('空标题被拒', () => {
-    expect(edit(task({ column: 'backlog' }), { subject: '   ' }))
-      .toMatchObject({ ok: false, reason: 'subject-required' })
+  it('任何一列都能清空验收标准 —— 它是可选的', () => {
+    expect(edit(task({ column: 'ready' }), { acceptance: [] }).ok).toBe(true)
+    expect(edit(task({ column: 'backlog' }), { acceptance: [] }).ok).toBe(true)
   })
 
-  it('队列中的卡不能清空验收标准，否则会变成一张无法验收的活卡', () => {
-    expect(edit(task({ column: 'ready' }), { acceptance: [] }))
-      .toMatchObject({ ok: false, reason: 'acceptance-required' })
-    // 但在 backlog 里随便清。
-    expect(edit(task({ column: 'backlog' }), { acceptance: [] }).ok).toBe(true)
+  it('可以指定模型，也可以显式清掉它', () => {
+    const picked = edit(task({ column: 'backlog', preferredProvider: 'claude' }), { model: 'opus' })
+    expect(picked).toMatchObject({ ok: true })
+    if (!picked.ok) return
+    expect(picked.value.model).toBe('opus')
+
+    const cleared = edit(picked.value, { model: undefined }, picked.value.revision)
+    expect(cleared).toMatchObject({ ok: true })
+    if (!cleared.ok) return
+    expect(cleared.value.model).toBeUndefined()
   })
 
   it('可以显式清除指定的 provider', () => {
@@ -249,15 +253,16 @@ describe('editTask', () => {
   })
 
   it('没提到的字段原样保留', () => {
-    const original = task({ column: 'backlog', description: '原描述' })
-    const result = edit(original, { subject: '只改标题' })
+    const original = task({ column: 'backlog', description: '原描述', acceptance: ['原判据'] })
+    const result = edit(original, { preferredProvider: 'codex' })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.value.description).toBe('原描述')
+    expect(result.value.acceptance).toEqual(['原判据'])
   })
 
   it('revision 不匹配时拒绝', () => {
-    expect(edit(task({ column: 'backlog', revision: 5 }), { subject: 'x' }, 4))
+    expect(edit(task({ column: 'backlog', revision: 5 }), { description: 'x' }, 4))
       .toMatchObject({ ok: false, reason: 'revision-conflict' })
   })
 })
@@ -308,7 +313,7 @@ describe('归档', () => {
     const t = shelved.value
     expect(moveTask(t, { expectedRevision: t.revision, to: 'ready', now: T0 }))
       .toMatchObject({ ok: false, reason: 'task-archived' })
-    expect(editTask(t, { expectedRevision: t.revision, edit: { subject: '改个名' }, now: T0 }))
+    expect(editTask(t, { expectedRevision: t.revision, edit: { description: '改个名' }, now: T0 }))
       .toMatchObject({ ok: false, reason: 'task-archived' })
   })
 
@@ -393,19 +398,36 @@ describe('requestChanges', () => {
     expect(kick(task({ column: 'review' }), '   ')).toMatchObject({ ok: false, reason: 'feedback-required' })
   })
 
-  it('验收标准为空时不许打回 —— 它的去向是 ready，入列条件一视同仁', () => {
-    // review 期间是可以把验收标准清空的（editTask 只拦 ready 列），
-    // 所以这道门必须自己挡住，不能指望 moveTask。
+  it('验收标准为空也能打回 —— 判据是可选的，改什么才是必须写清楚的', () => {
     const emptied = editTask(task({ column: 'review' }), {
       expectedRevision: 1, edit: { acceptance: [] }, now: T0,
     })
     if (!emptied.ok) throw new Error(emptied.detail)
-    expect(emptied.value.acceptance).toEqual([])
-    expect(kick(emptied.value)).toMatchObject({ ok: false, reason: 'acceptance-required' })
+    expect(kick(emptied.value)).toMatchObject({ ok: true })
   })
 
   it('打回也走 CAS', () => {
     expect(requestChanges(task({ column: 'review' }), { expectedRevision: 99, feedback: 'x', now: T0 }))
       .toMatchObject({ ok: false, reason: 'revision-conflict' })
+  })
+})
+
+describe('taskTitle', () => {
+  it('取描述的第一行 —— 人写多行时，第一行本来就是那句话', () => {
+    expect(taskTitle({ id: asTaskId('t1'), description: '加个 slugify\n\n要处理中文' })).toBe('加个 slugify')
+  })
+
+  it('前面的空行不算数', () => {
+    expect(taskTitle({ id: asTaskId('t1'), description: '\n\n  真正的第一行  \n第二行' })).toBe('真正的第一行')
+  })
+
+  it('太长就截断 —— 分支名与提交信息里塞不下', () => {
+    const title = taskTitle({ id: asTaskId('t1'), description: 'x'.repeat(200) })
+    expect(title.length).toBeLessThanOrEqual(61)
+    expect(title.endsWith('…')).toBe(true)
+  })
+
+  it('一个字都没写就退回任务 id —— 空白的分支名比丑的更糟', () => {
+    expect(taskTitle({ id: asTaskId('t-abc'), description: '   \n  ' })).toBe('t-abc')
   })
 })

@@ -129,12 +129,12 @@ interface Task {
   projectId: ProjectId
   column: 'backlog' | 'ready' | 'running' | 'review' | 'done'
   position: number
-  subject: string
-  description: string              // Markdown
-  acceptance: string[]             // 验收标准 checklist
+  description: string              // Markdown。卡片的全部内容，没有独立标题
+  acceptance: string[]             // 验收标准 checklist，可选
   repoPath: string                 // 跟着项目走，建卡时定下，之后不由人改
   baseBranch: string
   preferredProvider?: string       // 只能选已探测到的
+  model?: string                   // 指定模型；留空用该 CLI 自己的默认
   blockedBy: TaskId[]
   lease?: { runId: RunId; provider: string; acquiredAt: string; expiresAt: string }
   archivedAt?: string              // 归档标记，正交于 column
@@ -157,6 +157,27 @@ interface Run {
 // append-only，UI 从它投影，SSE 从它续传
 interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; at: string }
 ```
+
+### 卡片没有标题
+
+一句话的活写一句话，复杂的活写一段 —— 逼人先起个标题只是多一道手续，而
+多数标题最后就是描述第一行的复读。要显示"叫什么"的地方（列表、分支名、
+提交信息、桌面通知）一律取描述的第一行，截断到 60 字；一个字都没写就退回
+任务 id，空白的分支名比丑的更糟。列表里超过两行用省略号收住。
+
+**验收标准是可选的**。有判据当然更好（Agent 照着做，人照着验），但强制它
+等于给每张卡都加一道门槛，而很多活的判据就是"跑起来对不对"。原先卡在
+「进 Ready」和「打回」两处的守卫因此一并撤掉。
+
+### 指定执行器之后还能指定模型
+
+模型名是各家 CLI 自己的说法，不通用，所以这一栏只在选定执行器后出现，
+且**先探测再展示**：`--model` / `-m` 在那个版本的 help 里存在才给填，
+否则界面上直接说"这个版本没有这个参数"，而不是让人填完再被运行时拒绝。
+
+界面给的是一个输入框加一个示例，不是一份模型清单：claude 与 codex 都没有
+可枚举模型的命令，硬编一份清单只会过期误导人。留空就用那个 CLI 自己的默认，
+我们不替它做主。
 
 ### 项目与 worktree 的归属
 

@@ -20,7 +20,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
-    subject: id, description: '', acceptance: ['ok'], repoPath: '/repo', baseBranch: 'main',
+    description: id, acceptance: ['ok'], repoPath: '/repo', baseBranch: 'main',
     blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
@@ -114,7 +114,7 @@ describe('POST /api/projects', () => {
       { project: { id: string } }
     const res = await api('/api/tasks', {
       method: 'POST',
-      body: JSON.stringify({ projectId: project.id, subject: '在新项目里干活' }),
+      body: JSON.stringify({ projectId: project.id, description: '在新项目里干活' }),
     })
     expect(res.status).toBe(201)
     const { task: created } = await res.json() as { task: Task }
@@ -409,6 +409,37 @@ describe('POST /api/tasks/:id/archive · unarchive', () => {
   })
 })
 
+describe('PATCH /api/tasks/:id', () => {
+  const edit = (id: string, body: unknown) =>
+    api(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+
+  it('改描述与验收标准', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const res = await edit('t1', { expectedRevision: 1, description: '新内容', acceptance: [] })
+    expect(res.status).toBe(200)
+    const after = store.getTask(asTaskId('t1'))
+    expect(after?.description).toBe('新内容')
+    // 验收标准是可选的，清空不再被拒。
+    expect(after?.acceptance).toEqual([])
+  })
+
+  it('指定执行器与模型，null 才是"清空"', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    await edit('t1', { expectedRevision: 1, preferredProvider: 'claude', model: 'opus' })
+    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+
+    // 字段缺席只意味着"这次没提到"，不该把它抹掉。
+    await edit('t1', { expectedRevision: 2, description: '只改内容' })
+    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+
+    // 显式送 null 才清空 —— JSON 里没有 undefined。
+    await edit('t1', { expectedRevision: 3, preferredProvider: null, model: null })
+    const cleared = store.getTask(asTaskId('t1'))
+    expect(cleared?.model).toBeUndefined()
+    expect(cleared?.preferredProvider).toBeUndefined()
+  })
+})
+
 describe('DELETE /api/tasks/:id', () => {
   const del = (id: string, body?: unknown, query = '') =>
     api(`/api/tasks/${id}${query}`, {
@@ -646,7 +677,7 @@ describe('错误处理（回归）', () => {
     const res = await api('/api/tasks', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: '{"subject": ',
+      body: '{"description": ',
     })
     expect(res.status).toBe(400)
     expect(await res.json()).toMatchObject({ error: 'bad-request' })

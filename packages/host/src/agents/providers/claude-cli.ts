@@ -91,6 +91,7 @@ export const claudeCliProvider: AgentProvider = {
       streaming: choicesOf(help, 'output-format').includes('stream-json'),
       canPinSessionId: hasFlag(help, 'session-id'),
       canResume: hasFlag(help, 'resume'),
+      canPickModel: hasFlag(help, 'model'),
       permissionTiers: supportedTiers(choicesOf(help, 'permission-mode')),
       help,
     }

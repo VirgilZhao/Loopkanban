@@ -26,8 +26,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     revision: 1,
     column: 'ready',
     position: 1,
-    subject: id,
-    description: '描述',
+    description: `${id} 的描述`,
     acceptance: ['有测试'],
     repoPath: '/repo',
     baseBranch: 'main',
@@ -129,10 +128,10 @@ describe('commitTask 的 compare-and-set', () => {
   })
 
   it('提交一个 revision 落后的值会被拒，数据不被覆盖', () => {
-    store.createTask(task({ id: 't1', revision: 5, subject: '新的' }))
-    const stale = task({ id: 't1', revision: 3, subject: '旧的' })
+    store.createTask(task({ id: 't1', revision: 5, description: '新的' }))
+    const stale = task({ id: 't1', revision: 3, description: '旧的' })
     expect(store.commitTask(stale)).toBe(false)
-    expect(store.getTask(asTaskId('t1'))?.subject).toBe('新的')
+    expect(store.getTask(asTaskId('t1'))?.description).toBe('新的')
   })
 
   it('租约可以被写成 null 来释放', () => {
@@ -357,7 +356,7 @@ describe('迁移', () => {
       const migrated = store.getTask(asTaskId('t1'))
       expect(migrated?.column).toBe('review')
       // 搬列而已，内容一个字都不该动。
-      expect(migrated?.subject).toBe('跑挂了的卡')
+      expect(migrated?.description).toBe('跑挂了的卡')
       store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })

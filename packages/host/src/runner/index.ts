@@ -22,7 +22,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import {
   acquireLease, asRunId, consumeFeedback, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
-  type RunId, type Task, type TaskId,
+  taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
 import type { DetectedAgent } from '../agents/index.ts'
@@ -180,7 +180,7 @@ export class Runner {
     // 里上一次的成果，而不是在空目录里对着评审意见发懵。`prior` 只决定要不要
     // 续会话，不决定在哪儿干活。
     const worktree = await ensureWorktree(
-      task.repoPath, task.id, branchSlug(task.id, task.subject), task.baseBranch,
+      task.repoPath, task.id, branchSlug(task.id, taskTitle(task)), task.baseBranch,
     )
 
     const artifactsDir = join(artifactsRoot, runId)
@@ -193,6 +193,8 @@ export class Runner {
       artifactsDir,
       prompt: renderPrompt(task, prior !== undefined),
       permission: 'standard',
+      // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
+      ...(task.model === undefined ? {} : { model: task.model }),
       // claude 支持预先指定会话 id；codex 只能事后从 thread.started 捞。
       ...(caps.canPinSessionId ? { sessionId: randomUUID() } : {}),
     }
@@ -481,10 +483,12 @@ export class Runner {
 
 /** 投喂给 Agent 的任务规格，写进 worktree 根目录。 */
 export function renderTaskSpec(task: Task): string {
-  const lines = [`# ${task.subject}`, '']
-  if (task.description.trim().length > 0) lines.push(task.description.trim(), '')
-  lines.push('## 验收标准', '')
-  for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
+  const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
+  // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
+  if (task.acceptance.length > 0) {
+    lines.push('## 验收标准', '')
+    for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
+  }
   lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
   return `${lines.join('\n')}\n`
 }
@@ -497,12 +501,12 @@ export function renderTaskSpec(task: Task): string {
 export function renderPrompt(task: Task, resuming = false): string {
   const lines: string[] = []
   if (task.feedback === undefined) {
-    lines.push(`阅读仓库根目录的 TASK.md 并完成其中的任务：${task.subject}`)
+    lines.push(`阅读仓库根目录的 TASK.md 并完成其中的任务：${taskTitle(task)}`)
   } else {
     lines.push(
       resuming
         ? '你上一轮的成果被评审打回了。工作区里就是你上次的改动，请在此基础上修改：'
-        : `任务「${task.subject}」上一轮被评审打回。工作区里是上次的改动，请在此基础上修改：`,
+        : `任务「${taskTitle(task)}」上一轮被评审打回。工作区里是上次的改动，请在此基础上修改：`,
       '',
       task.feedback,
       '',

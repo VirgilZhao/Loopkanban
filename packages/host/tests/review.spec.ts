@@ -22,7 +22,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'review', position: 1,
-    subject: '加个 slugify', description: '', acceptance: ['有测试'],
+    description: '加个 slugify', acceptance: ['有测试'],
     repoPath: repo, baseBranch: 'main', blockedBy: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }
@@ -231,7 +231,7 @@ describe('CAS 与不可逆操作的顺序（回归）', () => {
     // 模拟"提交期间别人改了这张卡"：先让存储里的 revision 前进一格。
     const stale = store.getTask(asTaskId('t1'))
     if (stale === null) throw new Error('unreachable')
-    store.commitTask({ ...stale, revision: stale.revision + 1, subject: '被人改过' })
+    store.commitTask({ ...stale, revision: stale.revision + 1, description: '被人改过' })
 
     // review 读的是更新前的快照 → CAS 必然失败。
     const conflicting = new Review({

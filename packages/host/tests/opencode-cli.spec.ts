@@ -15,6 +15,7 @@ const CAPS: AgentCaps = {
   streaming: true,
   canPinSessionId: false,
   canResume: true,
+  canPickModel: true,
   permissionTiers: ['standard', 'yolo'],
   help: parseHelp(fixture('opencode-run-help.txt')),
 }

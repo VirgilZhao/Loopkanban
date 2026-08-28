@@ -7,6 +7,19 @@ import { Textarea } from '@/components/ui/textarea.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
+/**
+ * 模型名的占位提示。
+ *
+ * **刻意只给一个例子而不是一份清单**：模型名是各家 CLI 自己的说法，随版本变；
+ * claude 与 codex 都没有可枚举模型的命令，硬编一份清单只会过期误导人。
+ * 这里给的是"长什么样"，真正认不认由 CLI 说了算。
+ */
+const MODEL_PLACEHOLDER: Record<string, string> = {
+  claude: '例如 opus / sonnet',
+  codex: '例如 gpt-5-codex',
+  opencode: '例如 anthropic/claude-sonnet-4-5',
+}
+
 interface Props {
   task: Task
   /** 任务所属项目；卡片就在它派生出来的 worktree 里干活。 */
@@ -18,19 +31,19 @@ interface Props {
 
 /** 表单里持有的草稿。`preferredProvider` 显式允许 undefined —— 「任意」就是它。 */
 interface Draft {
-  subject: string
   description: string
   acceptance: string[]
   preferredProvider: string | undefined
+  model: string | undefined
 }
 
 /** 从任务取出可编辑的那部分，作为表单初值。 */
 function draftOf(task: Task): Draft {
   return {
-    subject: task.subject,
     description: task.description,
     acceptance: task.acceptance.length > 0 ? task.acceptance : [''],
     preferredProvider: task.preferredProvider,
+    model: task.model,
   }
 }
 
@@ -46,6 +59,8 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
   useEffect(() => { setDraft(draftOf(task)) }, [task.id, task.revision])
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(task))
+  /** 选定的执行器；没选就没有模型这一说。 */
+  const picked = agents.find((agent) => agent.id === draft.preferredProvider)
 
   const setAcceptance = (index: number, value: string): void => {
     setDraft((d) => ({ ...d, acceptance: d.acceptance.map((item, i) => (i === index ? value : item)) }))
@@ -60,25 +75,21 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
           </p>
         ) : null}
 
-        <Field label="标题">
-          <Input
-            value={draft.subject}
-            disabled={locked}
-            onChange={(e) => { setDraft((d) => ({ ...d, subject: e.target.value })) }}
-          />
-        </Field>
-
-        <Field label="描述">
+        {/* 卡片没有标题字段：一句话的活写一句话，复杂的活写一段。
+            要显示"叫什么"的地方（分支名、提交信息、通知）取第一行。 */}
+        <Field label="任务内容" hint="第一行会被当作这张卡的名字">
           <Textarea
             value={draft.description}
             disabled={locked}
-            rows={4}
+            rows={6}
+            autoFocus={draft.description.trim().length === 0}
+            placeholder="要 Agent 做什么？"
             onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
             className="leading-relaxed"
           />
         </Field>
 
-        <Field label="验收标准" hint="Agent 的完成判据，空着就进不了 Ready">
+        <Field label="验收标准" hint="可选。写了 Agent 就照着做、你就照着验；不写也能派活">
           <div className="space-y-2">
             {draft.acceptance.map((item, index) => (
               <div key={index} className="flex items-center gap-2">
@@ -119,7 +130,11 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
             <Chip
               active={draft.preferredProvider === undefined}
               disabled={locked}
-              onClick={() => { setDraft((d) => ({ ...d, preferredProvider: undefined })) }}
+              onClick={() => {
+                // 不指定执行器时模型也跟着清掉：模型名是各家 CLI 自己的说法，
+                // 留着一个别人不认识的名字只会在派活时炸。
+                setDraft((d) => ({ ...d, preferredProvider: undefined, model: undefined }))
+              }}
             >
               任意
             </Chip>
@@ -129,7 +144,13 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
                 active={draft.preferredProvider === agent.id}
                 disabled={locked}
                 title={agent.permissionCaveat?.detail}
-                onClick={() => { setDraft((d) => ({ ...d, preferredProvider: agent.id })) }}
+                onClick={() => {
+                  setDraft((d) => ({
+                    ...d,
+                    preferredProvider: agent.id,
+                    ...(d.preferredProvider === agent.id ? {} : { model: undefined }),
+                  }))
+                }}
               >
                 {agent.id}
                 {agent.permissionCaveat === undefined ? null : (
@@ -139,6 +160,30 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
             ))}
           </div>
         </Field>
+
+        {/* 只有选定了执行器、且那个 CLI 认 --model 时才出现这一栏。
+            能不能指定模型是**探测**出来的，不是写死的。 */}
+        {picked === undefined ? null : picked.canPickModel ? (
+          <Field label="模型" hint={`留空用 ${picked.id} 自己的默认模型`}>
+            <Input
+              value={draft.model ?? ''}
+              disabled={locked}
+              className="mono"
+              placeholder={MODEL_PLACEHOLDER[picked.id] ?? '模型名'}
+              onChange={(e) => {
+                const next = e.target.value.trim()
+                setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
+              }}
+            />
+          </Field>
+        ) : (
+          <Field label="模型">
+            <p className="text-xs text-ink-faint">
+              这个版本的 {picked.id} 没有 <span className="mono">--model</span> 参数，
+              只能用它自己的默认模型。
+            </p>
+          </Field>
+        )}
 
         <Field label="项目" hint="任务在它派生出来的 worktree 里执行，做完再合回基线">
           <div className="rounded-md border border-hairline px-3 py-2">

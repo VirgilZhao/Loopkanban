@@ -15,6 +15,7 @@ const CAPS: AgentCaps = {
   streaming: true,
   canPinSessionId: true,
   canResume: true,
+  canPickModel: true,
   permissionTiers: ['strict', 'standard', 'yolo'],
   help: parseHelp(fixture('claude-help.txt')),
 }

@@ -63,12 +63,22 @@ export function TaskCard({ task, now, selected, liveTool, skip, projectName, onS
         <span className="flex-1" />
         {archived ? <Archive className="size-3 text-ink-faint" /> : null}
         {task.preferredProvider === undefined ? null : (
-          <span className="chrome-label !text-[8px]">{task.preferredProvider}</span>
+          // 指定了模型就一并标出来：覆盖过默认值这件事，一眼看得见才有意义。
+          <span className="chrome-label !text-[8px]">
+            {task.preferredProvider}{task.model === undefined ? '' : ` · ${task.model}`}
+          </span>
         )}
         <span className="lamp" data-state={archived ? 'idle' : task.column} />
       </div>
 
-      <p className={cn('mt-1.5 line-clamp-2 font-medium text-ink', running && 'ps-1.5')}>{task.subject}</p>
+      {/* 卡片正文就是描述本身：任务没有独立标题，两行放不下的用省略号收住。 */}
+      {task.description.trim().length === 0 ? (
+        <p className={cn('mt-1.5 text-ink-faint/70 italic', running && 'ps-1.5')}>还没写内容</p>
+      ) : (
+        <p className={cn('mt-1.5 line-clamp-2 whitespace-pre-wrap text-ink', running && 'ps-1.5')}>
+          {task.description.trim()}
+        </p>
+      )}
 
       {running && liveTool !== undefined ? (
         <p className="mono mt-1.5 flex items-center gap-1.5 ps-1.5 text-[10px] text-sodium">

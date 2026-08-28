@@ -92,6 +92,17 @@ export const MIGRATIONS: readonly string[] = [
   // 写入范围（建议性的并发冲突预警）退场：每个任务现在都在项目派生的
   // 独立 worktree 里干活，冲突推迟到合并时由 git 处理，比前缀猜测准确得多。
   `ALTER TABLE tasks DROP COLUMN write_scopes_json;`,
+  // 标题退场，描述成为卡片的全部内容。旧数据一个字都不能丢：描述为空就
+  // 直接搬过去，两边都有就把标题拼在描述前面 —— 它本来就是那段话的第一句。
+  `
+  UPDATE tasks SET description = CASE
+    WHEN TRIM(description) = '' THEN subject
+    ELSE subject || char(10) || char(10) || description
+  END;
+  ALTER TABLE tasks DROP COLUMN subject;
+  `,
+  // 指定执行器之后还能指定模型。留空就用那个 CLI 自己的默认。
+  `ALTER TABLE tasks ADD COLUMN model TEXT;`,
 ]
 
 /** 当前代码期望的结构版本。 */

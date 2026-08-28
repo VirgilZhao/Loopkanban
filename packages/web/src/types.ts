@@ -25,12 +25,15 @@ export interface Task {
   revision: number
   column: Column
   position: number
-  subject: string
+  /** 卡片的全部内容。没有单独的标题；要显示"叫什么"时取第一行。 */
   description: string
+  /** 验收标准，可选。 */
   acceptance: string[]
   repoPath: string
   baseBranch: string
   preferredProvider?: string
+  /** 指定模型；留空用该 CLI 自己的默认。 */
+  model?: string
   blockedBy: string[]
   lease?: Lease
   feedback?: string
@@ -42,10 +45,10 @@ export interface Task {
 
 /** 允许人工编辑的字段。 */
 export interface TaskEdit {
-  subject?: string
   description?: string
   acceptance?: string[]
   preferredProvider?: string | undefined
+  model?: string | undefined
 }
 
 /** 目录选择框的一层：当前目录、上一级、以及下面的子目录。 */
@@ -84,6 +87,8 @@ export interface Agent {
   streaming: boolean
   canPinSessionId: boolean
   canResume: boolean
+  /** 能否指定模型。不支持的 CLI 界面上直接没有这一栏。 */
+  canPickModel: boolean
   permissionTiers: string[]
   /** 档位语义与别家不一致时的警示；有就必须显示出来。 */
   permissionCaveat?: PermissionCaveat

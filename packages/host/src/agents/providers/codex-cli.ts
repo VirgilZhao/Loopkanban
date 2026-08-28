@@ -126,6 +126,7 @@ export const codexCliProvider: AgentProvider = {
       // codex 的 thread_id 由它自己生成，我们只能事后从事件里捞。
       canPinSessionId: false,
       canResume,
+      canPickModel: hasFlag(help, 'model'),
       permissionTiers: supportedTiers(choicesOf(help, 'sandbox'), help),
       help,
       ...(canResume ? { resumeHelp } : {}),

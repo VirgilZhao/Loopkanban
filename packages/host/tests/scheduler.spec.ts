@@ -39,14 +39,15 @@ function provider(id: string, lines: string[] = [JSON.stringify({ kind: 'finishe
 
 const caps = (id: string): AgentCaps => ({
   id, bin: '/fake', version: '1.0.0', streaming: true,
-  canPinSessionId: false, canResume: false, permissionTiers: ['standard'], help: parseHelp(''),
+  canPinSessionId: false, canResume: false, canPickModel: true,
+  permissionTiers: ['standard'], help: parseHelp(''),
 })
 
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
-    subject: id, description: '', acceptance: ['ok'],
+    description: id, acceptance: ['ok'],
     repoPath: repo, baseBranch: 'main', blockedBy: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }

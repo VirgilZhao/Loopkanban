@@ -165,6 +165,7 @@ export const opencodeCliProvider: AgentProvider = {
       // 会话 id 由 opencode 自己生成（ses_…），我们只能从事件里捞。
       canPinSessionId: false,
       canResume: hasFlag(help, 'session'),
+      canPickModel: hasFlag(help, 'model'),
       permissionTiers: supportedTiers(help),
       // 档位名字对不上实际约束，这句话必须一路传到界面上。
       permissionCaveat: OPENCODE_PERMISSION_CAVEAT,

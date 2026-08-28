@@ -75,12 +75,12 @@ interface TaskRow {
   revision: number
   column_name: string
   position: number
-  subject: string
   description: string
   acceptance_json: string
   repo_path: string
   base_branch: string
   preferred_provider: string | null
+  model: string | null
   blocked_by_json: string
   lease_json: string | null
   feedback: string | null
@@ -113,12 +113,12 @@ function toTask(row: TaskRow): Task {
     revision: row.revision,
     column: row.column_name as Column,
     position: row.position,
-    subject: row.subject,
     description: row.description,
     acceptance: JSON.parse(row.acceptance_json) as string[],
     repoPath: row.repo_path,
     baseBranch: row.base_branch,
     ...(preferred === null ? {} : { preferredProvider: preferred }),
+    ...(row.model === null ? {} : { model: row.model }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
@@ -244,15 +244,15 @@ export class Storage {
   createTask(task: Task): void {
     this.db.prepare(`
       INSERT INTO tasks (
-        id, project_id, revision, column_name, position, subject, description,
-        acceptance_json, repo_path, base_branch, preferred_provider,
+        id, project_id, revision, column_name, position, description,
+        acceptance_json, repo_path, base_branch, preferred_provider, model,
         blocked_by_json, lease_json, feedback, archived_at,
         created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
-      task.subject, task.description, JSON.stringify(task.acceptance),
-      task.repoPath, task.baseBranch, task.preferredProvider ?? null,
+      task.description, JSON.stringify(task.acceptance),
+      task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
       JSON.stringify(task.blockedBy),
       task.lease === undefined ? null : JSON.stringify(task.lease),
       task.feedback ?? null,
@@ -286,15 +286,15 @@ export class Storage {
   commitTask(next: Task): boolean {
     const result = this.db.prepare(`
       UPDATE tasks SET
-        revision = ?, column_name = ?, position = ?, subject = ?, description = ?,
-        acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?,
+        revision = ?, column_name = ?, position = ?, description = ?,
+        acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
         blocked_by_json = ?, lease_json = ?, feedback = ?,
         archived_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
-      next.revision, next.column, next.position, next.subject, next.description,
+      next.revision, next.column, next.position, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
-      next.preferredProvider ?? null,
+      next.preferredProvider ?? null, next.model ?? null,
       JSON.stringify(next.blockedBy),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.feedback ?? null,

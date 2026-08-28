@@ -105,28 +105,28 @@ async function seed(storage: Storage, repoPath: string): Promise<void> {
     createdAt: now,
   })
 
-  const samples: { id: string; column: Task['column']; subject: string; acceptance: string[] }[] = [
+  const samples: { id: string; column: Task['column']; description: string; acceptance: string[] }[] = [
     {
       id: 't-welcome', column: 'backlog',
-      subject: '把这张卡补上验收标准，它就能拖进 Ready 了',
+      description: '把这张卡改成你自己的任务 —— 卡上写什么，Agent 就照着做什么。',
       acceptance: [],
     },
     {
       id: 't-sample-1', column: 'backlog',
-      subject: '示例：给某个模块补上边界情况的单测',
+      description: '示例：给某个模块补上边界情况的单测',
       acceptance: ['新增测试覆盖空输入与超长输入', '现有测试全部通过'],
     },
     {
       id: 't-sample-2', column: 'backlog',
-      subject: '示例：改掉这两张卡的内容，换成你自己的任务',
-      acceptance: ['需求写清楚', '验收标准可判定'],
+      description: '示例：验收标准是可选的，但写清楚会让 Agent 和你自己都更好判定做没做完。',
+      acceptance: [],
     },
   ]
   for (const [index, sample] of samples.entries()) {
     storage.createTask({
       id: asTaskId(sample.id), projectId, revision: 1,
       column: sample.column, position: index + 1,
-      subject: sample.subject, description: '',
+      description: sample.description,
       acceptance: sample.acceptance,
       repoPath, baseBranch,
       blockedBy: [],

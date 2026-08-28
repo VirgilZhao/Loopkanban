@@ -9,6 +9,7 @@ import {
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
+import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
 
@@ -184,7 +185,9 @@ export function RunPanel({
               <span className="chrome-label !text-[9px]">{task.column}</span>
             </div>
             <DialogTitle asChild>
-              <h2 className="mt-2 text-[15px] font-semibold leading-snug text-ink">{task.subject}</h2>
+              <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug text-ink">
+                {taskTitle(task)}
+              </h2>
             </DialogTitle>
             <DialogDescription className="mt-1 text-xs text-ink-faint">
               {project?.name ?? '未知项目'} · 基线 <span className="mono">{task.baseBranch}</span>

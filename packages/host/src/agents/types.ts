@@ -31,6 +31,13 @@ export interface AgentCaps {
   readonly canPinSessionId: boolean
   /** 能否续跑上一次会话。 */
   readonly canResume: boolean
+  /**
+   * 能否指定模型（`--model` / `-m`）。
+   *
+   * 和别的能力一样是**探测**出来的而不是写死的：不支持的 CLI 在界面上
+   * 直接没有这一栏，而不是让用户填完再被运行时拒绝。
+   */
+  readonly canPickModel: boolean
   /** 这个版本真正支持的权限档位。UI 只应展示这些。 */
   readonly permissionTiers: readonly PermissionTier[]
   /**

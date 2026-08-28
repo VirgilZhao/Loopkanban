@@ -204,18 +204,26 @@ export function RunPanel({
       <DialogContent
         showCloseButton={false}
         onEscapeKeyDown={(event) => { if (preview !== null) event.preventDefault() }}
-        className="flex h-[82vh] max-h-[820px] w-[860px] max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg sm:max-w-[92vw]"
+        className={cn(
+          'flex h-[82vh] max-h-[820px] gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg',
+          // 预览是在右边**新开一栏**，不是盖在卡上面：文档和需求本来就要对着
+          // 看 —— 盖上去的话，读到一半想核对验收标准还得先把文档关掉。
+          // 任务那栏缩到正常的一半，弹窗整体让出地方给文档。
+          preview === null
+            ? 'w-[860px] max-w-[92vw] sm:max-w-[92vw]'
+            : 'w-[1320px] max-w-[96vw] sm:max-w-[96vw]',
+          'transition-[width,max-width] duration-200',
+        )}
       >
-        {/*
-          预览盖上来的时候，底下这一整块要连键盘也够不着。
-
-          它只是被一层不透明的东西挡住，DOM 里还在 —— 不置 inert 的话，Tab 会
-          穿过预览走到后面的输入框里，人对着一个看不见的框打字。`contents` 是为了
-          让这层包装不参与布局：它存在只为承担 inert，不该动到弹窗的排布。
-        */}
-        <div className="contents" inert={preview !== null}>
-          <header className="flex items-start gap-2 border-b border-hairline px-4 py-3">
-            <div className="min-w-0 flex-1">
+        {/* 任务这一栏。开着预览时缩到 430px —— 正好是它平时的一半。 */}
+        <div className={cn(
+          'flex min-w-0 flex-col',
+          preview === null ? 'flex-1' : 'w-[430px] max-w-[45%] flex-none',
+        )}>
+          {/* 缩到半幅时按钮挤不下就整组换行 —— 标题给一个下限，不然
+              `min-w-0` 会让它一路被压成一条窄缝，而按钮仍旧赖在同一行。 */}
+          <header className="flex flex-wrap items-start gap-2 border-b border-hairline px-4 py-3">
+            <div className="min-w-[240px] flex-1">
               <div className="flex items-center gap-2">
                 <span className="tag">{task.id}</span>
                 <span className="lamp" data-state={archived ? 'idle' : task.column} />
@@ -239,42 +247,46 @@ export function RunPanel({
                 <span className="mono">{task.baseBranch}</span>
               </DialogDescription>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={busy || task.column === 'running'}
-              {...(task.column === 'running' ? { title: t('panel.archiveBlocked') } : {})}
-              onClick={() => {
-                void act(() => (archived
-                  ? api.unarchive(task.id, task.revision)
-                  : api.archive(task.id, task.revision)))
-              }}
-            >
-              {archived
-                ? <><ArchiveRestore />{t('panel.unarchive')}</>
-                : <><Archive />{t('panel.archive')}</>}
-            </Button>
-            {deletable ? (
+            {/* 三个按钮当一整组换行 —— 拆开换会变成「归档」留在标题那行、
+                「删除」孤零零掉到下一行，看着像排版出了岔子。 */}
+            <div className="ms-auto flex items-center gap-2">
               <Button
                 variant="outline"
                 size="sm"
-                disabled={busy}
-                title={confirmDelete ? t('panel.deleteArmed') : t('panel.deleteHint')}
+                disabled={busy || task.column === 'running'}
+                {...(task.column === 'running' ? { title: t('panel.archiveBlocked') } : {})}
                 onClick={() => {
-                  if (!confirmDelete) { setConfirmDelete(true); return }
-                  remove()
+                  void act(() => (archived
+                    ? api.unarchive(task.id, task.revision)
+                    : api.archive(task.id, task.revision)))
                 }}
-                className={cn(
-                  'border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail',
-                  confirmDelete && 'border-lamp-fail bg-lamp-fail/10',
-                )}
               >
-                <Trash2 />{confirmDelete ? t('panel.deleteConfirm') : t('panel.delete')}
+                {archived
+                  ? <><ArchiveRestore />{t('panel.unarchive')}</>
+                  : <><Archive />{t('panel.archive')}</>}
               </Button>
-            ) : null}
-            <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={t('panel.close')} title={t('panel.closeHint')}>
-              <X />
-            </Button>
+              {deletable ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  title={confirmDelete ? t('panel.deleteArmed') : t('panel.deleteHint')}
+                  onClick={() => {
+                    if (!confirmDelete) { setConfirmDelete(true); return }
+                    remove()
+                  }}
+                  className={cn(
+                    'border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail',
+                    confirmDelete && 'border-lamp-fail bg-lamp-fail/10',
+                  )}
+                >
+                  <Trash2 />{confirmDelete ? t('panel.deleteConfirm') : t('panel.delete')}
+                </Button>
+              ) : null}
+              <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={t('panel.close')} title={t('panel.closeHint')}>
+                <X />
+              </Button>
+            </div>
           </header>
 
           {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"和"删除"

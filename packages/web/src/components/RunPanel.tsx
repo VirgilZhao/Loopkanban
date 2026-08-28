@@ -4,8 +4,8 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
 import {
-  Archive, ArchiveRestore, Bot, Check, ExternalLink, GitBranch, GitMerge, GitPullRequest, Paperclip,
-  Play, RefreshCw, Send, Square, Trash2, TriangleAlert, Upload, User, X,
+  Archive, ArchiveRestore, Bot, Check, CircleAlert, ExternalLink, GitBranch, GitMerge,
+  GitPullRequest, Paperclip, Play, RefreshCw, Send, Square, Trash2, TriangleAlert, Upload, User, X,
 } from 'lucide-react'
 import { api, ApiError, subscribeRun, type NextRound } from '@/api.ts'
 import { AttachmentChip } from '@/components/Attachments.tsx'
@@ -14,7 +14,7 @@ import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { TestEnvPanel } from '@/components/TestEnvPanel.tsx'
 import { summarize } from '@/lib/events.ts'
-import { maybe, useT } from '@/lib/i18n.tsx'
+import { explain, maybe, useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
 import { modelOptions, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
@@ -47,12 +47,11 @@ interface Props {
   project: Project | null
   agents: Agent[]
   onChanged: () => void
-  onError: (code: string, detail: string) => void
   onClose: () => void
 }
 
 export function RunPanel({
-  task, project, agents, onChanged, onError, onClose,
+  task, project, agents, onChanged, onClose,
 }: Props): React.JSX.Element {
   const t = useT()
   const [runs, setRuns] = useState<Run[]>([])
@@ -71,6 +70,14 @@ export function RunPanel({
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [tab, setTab] = useState<Tab>('spec')
+  /*
+   * 这张卡上出的岔子，就摆在这张卡上。
+   *
+   * 以前它是交给看板顶上那条通知的 —— 而那条通知在弹窗**背后**：点了"通过"
+   * 之后什么都没发生，原因躺在一块看不见的地方。派活、验收、改需求、传附件，
+   * 全都是在这张弹窗里按下去的，回话就该回在这儿。
+   */
+  const [failure, setFailure] = useState<string | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
   // 跑过几轮 = 这张卡有几条执行记录。第二轮起 Agent 接的是同一个会话（见
@@ -175,7 +182,10 @@ export function RunPanel({
 
   // 换了一张卡就把"上膛"收回去 —— 上一张卡的危险状态不该跟着漂到下一张。
   // 预览与分页同理：上一张卡的文档不该盖在这一张上面，新卡也该从规格看起。
-  useEffect(() => { setConfirmDelete(false); setPreview(null); setTab('spec') }, [task.id])
+  // 那条错误也一样：它说的是上一张卡上的事。
+  useEffect(() => {
+    setConfirmDelete(false); setPreview(null); setTab('spec'); setFailure(null)
+  }, [task.id])
 
   // 上膛也不该一直挂着：手滑点开之后忘了，下一次随手一点就把卡删了。
   useEffect(() => {
@@ -221,14 +231,24 @@ export function RunPanel({
     return () => { document.removeEventListener('keydown', onKey, true) }
   }, [preview])
 
+  /**
+   * 把一次失败摆到面板顶上。
+   *
+   * 每个动作按下去之前先清一次：上一次的错误留在那儿，会让人以为刚点的这下
+   * 也失败了。
+   */
+  const reportCode = (code: string, detail: string): void => { setFailure(explain(t, code, detail)) }
+  const report = (error: unknown): void => {
+    if (error instanceof ApiError) reportCode(error.code, error.message)
+  }
+
   /** 删除这张卡。删完面板里已经没有可看的东西了，直接关掉。 */
   const remove = (): void => {
     setBusy(true)
+    setFailure(null)
     void api.remove(task.id, task.revision)
       .then(() => { onChanged(); onClose() })
-      .catch((error: unknown) => {
-        if (error instanceof ApiError) onError(error.code, error.message)
-      })
+      .catch(report)
       .finally(() => { setBusy(false); setConfirmDelete(false) })
   }
 
@@ -238,11 +258,10 @@ export function RunPanel({
   /** 把这张卡派给某个执行器。 */
   const dispatch = (provider: string): void => {
     setBusy(true)
+    setFailure(null)
     void api.run(task.id, provider)
       .then(() => { onChanged() })
-      .catch((error: unknown) => {
-        if (error instanceof ApiError) onError(error.code, error.message)
-      })
+      .catch(report)
       .finally(() => { setBusy(false) })
   }
 
@@ -254,12 +273,13 @@ export function RunPanel({
    */
   const act = async (call: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true)
+    setFailure(null)
     try {
       await call()
       onChanged()
       return true
     } catch (error) {
-      if (error instanceof ApiError) onError(error.code, error.message)
+      report(error)
       return false
     } finally {
       setBusy(false)
@@ -309,8 +329,8 @@ export function RunPanel({
           onChanged()
           return
         }
-        onError(error.code, error.message)
-        setPrNote({ tone: 'warn', text: error.message })
+        // 说在 PR 那一段里就够了 —— 按钮就在它上面，不必再往面板顶上抄一份。
+        setPrNote({ tone: 'warn', text: explain(t, error.code, error.message) })
       })
       .finally(() => { setBusy(false) })
   }
@@ -434,6 +454,25 @@ export function RunPanel({
             </div>
           </header>
 
+          {/* 出岔子就说在这儿 —— 紧挨着刚才按下去的那些按钮，而不是弹窗背后
+              的看板上。留到人自己收走：一条一闪而过的提示，等于没说。 */}
+          {failure === null ? null : (
+            <div
+              role="alert"
+              className="flex items-start gap-2 border-b border-lamp-fail/40 bg-lamp-fail/[0.07] px-4 py-2.5"
+            >
+              <CircleAlert className="mt-[2px] size-3.5 flex-none text-lamp-fail" />
+              <p className="min-w-0 flex-1 text-xs leading-relaxed text-lamp-fail">{failure}</p>
+              <button
+                type="button"
+                onClick={() => { setFailure(null) }}
+                className="chrome-label flex-none rounded-md border border-lamp-fail/30 px-1.5 py-0.5 text-lamp-fail opacity-70 transition-opacity hover:opacity-100"
+              >
+                {t('panel.errorDismiss')}
+              </button>
+            </div>
+          )}
+
           {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"和"删除"
               两个动作（删除和归档指向同一个方向，不必先取出来再删一次）。
               与其把按钮摆在那儿等服务端拒绝，不如直接换成一条说明。 */}
@@ -505,7 +544,11 @@ export function RunPanel({
                   onClick={() => {
                     if (latest === undefined) return
                     setBusy(true)
-                    void api.cancel(latest.id).then(() => { onChanged() }).finally(() => { setBusy(false) })
+                    setFailure(null)
+                    void api.cancel(latest.id)
+                      .then(() => { onChanged() })
+                      .catch(report)
+                      .finally(() => { setBusy(false) })
                   }}
                   className="border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
                 >
@@ -519,7 +562,7 @@ export function RunPanel({
               放在验收动作**上面** —— 先验，再判。反过来的话，按钮的顺序是在
               暗示可以先盖章再验货。 */}
           {!archived && task.column === 'review' ? (
-            <TestEnvPanel task={task} project={project} onChanged={onChanged} onError={onError} />
+            <TestEnvPanel task={task} project={project} onChanged={onChanged} onError={reportCode} />
           ) : null}
 
           {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
@@ -679,7 +722,7 @@ export function RunPanel({
                 project={project}
                 agents={agents}
                 busy={busy}
-                onError={onError}
+                onError={reportCode}
                 // 附件是即时生效的：传完 / 删完要让看板知道，卡片上那枚回形针
                 // 的数字才跟得上。**不关弹窗** —— 人多半还要接着写需求。
                 onChanged={onChanged}
@@ -697,7 +740,6 @@ export function RunPanel({
                   agents={agents}
                   comments={comments}
                   busy={busy}
-                  onError={onError}
                   onOpenFile={setPreview}
                   /** Review 与 Done 里留言都会把卡送回队列，按钮上得先说清楚。 */
                   requeues={canTalk}
@@ -711,12 +753,9 @@ export function RunPanel({
                       onClose()
                       return null
                     } catch (error) {
-                      // 失败留在原地。看板上那条通知在弹窗背后，所以错误还要
-                      // 回给输入框自己显示一遍 —— 否则只看得见一个空框。
-                      if (error instanceof ApiError) {
-                        onError(error.code, error.message)
-                        return error.message
-                      }
+                      // 失败留在原地，那句话就贴在输入框下面 —— 草稿还在框里，
+                      // 人的下一个动作就在那儿，没必要再往面板顶上抄一份。
+                      if (error instanceof ApiError) return explain(t, error.code, error.message)
                       return t('talk.sendFailed')
                     } finally {
                       setBusy(false)
@@ -884,14 +923,12 @@ function Empty({ text }: { text: string }): React.JSX.Element {
  * 和这句话失去关系。文件**选完就传**（丢一个已经传上去的文件是最恼火的那种
  * 意外），发送时才认领给这条留言。
  */
-function Discussion({ task, agents, comments, busy, requeues, onError, onOpenFile, onSend }: {
+function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend }: {
   task: Task
   agents: Agent[]
   comments: TaskComment[]
   busy: boolean
   requeues: boolean
-  /** 传附件失败时也往看板那条通知上报一份 —— 面板可能已经滚到别处了。 */
-  onError: (code: string, detail: string) => void
   /** 点开回复里的一条文档链接。 */
   onOpenFile: (path: string) => void
   /** 发出去；成功回 null，失败回一句能显示给人看的话（草稿会原样留着）。 */
@@ -957,12 +994,9 @@ function Discussion({ task, agents, comments, busy, requeues, onError, onOpenFil
         } catch (error) {
           // 非 ApiError（host 挂了、连接断了）也要说一句：一声不吭地把
           // 文件吞掉，人只会看着空空的那一行猜到底传上去没有。
-          if (error instanceof ApiError) {
-            onError(error.code, error.message)
-            setFailure(error.message)
-          } else {
-            setFailure(t('talk.attachFailed'))
-          }
+          setFailure(error instanceof ApiError
+            ? explain(t, error.code, error.message)
+            : t('talk.attachFailed'))
           // 一个传失败就停下：多半是超限，剩下的接着传只会连着弹同一条错误。
           break
         } finally {
@@ -977,12 +1011,9 @@ function Discussion({ task, agents, comments, busy, requeues, onError, onOpenFil
       .then(() => { setFiles((prev) => prev.filter((item) => item.id !== attachment.id)) })
       .catch((error: unknown) => {
         // 同上：撤不掉就得说，否则那个叉点下去没反应，人只会一直点。
-        if (error instanceof ApiError) {
-          onError(error.code, error.message)
-          setFailure(error.message)
-        } else {
-          setFailure(t('talk.attachRemoveFailed'))
-        }
+        setFailure(error instanceof ApiError
+          ? explain(t, error.code, error.message)
+          : t('talk.attachRemoveFailed'))
       })
   }
 

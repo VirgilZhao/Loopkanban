@@ -149,10 +149,14 @@ const zh = {
   'column.running.hint': 'Agent 执行中',
   'column.review.hint': '等待人工验收 · 成败都在这儿',
   'column.done.hint': '已合并',
+  'column.review.failed': '{n} 张这一轮没跑成',
 
   // ── 卡片 ───────────────────────────────────────────────
   'card.empty': '还没写内容',
   'card.leaseExpired': '租约已过期 · 待回收',
+  'card.runFailed': '这一轮跑挂了 · {provider}',
+  'card.runAborted': '这一轮被终止 · {provider}',
+  'card.runFailedHint': '点开看日志：这张卡停在 Review 不是因为干完了，是因为没跑成',
   'card.draftCleanupFailed': '那张没写内容的新卡没能删掉，它还留在想法池里，请手动删一下。',
 
   // ── 调度器为什么没派它 ─────────────────────────────────
@@ -187,6 +191,7 @@ const zh = {
   'panel.accept': '通过',
   'panel.discard': '废弃',
   'panel.acceptNote': '通过只把改动提交到分支 {branch}，不动你的主工作区；废弃会删掉分支并把卡退回 Backlog。要它再改一版，去讨论里说 —— 留言会把卡送回队列。',
+  'panel.errorDismiss': '知道了',
   'panel.rounds': '第 {n} 轮',
   'panel.roundsHint': '这个会话跑过的轮次 —— 每派出去跑一次 +1，第二轮起接的是同一个 Agent 会话',
   'panel.round': '#{n}',
@@ -525,9 +530,13 @@ const en: Record<MessageKey, string> = {
   'column.running.hint': 'Agent at work',
   'column.review.hint': 'Waiting on you · pass and fail both land here',
   'column.done.hint': 'Merged',
+  'column.review.failed': '{n} didn’t finish this round',
 
   'card.empty': 'Nothing written yet',
   'card.leaseExpired': 'Lease expired · to be reclaimed',
+  'card.runFailed': 'This round failed · {provider}',
+  'card.runAborted': 'This round was stopped · {provider}',
+  'card.runFailedHint': 'Open it and read the log — this card is in Review because the run didn’t finish, not because it did',
   'card.draftCleanupFailed': 'That blank new card could not be removed — it is still in the idea pool, so delete it by hand.',
 
   'skip.blocked-by-dependency': 'Unfinished dependencies: {0}',
@@ -560,6 +569,7 @@ const en: Record<MessageKey, string> = {
   'panel.accept': 'Accept',
   'panel.discard': 'Discard',
   'panel.acceptNote': 'Accepting only commits the work to branch {branch}; your main worktree is untouched. Discarding deletes the branch and sends the card back to Backlog. Want another pass? Say so in Talk — a comment requeues the card.',
+  'panel.errorDismiss': 'dismiss',
   'panel.rounds': 'round {n}',
   'panel.roundsHint': 'Rounds this session has run — +1 each time the card is handed out; from the second one on it resumes the same agent session',
   'panel.round': '#{n}',
@@ -836,6 +846,17 @@ export function useT(): Translate {
  */
 export function maybe(t: Translate, key: string, fallback: string): string {
   return key in zh ? t(key as MessageKey) : fallback
+}
+
+/**
+ * 领域错误码 → 用户能照做的说明。
+ *
+ * 服务端给的是错误码，人要的是"下一步该做什么"。文案在 `err.*` 里两种语言
+ * 各一份；没有对应文案的码连同原文一起端出来 —— 咽掉它只会让人对着一个
+ * 没反应的按钮发呆。
+ */
+export function explain(t: Translate, code: string, detail: string): string {
+  return maybe(t, `err.${code}`, `${code} · ${detail}`)
 }
 
 /**

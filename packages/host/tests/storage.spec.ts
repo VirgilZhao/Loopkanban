@@ -176,6 +176,23 @@ describe('Run', () => {
     store.createRun(run({ id: asRunId('done'), status: 'completed', endedAt: T0 + 1 }))
     expect(store.listOrphanRuns().map((r) => r.id)).toEqual(['alive'])
   })
+
+  it('latestRuns：每张卡只回最近那一次，跑过多轮的按 started_at 认新', () => {
+    store.createTask(task({ id: 't2' }))
+    store.createRun(run({ id: asRunId('r1'), status: 'failed', endedAt: T0 + 1 }))
+    store.createRun(run({ id: asRunId('r2'), startedAt: T0 + 9, status: 'completed', endedAt: T0 + 10 }))
+    store.createRun(run({ id: asRunId('r3'), taskId: asTaskId('t2'), status: 'aborted', endedAt: T0 + 2 }))
+
+    const latest = store.latestRuns()
+    expect(latest.get(asTaskId('t1'))).toMatchObject({ id: 'r2', status: 'completed' })
+    expect(latest.get(asTaskId('t2'))).toMatchObject({ id: 'r3', status: 'aborted' })
+  })
+
+  it('latestRuns：没跑过的卡不在里面 —— 缺席就是"还没派过"', () => {
+    store.createTask(task({ id: 't2' }))
+    store.createRun(run())
+    expect([...store.latestRuns().keys()]).toEqual(['t1'])
+  })
 })
 
 describe('deleteTask', () => {

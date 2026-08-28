@@ -51,6 +51,19 @@ export interface Task {
    */
   readonly model?: string | undefined
   readonly blockedBy: readonly TaskId[]
+  /**
+   * 关联的同项目卡片。**是引用，不是依赖** —— 它不拦调度、不影响流转，
+   * 只是"干这张卡之前先看看那几张"。
+   *
+   * 与 {@link blockedBy} 分开是刻意的：依赖是"没做完就不许开工"，一条
+   * 关联却常常指向一张永远不会做完的卡（一份长期的规格、一个平行进行的
+   * 改造）。混成一个字段的话，写下"参考它"就等于把自己锁死。
+   *
+   * 只允许指向同项目的卡：跨项目的引用在派活时会指向另一个仓库里的东西，
+   * Agent 既读不到也用不上。这条约束需要知道别的卡长什么样，所以由调用方
+   * （server / MCP）把关；这一层只负责去重与去掉自指。
+   */
+  readonly relatedTo: readonly TaskId[]
   /** `undefined` 表示未被占用；清除租约就是把它置回 undefined。 */
   readonly lease?: Lease | undefined
   /**
@@ -266,23 +279,30 @@ export function deleteTask(task: Task, request: DeleteRequest): DomainResult<Tas
 }
 
 /**
- * 摘掉一条指向已删除任务的依赖。
+ * 摘掉所有指向已删除任务的引用：依赖与关联都算。
  *
  * 这是引用完整性的修补，不是人工编辑：`blockedBy` 里留着一个已经不存在的
  * id，调度器会永远算它"依赖未完成"，那张卡再也不会被派出去，界面上却只
- * 显示一个查无此卡的 id —— 没有任何操作能解开它。
+ * 显示一个查无此卡的 id —— 没有任何操作能解开它。`relatedTo` 里的悬空引用
+ * 不会卡住调度，但它会被写进 TASK.md 交给 Agent，那是更糟的一种坏：**一段
+ * 指向不存在之物的需求**，Agent 只能去猜。
  *
- * 刻意不设列与归档的守卫。running 的卡同样可能依赖被删的那张，而它恰恰
+ * 刻意不设列与归档的守卫。running 的卡同样可能引用被删的那张，而它恰恰
  * 最不能留着悬空引用：打回之后它还要重新排队。
  *
  * @param task - 待检查的任务。
  * @param on - 被删掉的任务 id。
  * @param now - 当前时间。
- * @returns 摘除后的新值；本来就没依赖它则返回 null。
+ * @returns 摘除后的新值；本来就没引用它则返回 null。
  */
-export function dropDependency(task: Task, on: TaskId, now: number): Task | null {
-  if (!task.blockedBy.includes(on)) return null
-  return bump(task, { blockedBy: task.blockedBy.filter((id) => id !== on) }, now)
+export function dropReferences(task: Task, on: TaskId, now: number): Task | null {
+  const blocked = task.blockedBy.includes(on)
+  const related = task.relatedTo.includes(on)
+  if (!blocked && !related) return null
+  return bump(task, {
+    ...(blocked ? { blockedBy: task.blockedBy.filter((id) => id !== on) } : {}),
+    ...(related ? { relatedTo: task.relatedTo.filter((id) => id !== on) } : {}),
+  }, now)
 }
 
 export interface MoveRequest {
@@ -333,6 +353,7 @@ export interface TaskEdit {
   readonly preferredProvider?: string | undefined
   readonly model?: string | undefined
   readonly blockedBy?: readonly TaskId[]
+  readonly relatedTo?: readonly TaskId[]
 }
 
 export interface EditRequest {
@@ -361,6 +382,11 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
 
   const { edit } = request
   const acceptance = edit.acceptance?.map((item) => item.trim()).filter((item) => item.length > 0)
+  // 去重、去掉自指。「同项目」那一条要看别的卡，不在这一层的视野里 ——
+  // 由调用方在存下来之前把关（见 server 的 resolveRelated）。
+  const relatedTo = edit.relatedTo === undefined
+    ? undefined
+    : [...new Set(edit.relatedTo)].filter((id) => id !== task.id)
 
   return succeed(bump(task, {
     ...(edit.description === undefined ? {} : { description: edit.description }),
@@ -368,6 +394,7 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
     ...('preferredProvider' in edit ? { preferredProvider: edit.preferredProvider } : {}),
     ...('model' in edit ? { model: edit.model } : {}),
     ...(edit.blockedBy === undefined ? {} : { blockedBy: [...edit.blockedBy] }),
+    ...(relatedTo === undefined ? {} : { relatedTo }),
   }, request.now))
 }
 

@@ -28,7 +28,7 @@ function seed(testCommand?: string): void {
   const task: Task = {
     id: TASK, projectId: PROJECT, revision: 1, column: 'review', position: 1,
     description: '一张卡', acceptance: [], repoPath: '/repo', baseBranch: 'main',
-    blockedBy: [], createdAt: T0, updatedAt: T0,
+    blockedBy: [], relatedTo: [], createdAt: T0, updatedAt: T0,
   }
   store.createTask(task)
   store.createRun({
@@ -300,7 +300,7 @@ describe('端口分配', () => {
     store.createTask({
       id: other, projectId: PROJECT, revision: 1, column: 'review', position: 2,
       description: '另一张卡', acceptance: [], repoPath: '/repo', baseBranch: 'main',
-      blockedBy: [], createdAt: T0, updatedAt: T0,
+      blockedBy: [], relatedTo: [], createdAt: T0, updatedAt: T0,
     })
     store.createRun({
       id: asRunId('r2'), taskId: other, provider: 'claude', cliVersion: '1',

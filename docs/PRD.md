@@ -145,6 +145,7 @@ interface Task {
   preferredProvider?: string       // 只能选已探测到的
   model?: string                   // 指定模型；留空用该 CLI 自己的默认
   blockedBy: TaskId[]
+  relatedTo: TaskId[]              // 关联的同项目卡片：引用，不是依赖
   lease?: { runId: RunId; provider: string; acquiredAt: string; expiresAt: string }
   archivedAt?: string              // 归档标记，正交于 column
 }
@@ -265,6 +266,28 @@ Word。所以卡片可以挂附件，派活时它们跟着一起交给 CLI。
 TASK.md 里它们也不进「附件」一节，而是摆在自己那条留言底下：一张截图脱离了
 说它的那句话就只是一张来历不明的图，摆进需求清单反而会被当成一条新要求。最新
 那条反馈带的文件在 prompt 里再单独点一次名 —— 它多半就是这一轮要看的东西。
+### 关联是引用，不是依赖
+
+一张卡常常要参考另一张：接口是上一张定的、命名沿用那次改造、这次只是把同一件事
+再做一遍。`blockedBy` 表达不了这个 —— 它是「没做完就不许开工」，而参考的对象
+往往是一张**永远不会做完**的卡（一份长期的规格、一个平行推进的改造）。写下
+"参考它"就等于把自己锁死，于是人只好不写，Agent 也就永远不知道那张卡的存在。
+
+所以 `relatedTo` 与 `blockedBy` 是两个字段：前者不拦调度、不影响流转，只在派活时
+把那几张卡**连正文一起**展开进 TASK.md 的「关联任务」一节，并在 prompt 里再点一次名。
+
+三条边界：
+
+- **只能同项目**。任务在这个项目派生的 worktree 里干活，指向另一个仓库里的卡，
+  Agent 既读不到也用不上 —— 而它照样会被写进规格，变成一段没法照做的需求。
+  这条约束要看别的卡，领域层看不见，所以由 server / MCP 在存下来之前把关。
+- **写进规格的是此刻的库，不是建卡时的快照**。参考的那张卡改过需求、跑完进了
+  Done，这次执行看到的就该是新的样子。
+- **删卡时两种引用一起摘**（`dropReferences`）。悬空的依赖会让下游永远停在
+  "依赖未完成"；悬空的关联更糟 —— 它是一段指向不存在之物的需求，Agent 只能去猜。
+
+规格里还要**明写它们的身份**：只给一串 id 等于没给（Agent 查不到那张卡长什么样），
+而不声明"这是参考、不是这次的活"，它会顺手把参考资料里的验收标准也一并做掉。
 
 ### 卡片没有标题
 
@@ -737,7 +760,78 @@ Review**。改成 CAS 先落定，删除只是收拾场地，失败也不影响�
 
 ---
 
-## 6. 风险
+## 6. MCP：把看板交给 Agent
+
+`loopkanban mcp` 起一个 stdio 上的 MCP server，接到 Claude Code / Codex 之类的
+客户端上：
+
+```bash
+claude mcp add loopkanban -- loopkanban mcp
+```
+
+它**不直接开数据库，而是连正在跑的那个看板**（HTTP + token）。直连 SQLite 看着
+更省事，但派活要 Runner —— worktree、子进程、租约续期都在它手上，而 Runner 只活
+在看板那个进程里。两个进程各写一份状态的话，CAS 还在、事件总线却不在，界面上会
+看到一张自己动起来的卡。
+
+端口默认是随机的，而 MCP server 是被客户端悄悄拉起来的另一个进程，没人给它传参。
+所以看板启动时把地址写进 `<dataDir>/endpoint.json`，关站时删掉；**token 不写进去**
+—— 它已经在同一个目录的 `token` 文件里（0600），同一份秘密存两处只是多一个会对不上
+的地方。
+
+工具的取舍只有一条线：**Agent 能推动卡片，但不能给自己盖章。**
+
+| 给 | 不给 |
+|---|---|
+| `list_projects` / `list_agents` / `list_tasks` / `get_task` | `accept`（验收通过） |
+| `create_task` / `update_task` / `comment_task` | `discard`（废弃成果） |
+| `move_task`（只在 backlog ⇄ ready 之间） | `move_task → done` |
+| `claim_task` / `run_status` / `cancel_run` | `move_task → running`（那要租约，走 claim_task） |
+
+领域层专门堵死了 `running → done`，就是不让干活的人自己判定活干完了；把 accept
+接到 MCP 上等于给这道门配一把从里面开的钥匙。`move_task` 同理要挡住 `running`：
+领域层其实允许 `ready → running`（那是给认领留的入口），但从 MCP 搬过去会造出一张
+**没有租约的"运行中"卡** —— 看着在跑，实际没有任何进程，直到回收器把它拽回队列。
+
+两条实现上的取舍：
+
+- **协议自己写，不引 SDK**。stdio 传输就是一行一条 JSON-RPC，加上握手、列工具、
+  调工具三件事；"零运行时依赖"是这个项目的分发前提，为三件事引一棵依赖树不划算。
+- **工具失败不是协议失败**。看板拒绝一次调用（卡在跑、revision 冲突、关联跨了项目）
+  要作为 `isError` 的**内容**回过去，把原因原样带上。回 JSON-RPC error 的话，多数
+  客户端只显示一句 "tool failed"，Agent 连原因都看不到，只会原样重试。
+
+轮询用的 `GET /api/runs/:id/log` 与 SSE 同源同数据，游标也是同一个（`after` 对应
+`Last-Event-ID`）：浏览器开着面板适合推，而一次问一句的 Agent 不该抱着一条永远不
+结束的响应。截断在 SQL 里做（`readRecentEvents`）而不是查全了再切 —— 一次执行几万条
+事件是常事，而 host 是单线程的，它同时还在给别的 Run 推 SSE。
+
+### 把 token 交出去之前，先确认对面是谁
+
+地址文件是崩溃时留不下遗言的：进程被 SIGKILL、机器断电，`clearEndpoint` 都没机会跑，
+`endpoint.json` 就指着一个已经没人听的端口。而端口会被回收 —— 过一会儿那个号码可能
+属于另一个本机服务。此时若直接带着 cookie 去请求，我们就把**一个能在这台机器上起
+Agent、跑任意代码的凭据**递给了一个陌生进程，而它还长期有效（token 存在数据目录里，
+跨重启不变）。
+
+所以 `discoverBoard` 在返回之前过两道：写下这条记录的进程还活着吗（`process.kill(pid, 0)`），
+以及那个端口上应答的真是看板吗 —— 后者**不带 token** 问一句，看板会用 401
+`missing-token` 认领自己。端口真被别人占了的话，泄漏出去的只有"有人问过"。
+
+### 工具的入参 schema 是建议性的
+
+MCP 的 `inputSchema` 由客户端决定要不要校验，服务端这边什么保证都没有。所以工具
+自己必须把关：实测把 `acceptance: '一句话'` 透传给 PATCH 会让服务端 500（Agent 只
+看到一句"详情见运行日志"，照着重试），而 `description: 12345` 更糟 —— 它会被 SQLite
+的 TEXT 亲和性悄悄存成 `"12345.0"`，需求就此变样而没人报错。校验必须留住两条语义：
+键在不在决定"这次提没提到它"，null 是显式的清空。
+
+同理，认不出来的枚举值要当场拒绝而不是筛成空结果：`list_tasks({column:'todo'})` 回
+一个 `[]`，Agent 会据此断定"看板是空的"。
+
+---
+
+## 7. 风险
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
@@ -751,9 +845,9 @@ Review**。改成 CAS 先落定，删除只是收拾场地，失败也不影响�
 
 ---
 
-## 7. 后续方向
+## 8. 后续方向
 
-- 内置 MCP server，让 Agent 主动 `claim_task` / `complete_task` / `ask_human`（`claude` 和 `codex` 都支持 MCP，天然可接）
+- MCP 侧的 `ask_human`：Agent 中途卡住时主动问一句，而不是猜着做完再被打回
 - 沙箱加固（Linux Landlock 限制 Agent 只能写自己的 worktree）
 - GitHub Issues 双向同步
 - **多 Agent 竞赛**：同一任务同时派给 `claude` 和 `codex`，人类挑更好的实现 —— seam 设计让这个几乎免费

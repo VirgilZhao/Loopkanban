@@ -45,13 +45,15 @@ interface Props {
   task: Task
   /** 任务所属项目。任务干活的地方是它派生出来的 worktree。 */
   project: Project | null
+  /** 同项目的其它卡片，规格里挑关联用。 */
+  siblings: Task[]
   agents: Agent[]
   onChanged: () => void
   onClose: () => void
 }
 
 export function RunPanel({
-  task, project, agents, onChanged, onClose,
+  task, project, siblings, agents, onChanged, onClose,
 }: Props): React.JSX.Element {
   const t = useT()
   const [runs, setRuns] = useState<Run[]>([])
@@ -748,6 +750,7 @@ export function RunPanel({
               <TaskEditor
                 task={task}
                 project={project}
+                siblings={siblings}
                 agents={agents}
                 busy={busy}
                 onError={reportCode}

@@ -84,6 +84,11 @@ export interface Task {
   /** 指定模型；留空用该 CLI 自己的默认。 */
   model?: string
   blockedBy: string[]
+  /**
+   * 关联的同项目卡片。**是引用，不是依赖** —— 不拦调度、不影响流转，
+   * 只是"干这张卡之前先看看那几张"，派活时它们会被展开写进 TASK.md。
+   */
+  relatedTo: string[]
   lease?: Lease
   /** 归档时间；缺席表示没归档。归档正交于 column，不改变卡在哪一列。 */
   archivedAt?: number
@@ -155,6 +160,8 @@ export interface TaskEdit {
   acceptance?: string[]
   preferredProvider?: string | undefined
   model?: string | undefined
+  /** 关联的同项目卡片 id。空数组就是取消全部关联。 */
+  relatedTo?: string[]
 }
 
 /** 目录选择框的一层：当前目录、上一级、以及下面的子目录。 */

@@ -50,7 +50,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
     description: id, acceptance: ['ok'],
-    repoPath: repo, baseBranch: 'main', blockedBy: [],
+    repoPath: repo, baseBranch: 'main', blockedBy: [], relatedTo: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }
 }

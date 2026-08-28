@@ -15,7 +15,9 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
 import { AttachmentStore } from '../attachments/index.ts'
+import { discoverBoard, serveMcp } from '../mcp/index.ts'
 import { createToken } from '../server/auth.ts'
+import { clearEndpoint, writeEndpoint } from '../server/endpoint.ts'
 import { AgentPool, detectAgents, knownCommands, type DetectedAgent } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
 import { startServer } from '../server/index.ts'
@@ -132,7 +134,7 @@ async function seed(storage: Storage, repoPath: string): Promise<void> {
       description: sample.description,
       acceptance: sample.acceptance,
       repoPath, baseBranch,
-      blockedBy: [],
+      blockedBy: [], relatedTo: [],
       createdAt: now, updatedAt: now,
     })
   }
@@ -155,6 +157,7 @@ const USAGE = `
 用法：
   loopkanban [选项]                     起服务并打开浏览器
   loopkanban service <子命令>           开机自启
+  loopkanban mcp                        起 MCP server（stdio），让 Agent 用这个看板
 
 选项：
   --port <n>        监听端口，默认随机
@@ -168,7 +171,41 @@ service 子命令：
   print             打印将要写入的服务单元与命令，不做任何改动
   install           安装并启用
   uninstall         停用并删除
+
+mcp：接到 Claude Code / Codex 之类的客户端上，例如
+  claude mcp add loopkanban -- loopkanban mcp
+它连的是**正在跑的那个看板**（地址与 token 从数据目录里读），所以看板得先起着。
+地址不在默认数据目录时给 --data <dir>，或者用 LOOPKANBAN_URL / LOOPKANBAN_TOKEN 直接指。
 `
+
+/**
+ * 处理 `loopkanban mcp`；返回 true 表示这次调用已经处理完了。
+ *
+ * **一个字都不能往 stdout 写** —— 那条管道属于 MCP 协议，多一行就把客户端的
+ * 解析器打断了。要说话写 stderr。
+ *
+ * 只认 argv 的第一个位置参数，不像 service 那样在整个 argv 里找：`--data mcp`
+ * 这种参数值不该被当成子命令。
+ */
+async function handleMcp(): Promise<boolean> {
+  if (process.argv[2] !== 'mcp') return false
+  const dir = flag('data') ?? dataDir()
+  try {
+    const client = await discoverBoard({
+      dataDir: dir,
+      url: flag('url') ?? process.env['LOOPKANBAN_URL'],
+      token: process.env['LOOPKANBAN_TOKEN'],
+    })
+    console.error(C.dim(`[loopkanban mcp] 连到 ${client.baseUrl}`))
+    await serveMcp({ client })
+  } catch (error) {
+    // 找不到看板就直说，并且**退出**而不是端着一个每次调用都失败的 server：
+    // 客户端会把这条 stderr 连同"启动失败"一起呈现，人才知道该去开看板。
+    console.error(C.red(`[loopkanban mcp] ${error instanceof Error ? error.message : String(error)}`))
+    process.exitCode = 1
+  }
+  return true
+}
 
 /** 处理 `loopkanban service …`；返回 true 表示这次调用已经处理完了。 */
 async function handleService(): Promise<boolean> {
@@ -226,6 +263,7 @@ async function main(): Promise<void> {
     console.log(USAGE)
     return
   }
+  if (await handleMcp()) return
   if (await handleService()) return
 
   // --data 让多个看板/临时试验各用各的库，不污染日常数据。
@@ -346,6 +384,20 @@ async function main(): Promise<void> {
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })
 
+  // 把地址记在数据目录里，`loopkanban mcp` 照着它找过来 —— 端口默认是随机的，
+  // 而 MCP server 是另一个进程，没人给它传参。写不进去只是少了这条线索，
+  // 不该因此不让看板起来。
+  await writeEndpoint(dir, {
+    // 只记地址，**不记 token** —— 它已经在同一个目录的 token 文件里躺着，
+    // 同一份秘密存两处只是多一个会对不上的地方。
+    url: `http://127.0.0.1:${String(server.port)}`,
+    port: server.port,
+    pid: process.pid,
+    startedAt: Date.now(),
+  }).catch((error: unknown) => {
+    console.log(C.dim(`    地址文件写不进去（${String(error)}），MCP 要靠 LOOPKANBAN_URL 才连得上。`))
+  })
+
   console.log(`\n  ${C.amber('▸')} ${server.url}`)
   if (webDev !== undefined) console.log(C.dim(`    前端来自 ${webDev}，改 packages/web/src 会热更新。`))
   console.log(C.dim('    只监听 127.0.0.1。远程访问请用 SSH 端口转发，不要改成 0.0.0.0。'))
@@ -361,7 +413,9 @@ async function main(): Promise<void> {
   const shutdown = (): void => {
     console.log(C.dim('\n  正在关闭 …'))
     scheduler.stop()
-    void server.close().then(() => {
+    void server.close().then(async () => {
+      // 地址跟着进程走：留着它，下一个 MCP server 会照着一个没人听的端口去连。
+      await clearEndpoint(dir)
       storage.close()
       process.exit(0)
     })

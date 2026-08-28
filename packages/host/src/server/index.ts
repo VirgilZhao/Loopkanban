@@ -15,7 +15,7 @@ import type { AddressInfo, Socket } from 'node:net'
 import { basename, extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
+  archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropReferences, editTask, moveTask,
   unarchiveTask, type Column, type Task, type TaskEdit, type TaskId,
 } from '@loopkanban/core'
 import { AgentPool, type DetectedAgent } from '../agents/index.ts'
@@ -45,6 +45,9 @@ const LOOPBACK = '127.0.0.1'
  * 死连接占着订阅的时间越久。
  */
 const DEFAULT_SSE_HEARTBEAT_MS = 20_000
+
+/** 一次性读取事件日志时最多回多少条。轮询的调用方要的是最近发生了什么。 */
+const EVENT_PAGE = 200
 
 export interface ServerOptions {
   readonly storage: Storage
@@ -131,6 +134,52 @@ function describeAgent({ provider, caps }: DetectedAgent): Record<string, unknow
     // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
     ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
   }
+}
+
+/** 校验关联卡片的结果：要么是一串确实存在的同项目 id，要么是可回给调用方的拒绝。 */
+type RelatedResult =
+  | { readonly ok: true; readonly ids: TaskId[] }
+  | { readonly ok: false; readonly error: string; readonly detail: string }
+
+/**
+ * 校验一批关联卡片 id。
+ *
+ * 关联**只在同一个项目内成立**：任务在这个项目派生出来的 worktree 里干活，
+ * 指向另一个仓库里的卡，Agent 既读不到也用不上 —— 而它照样会被展开写进
+ * TASK.md，变成一段没法照做的需求。存进去之前就挡住，比派活那一刻才发现强。
+ *
+ * 同理，查无此卡的 id 也当场拒绝：领域层能去掉自指与重复，但"这个 id 到底
+ * 存不存在"要看别的卡，那不在它的视野里。
+ *
+ * @param raw - 请求里的原始值；`null` 与缺席都当作"清空"。
+ * @param siblings - 同项目的全部卡片。
+ * @param self - 这张卡自己；建卡时还没有，给 null。
+ */
+function resolveRelated(raw: unknown, siblings: readonly Task[], self: TaskId | null): RelatedResult {
+  if (raw === null || raw === undefined) return { ok: true, ids: [] }
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: 'bad-request', detail: 'relatedTo 要给一个任务 id 数组' }
+  }
+  const known = new Set(siblings.map((task) => String(task.id)))
+  const ids: TaskId[] = []
+  for (const item of raw as readonly unknown[]) {
+    if (typeof item !== 'string') {
+      return { ok: false, error: 'bad-request', detail: 'relatedTo 里只能是任务 id' }
+    }
+    if (self !== null && item === String(self)) {
+      return { ok: false, error: 'self-related', detail: '一张卡不能关联它自己' }
+    }
+    if (!known.has(item)) {
+      return {
+        ok: false,
+        error: 'no-such-related-task',
+        detail: `${item} 不在这个项目里 —— 只能关联同项目的卡`,
+      }
+    }
+    const id = asTaskId(item)
+    if (!ids.includes(id)) ids.push(id)
+  }
+  return { ok: true, ids }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
@@ -757,7 +806,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (method === 'POST' && pathname === '/api/tasks') {
       const body = await readJsonBody(req) as Partial<{
         projectId: string; description: string; acceptance: string[]
-        preferredProvider: string; model: string
+        preferredProvider: string; model: string; relatedTo: string[]
       }> | undefined
       // 仓库与基线跟着项目走，不由建卡方指定 —— 任务干活的地方是这个项目
       // 派生出来的 worktree，两者对不上就没有意义。
@@ -767,6 +816,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
       const now = Date.now()
       const tasks = storage.listTasks(project.id)
+      // 建卡时就能带上关联 —— MCP 那边"照着这张卡再开一张"是常事，逼它先
+      // 建后改只是多一次往返。同项目的约束一样要过。
+      const related = resolveRelated(body?.relatedTo, tasks, null)
+      if (!related.ok) {
+        sendJson(res, related.error === 'bad-request' ? 400 : 422, {
+          error: related.error, detail: related.detail,
+        })
+        return
+      }
       const created: Task = {
         id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
         projectId: project.id,
@@ -782,6 +840,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         ...(body?.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
         ...(body?.model === undefined ? {} : { model: body.model }),
         blockedBy: [],
+        relatedTo: related.ids,
         createdAt: now,
         updatedAt: now,
       }
@@ -1131,7 +1190,21 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const edit = Object.fromEntries(
         Object.entries(rest).map(([key, value]) => [key, value === null ? undefined : value]),
       ) as TaskEdit
-      const edited = editTask(task, { expectedRevision, edit, now: Date.now() })
+      // 关联要单独过一遍：那几个 id 是否真的存在、是否同项目，领域层看不到
+      // 别的卡，答不上来。**清空写成空数组而不是 undefined** —— 后者在
+      // editTask 眼里是"这次没提到关联"，于是"取消全部关联"永远存不下去。
+      let checked = edit
+      if ('relatedTo' in rest) {
+        const related = resolveRelated(rest['relatedTo'], storage.listTasks(task.projectId), task.id)
+        if (!related.ok) {
+          sendJson(res, related.error === 'bad-request' ? 400 : 422, {
+            error: related.error, detail: related.detail,
+          })
+          return
+        }
+        checked = { ...edit, relatedTo: related.ids }
+      }
+      const edited = editTask(task, { expectedRevision, edit: checked, now: Date.now() })
       if (!edited.ok) {
         sendJson(res, edited.reason === 'revision-conflict' ? 409 : 422, {
           error: edited.reason, detail: edited.detail,
@@ -1167,12 +1240,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
 
-      // 下游对它的依赖要一并摘掉：留着一个查无此卡的 id，那些卡会永远停在
-      // "依赖未完成"，而界面上没有任何操作能解开它。
+      // 别的卡对它的引用要一并摘掉：依赖留着一个查无此卡的 id，那些卡会永远
+      // 停在"依赖未完成"，而界面上没有任何操作能解开它；关联留着则会把一段
+      // 指向不存在之物的需求写进 TASK.md。
       const now = Date.now()
       const cascade = storage.listTasks(task.projectId)
         .filter((other) => other.id !== task.id)
-        .map((other) => dropDependency(other, task.id, now))
+        .map((other) => dropReferences(other, task.id, now))
         .filter((next): next is Task => next !== null)
       // Run 要在删库之前读出来 —— 删完就查不到该收拾哪些 worktree 了。
       const runs = storage.listRuns(task.id)
@@ -1503,6 +1577,34 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const run = storage.getRun(asRunId(decodeURIComponent(runId)))
       if (run === null) { sendJson(res, 404, { error: 'run-not-found' }); return }
       sendJson(res, 200, { run }, extraHeaders)
+      return
+    }
+
+    /*
+     * ── 事件日志（一次性读取）────────────────────────────────
+     *
+     * 与下面的 SSE 同源同数据，区别只在"谁在等谁"：浏览器开着面板，推给它
+     * 最省事；而 MCP 那边的调用方是一次问一句的 Agent，给它开一条流等于让它
+     * 抱着一个永远不结束的响应。`after` 与 SSE 的 `Last-Event-ID` 是同一个
+     * 游标，所以轮询与订阅之间可以无缝接上。
+     */
+    const logOf = matchPath(pathname, /^\/api\/runs\/([^/]+)\/log$/)
+    if (method === 'GET' && logOf !== null) {
+      const id = asRunId(decodeURIComponent(logOf))
+      if (storage.getRun(id) === null) { sendJson(res, 404, { error: 'run-not-found' }); return }
+      const asked = Number.parseInt(url.searchParams.get('after') ?? '0', 10)
+      // 消毒过的游标只算一次，后面一律用它 —— 分两处算的话，`?after=abc`
+      // 会让 lastSeq 变成 NaN（JSON 里就是 null），调用方拿它回问等于从头重来。
+      const after = Number.isFinite(asked) ? asked : 0
+      // 一次跑几万条事件是常事，整段回给调用方只会撑爆它的上下文。截断在
+      // **SQL 里**做（见 readRecentEvents），并且留最新的那一段 —— Agent 要的是
+      // "现在到哪儿了"；说清楚丢了多少，下一次拿 lastSeq 接着问就是。
+      const { events, total } = storage.readRecentEvents(id, after, EVENT_PAGE)
+      sendJson(res, 200, {
+        events,
+        lastSeq: events.at(-1)?.seq ?? after,
+        truncated: total > events.length,
+      }, extraHeaders)
       return
     }
 

@@ -156,6 +156,7 @@ const zh = {
 
   // ── 卡片 ───────────────────────────────────────────────
   'card.empty': '还没写内容',
+  'card.related': '关联的卡片数 —— 派活时会作为参考写进 TASK.md',
   'card.leaseExpired': '租约已过期 · 待回收',
   'card.runFailed': '这一轮跑挂了 · {provider}',
   'card.runAborted': '这一轮被终止 · {provider}',
@@ -267,6 +268,13 @@ const zh = {
   'editor.modelHint': '{count} 个可选；不选就用 {provider} 自己的默认',
   'editor.modelDefault': '（默认模型）',
   // ── 附件 ───────────────────────────────────────────────
+  'editor.related': '关联任务',
+  'editor.relatedHint': '同项目的卡。派活时它们的正文会被写进 TASK.md 当参考 —— 是引用，不拦这张卡的执行',
+  'editor.relatedAdd': '＋ 关联一张卡',
+  'editor.relatedRemove': '取消这条关联',
+  'editor.relatedNone': '这个项目里还没有别的卡可以关联',
+  'editor.relatedAllPicked': '这个项目里的卡都关联上了',
+  'editor.relatedGone': '这张卡已经不在了',
   'editor.attachments': '附件',
   'editor.attachmentsHint': '图片、PDF、Word 都行。派活时会拷进工作区，并在 TASK.md 里点名交给 Agent',
   'editor.attachmentsDrop': '把文件拖到这儿，或点击选择',
@@ -539,6 +547,7 @@ const en: Record<MessageKey, string> = {
   'column.review.failed': '{n} didn’t finish this round',
 
   'card.empty': 'Nothing written yet',
+  'card.related': 'Linked cards — written into TASK.md as reference at dispatch',
   'card.leaseExpired': 'Lease expired · to be reclaimed',
   'card.runFailed': 'This round failed · {provider}',
   'card.runAborted': 'This round was stopped · {provider}',
@@ -644,6 +653,13 @@ const en: Record<MessageKey, string> = {
   'editor.modelUnknown': 'Couldn’t list models for {provider} (offline, or it won’t report them) — this run uses its own default.',
   'editor.modelHint': '{count} available; leave it unset to use {provider}’s own default',
   'editor.modelDefault': '(default model)',
+  'editor.related': 'Related tasks',
+  'editor.relatedHint': 'Cards in this project. Their text is written into TASK.md as reference at dispatch — a citation, not a blocker',
+  'editor.relatedAdd': '+ Link a card',
+  'editor.relatedRemove': 'Unlink this one',
+  'editor.relatedNone': 'No other card in this project to link yet',
+  'editor.relatedAllPicked': 'Every card in this project is already linked',
+  'editor.relatedGone': 'This card is gone',
   'editor.attachments': 'Attachments',
   'editor.attachmentsHint': 'Images, PDFs, Word documents. They are copied into the workspace at dispatch and listed for the agent in TASK.md',
   'editor.attachmentsDrop': 'Drop files here, or click to pick',

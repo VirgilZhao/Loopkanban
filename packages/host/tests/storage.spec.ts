@@ -30,7 +30,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     acceptance: ['有测试'],
     repoPath: '/repo',
     baseBranch: 'main',
-    blockedBy: [],
+    blockedBy: [], relatedTo: [],
     createdAt: T0,
     updatedAt: T0,
     ...rest,
@@ -77,6 +77,23 @@ describe('任务往返', () => {
 
   it('不存在的任务返回 null', () => {
     expect(store.getTask(asTaskId('nope'))).toBeNull()
+  })
+
+  it('关联与依赖各存各的 —— 同一张卡可以既是依赖又是参考', () => {
+    const original = task({
+      id: 't1', blockedBy: [asTaskId('dep')], relatedTo: [asTaskId('dep'), asTaskId('ref')],
+    })
+    store.createTask(original)
+    const loaded = store.getTask(asTaskId('t1'))
+    expect(loaded?.blockedBy).toEqual([asTaskId('dep')])
+    expect(loaded?.relatedTo).toEqual([asTaskId('dep'), asTaskId('ref')])
+  })
+
+  it('改关联走 commitTask 也能落库', () => {
+    store.createTask(task({ id: 't1' }))
+    const current = store.getTask(asTaskId('t1')) as Task
+    expect(store.commitTask({ ...current, revision: 2, relatedTo: [asTaskId('t2')] })).toBe(true)
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual([asTaskId('t2')])
   })
 
   it('按 position 排序列出', () => {
@@ -216,7 +233,7 @@ describe('deleteTask', () => {
     store.createTask(task({ id: 't2', blockedBy: [asTaskId('t1')] }))
     const downstream = store.getTask(asTaskId('t2'))
     if (downstream === null) throw new Error('setup')
-    const patched = { ...downstream, blockedBy: [], revision: downstream.revision + 1 }
+    const patched = { ...downstream, blockedBy: [], relatedTo: [], revision: downstream.revision + 1 }
 
     expect(store.deleteTask(asTaskId('t1'), 1, [patched])).toBe(true)
     expect(store.getTask(asTaskId('t2'))?.blockedBy).toEqual([])
@@ -436,6 +453,35 @@ describe('stats', () => {
   })
 })
 
+describe('readRecentEvents', () => {
+  const RUN = asRunId('r1')
+
+  beforeEach(() => {
+    store.createTask(task({ id: 't1' }))
+    store.createRun(run({ id: RUN, taskId: asTaskId('t1') }))
+  })
+
+  it('取的是游标之后最新的一段，按 seq 正序回', () => {
+    for (let index = 0; index < 10; index += 1) store.appendEvent(RUN, 'text', { index }, T0 + index)
+    const { events, total } = store.readRecentEvents(RUN, 0, 3)
+    expect(events.map((event) => event.seq)).toEqual([8, 9, 10])
+    // total 是游标之后的**全部**条数，调用方据此知道自己漏了多少。
+    expect(total).toBe(10)
+  })
+
+  it('游标之后不足一页时全给，total 与条数相等', () => {
+    store.appendEvent(RUN, 'text', { text: 'a' }, T0)
+    store.appendEvent(RUN, 'text', { text: 'b' }, T0 + 1)
+    const { events, total } = store.readRecentEvents(RUN, 1, 200)
+    expect(events.map((event) => event.seq)).toEqual([2])
+    expect(total).toBe(1)
+  })
+
+  it('一条都没有时是空的，不是 null', () => {
+    expect(store.readRecentEvents(RUN, 0, 10)).toEqual({ events: [], total: 0 })
+  })
+})
+
 describe('迁移', () => {
   /**
    * 造一个停在 `version` 版本上的真实旧库：只跑前 version 条迁移。
@@ -472,6 +518,38 @@ describe('迁移', () => {
       expect(migrated?.column).toBe('review')
       // 搬列而已，内容一个字都不该动。
       expect(migrated?.description).toBe('跑挂了的卡')
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加关联列：旧库里的卡读出来是"没有关联"，而不是崩在缺列上', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // 倒数第二版 = 关联那条迁移之前的世界。跟着 MIGRATIONS 走，
+      // 以后再加迁移这个测试也不会指错版本。
+      const legacy = seedLegacyDb(file, MIGRATIONS.length - 1)
+      // 列名一个个写出来，不用 `VALUES (…)` 的隐式全列：这张表往后还会长新列，
+      // 隐式写法会在下一次迁移落地时莫名其妙地挂掉，而挂的不是被测的东西。
+      legacy.prepare(
+        'INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
+      ).run(PROJECT, '默认看板', '/repo', 'main', T0)
+      legacy.prepare(`
+        INSERT INTO tasks (
+          id, project_id, revision, column_name, position, description,
+          acceptance_json, repo_path, base_branch, preferred_provider, model,
+          blocked_by_json, lease_json, archived_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('t1', PROJECT, 1, 'ready', 1, '一张老卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const migrated = store.getTask(asTaskId('t1'))
+      expect(migrated?.relatedTo).toEqual([])
+      expect(migrated?.description).toBe('一张老卡')
       store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })

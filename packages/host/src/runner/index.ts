@@ -230,13 +230,22 @@ export class Runner {
     ])
     // 讨论线程一起写进 TASK.md：人和 Agent 的每一轮往来都是这次执行的上下文。
     const comments = storage.listComments(task.id)
-    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged), 'utf8')
+    // 关联的卡也要展开写进去。**读的是此刻的库**，不是建卡时的快照 ——
+    // 参考的那张卡改过需求、跑完进了 Done，这次执行看到的就该是新的样子。
+    // 中间被删掉的会返回 null（`dropReferences` 通常已经把 id 摘掉了，这里
+    // 只是不指望它）：跳过，而不是在规格里留一行查无此卡。
+    const related = task.relatedTo
+      .map((id) => storage.getTask(id))
+      .filter((other): other is Task => other !== null)
+    await writeFile(
+      join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged, related), 'utf8',
+    )
 
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task, comments, prior !== undefined, staged),
+      prompt: renderPrompt(task, comments, prior !== undefined, staged, related),
       permission: 'standard',
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
       ...(task.model === undefined ? {} : { model: task.model }),
@@ -581,6 +590,39 @@ export class Runner {
 }
 
 /**
+ * 关联卡片在规格里展开多少字。
+ *
+ * 它们是参考资料，不是这次要做的活 —— 五张各写两千字的卡会把真正的需求
+ * 挤到 Agent 的注意力之外。截断处明说截断了，比悄悄少给一半强。
+ */
+const RELATED_EXCERPT = 1200
+
+/** 一张关联卡在规格里的样子：编号、状态、标题、需求正文与验收标准。 */
+function renderRelated(task: Task): string[] {
+  const body = task.description.trim()
+  const excerpt = body.length > RELATED_EXCERPT
+    ? `${body.slice(0, RELATED_EXCERPT)}\n\n（这张卡的描述过长，此处只截取前一段）`
+    : body
+  const lines = [`### ${String(task.id)} · ${COLUMN_LABEL[task.column]} · ${taskTitle(task)}`, '']
+  if (excerpt.length > 0) lines.push(excerpt, '')
+  if (task.acceptance.length > 0) {
+    lines.push('验收标准：')
+    for (const item of task.acceptance) lines.push(`- ${item}`)
+    lines.push('')
+  }
+  return lines
+}
+
+/** 列名在规格里的说法。给的是"这张关联卡走到哪儿了"，Agent 据此判断它有多可信。 */
+const COLUMN_LABEL: Readonly<Record<Task['column'], string>> = {
+  backlog: '想法池（还没定下来）',
+  ready: '队列中（还没开工）',
+  running: '正在执行',
+  review: '待验收（做完了但还没过人眼）',
+  done: '已完成',
+}
+
+/**
  * 投喂给 Agent 的任务规格，写进 worktree 根目录。
  *
  * 讨论线程整段附在后面：人和 Agent 的往来是这张卡真正的上下文，只给最后
@@ -589,9 +631,14 @@ export class Runner {
  * 附件列成一节**带上相对路径**：文件已经躺在 worktree 里了，但 Agent 只有
  * 知道它们在哪儿、分别是什么，才会真的去读 —— 光把文件放进目录，多数时候
  * 它连看都不会看一眼。
+ *
+ * 关联的卡同样整段展开，并且**明写它们是参考、不是这次的活**：只给一串 id
+ * 等于没给（Agent 没有任何办法查到那张卡长什么样），而不声明身份则会让它
+ * 顺手把参考资料里的验收标准也一并做掉。
  */
 export function renderTaskSpec(
   task: Task, comments: readonly TaskComment[] = [], attachments: readonly StagedAttachment[] = [],
+  related: readonly Task[] = [],
 ): string {
   const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
   // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
@@ -607,6 +654,15 @@ export function renderTaskSpec(
     lines.push('', '## 附件', '', '这些文件是需求的一部分，已经放在工作区里，请读过再动手：', '')
     for (const file of spec) lines.push(describeStaged(file))
     lines.push('', '读不了某个格式（比如 Word、PDF）就想办法转成文本再读，不要跳过它。')
+  }
+  if (related.length > 0) {
+    lines.push(
+      '', '## 关联任务', '',
+      '这几张卡是这张卡的**参考资料**，不是这次要做的活 —— 读它们是为了让你的改动',
+      '跟它们对得上（接口、命名、已经定下来的做法）。不要去实现它们的验收标准。',
+      '',
+    )
+    for (const other of related) lines.push(...renderRelated(other))
   }
   if (comments.length > 0) {
     lines.push('', '## 讨论', '')
@@ -631,15 +687,20 @@ export function renderTaskSpec(
  * 附件在这里**再点一次名**：TASK.md 里已经有完整清单，但 prompt 是 CLI
  * 唯一保证会读的东西，附件是需求的一部分，不该指望它自己翻到那一节。
  *
+ * 关联的卡同样在这里点名：TASK.md 里有它们的正文，但 prompt 是 CLI 唯一
+ * 保证会读的东西，而"有几张卡要一起读"这件事本身就会改变它的做法。
+ *
  * @param task - 目标任务。
  * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
  * @param attachments - 已经拷进 worktree 的附件。
+ * @param related - 关联的同项目卡片，已经展开在 TASK.md 里。
  */
 export function renderPrompt(
   task: Task,
   comments: readonly TaskComment[] = [],
   resuming = false,
   attachments: readonly StagedAttachment[] = [],
+  related: readonly Task[] = [],
 ): string {
   const lines: string[] = []
   const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
@@ -675,6 +736,14 @@ export function renderPrompt(
       '',
       `这条反馈带了 ${String(carried.length)} 个文件，就是它说的那些东西：`,
       ...carried.map((file) => `- ${file.relPath}（${file.filename}）`),
+    )
+  }
+  if (related.length > 0) {
+    lines.push(
+      '',
+      `这张卡关联了 ${String(related.length)} 张同项目的卡片，正文在 TASK.md 的「关联任务」一节，`
+      + '是**参考资料**而不是这次要做的活 —— 动手前先读，做完对一遍别和它们打架：',
+      ...related.map((other) => `- ${String(other.id)} ${taskTitle(other)}`),
     )
   }
   lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')

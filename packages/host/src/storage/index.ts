@@ -164,6 +164,7 @@ interface TaskRow {
   preferred_provider: string | null
   model: string | null
   blocked_by_json: string
+  related_json: string
   lease_json: string | null
   archived_at: number | null
   done_at: number | null
@@ -213,6 +214,7 @@ function toTask(row: TaskRow): Task {
     ...(preferred === null ? {} : { preferredProvider: preferred }),
     ...(row.model === null ? {} : { model: row.model }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
+    relatedTo: (JSON.parse(row.related_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     ...(row.done_at === null ? {} : { doneAt: row.done_at }),
@@ -596,14 +598,14 @@ export class Storage {
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
         acceptance_json, repo_path, base_branch, preferred_provider, model,
-        blocked_by_json, lease_json, archived_at, done_at,
+        blocked_by_json, related_json, lease_json, archived_at, done_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
-      JSON.stringify(task.blockedBy),
+      JSON.stringify(task.blockedBy), JSON.stringify(task.relatedTo),
       task.lease === undefined ? null : JSON.stringify(task.lease),
       task.archivedAt ?? null, task.doneAt ?? null,
       task.createdAt, task.updatedAt,
@@ -637,14 +639,14 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
-        blocked_by_json = ?, lease_json = ?,
+        blocked_by_json = ?, related_json = ?, lease_json = ?,
         archived_at = ?, done_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
       next.preferredProvider ?? null, next.model ?? null,
-      JSON.stringify(next.blockedBy),
+      JSON.stringify(next.blockedBy), JSON.stringify(next.relatedTo),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.archivedAt ?? null, next.doneAt ?? null,
       next.updatedAt,
@@ -666,7 +668,7 @@ export class Storage {
    *
    * @param id - 要删的任务。
    * @param expectedRevision - 调用方读到的 revision，CAS 凭据。
-   * @param cascade - 摘掉这条依赖之后的下游任务新值（见 `dropDependency`）。
+   * @param cascade - 摘掉指向它的引用之后，那些卡的新值（见 `dropReferences`）。
    * @returns 是否删成功；false 表示期间已被他人改动，调用方应重读后重试。
    */
   deleteTask(id: TaskId, expectedRevision: number, cascade: readonly Task[] = []): boolean {
@@ -876,16 +878,8 @@ export class Storage {
   lastEvent(runId: RunId): RunEvent | null {
     const row = this.db.prepare(
       'SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1',
-    ).get(runId) as unknown as
-      { run_id: string; seq: number; kind: string; payload_json: string; at: number } | undefined
-    if (row === undefined) return null
-    return {
-      runId: asRunId(row.run_id),
-      seq: row.seq,
-      kind: row.kind,
-      payload: JSON.parse(row.payload_json) as unknown,
-      at: row.at,
-    }
+    ).get(runId) as unknown as EventRow | undefined
+    return row === undefined ? null : toEvent(row)
   }
 
   appendEvent(runId: RunId, kind: string, payload: unknown, at: number): number {
@@ -912,16 +906,55 @@ export class Storage {
   readEvents(runId: RunId, afterSeq = 0): RunEvent[] {
     const rows = this.db.prepare(
       'SELECT * FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq',
-    ).all(runId, afterSeq) as unknown as {
-      run_id: string; seq: number; kind: string; payload_json: string; at: number
-    }[]
-    return rows.map((row) => ({
-      runId: asRunId(row.run_id),
-      seq: row.seq,
-      kind: row.kind,
-      payload: JSON.parse(row.payload_json) as unknown,
-      at: row.at,
-    }))
+    ).all(runId, afterSeq) as unknown as EventRow[]
+    return rows.map(toEvent)
+  }
+
+  /**
+   * 读游标之后**最近的**若干条事件，外加游标之后一共有多少条。
+   *
+   * 与 `readEvents` 的分工在于谁在等：SSE 那边要的是"从断点起全部补上"，
+   * 而一次问一句的调用方（MCP 的 run_status）要的是"现在到哪儿了"。
+   *
+   * **截断在 SQL 里做，不在 JS 里做。** 一次执行几万条事件是常事，先全查
+   * 出来、逐条 JSON.parse、再切最后 200 条，等于每次轮询都把整张表读一遍 ——
+   * 而 host 是单线程的，它同时还在给别的 Run 推 SSE。
+   *
+   * @param runId - 所属 Run。
+   * @param afterSeq - 只看 seq 大于它的事件。
+   * @param limit - 最多回多少条，取的是最新的那一段。
+   * @returns 事件（按 seq **正序**，与 readEvents 一致）与游标之后的总条数。
+   */
+  readRecentEvents(runId: RunId, afterSeq: number, limit: number): {
+    events: RunEvent[]
+    total: number
+  } {
+    const counted = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND seq > ?',
+    ).get(runId, afterSeq) as unknown as { n: number }
+    const rows = this.db.prepare(
+      'SELECT * FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?',
+    ).all(runId, afterSeq, limit) as unknown as EventRow[]
+    // DESC 取的是最新的一段，回给调用方之前翻回正序。
+    return { events: rows.map(toEvent).reverse(), total: counted.n }
+  }
+}
+
+interface EventRow {
+  run_id: string
+  seq: number
+  kind: string
+  payload_json: string
+  at: number
+}
+
+function toEvent(row: EventRow): RunEvent {
+  return {
+    runId: asRunId(row.run_id),
+    seq: row.seq,
+    kind: row.kind,
+    payload: JSON.parse(row.payload_json) as unknown,
+    at: row.at,
   }
 }
 

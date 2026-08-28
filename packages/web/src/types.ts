@@ -167,8 +167,43 @@ export interface Project {
   name: string
   repoPath: string
   baseBranch: string
+  /** 一键测试环境的启动命令；缺席表示还没配。 */
+  testCommand?: string
   createdAt: number
 }
+
+/** 测试环境的状态。`running` 是活着但没监听端口 —— 不是失败，见下。 */
+export type TestEnvStatus = 'starting' | 'ready' | 'running' | 'exited'
+
+/** 环境是被谁收掉的。界面要说清楚，不然"它自己没了"最难查。 */
+export type StopReason = 'manual' | 'idle' | 'expired' | 'verdict' | 'shutdown'
+
+/**
+ * 一张卡的测试环境：在它自己的 worktree 里跑着的那个进程。
+ *
+ * 只活在 host 进程的内存里，不落库 —— 重启之后它就不在了。
+ */
+export interface TestEnv {
+  taskId: string
+  /** 真正跑的那条命令（`{{port}}` 已替换）。 */
+  command: string
+  cwd: string
+  port: number
+  /** 端口通了才有。不监听端口的命令一直是 null，日志就是它的全部产出。 */
+  url: string | null
+  status: TestEnvStatus
+  startedAt: number
+  /** 到这个时刻会被绝对上限收掉。 */
+  expiresAt: number
+  exitCode?: number
+  signal?: string
+  stoppedBy?: StopReason
+}
+
+/** 测试环境推过来的一条事件。seq 单调递增，断线重连靠它补齐。 */
+export type TestEnvEvent =
+  | { seq: number; at: number; kind: 'status'; env: TestEnv }
+  | { seq: number; at: number; kind: 'log'; stream: 'out' | 'err'; text: string }
 
 export interface PermissionCaveat {
   label: string

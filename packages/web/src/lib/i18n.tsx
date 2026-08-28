@@ -46,8 +46,6 @@ const zh = {
   'files.loading': '读取中…',
   'files.empty': '这个目录是空的',
   'files.pickFile': '点左边的文件看内容',
-  'files.binary': '二进制文件 · 不显示内容',
-  'files.truncated': '文件过大，这里只显示了前一部分。',
   'files.noProject': '还没有项目。先在左侧新增一个 —— 文件浏览要知道逛哪个仓库。',
 
   // ── 命令行 ─────────────────────────────────────────────
@@ -227,6 +225,13 @@ const zh = {
   'preview.close': '关闭预览 · esc',
   'preview.loading': '读取中…',
   'preview.truncated': '文件太大，这里只显示了前一部分。完整的那份在本机磁盘上。',
+  'preview.rendered': '预览',
+  'preview.source': '原文',
+  'preview.binary': '这个格式在这儿看不了。',
+  'preview.legacyDoc': '旧版 .doc 是二进制私有格式。在 Word 里另存为 .docx 就能看了。',
+  'preview.noRaw': '这份文件要浏览器自己打开，而这里拿不到它的地址。',
+  'preview.emptyDoc': '这份文档是空的。',
+  'preview.docTruncated': '文档太长，这里只显示了前一部分。',
 
   // ── 新增 / 删除项目 ───────────────────────────────────
   'newProject.pickTitle': '选择项目文件夹',
@@ -309,6 +314,9 @@ const zh = {
   'err.attachment-gone': '这个附件的文件已经不在磁盘上了 —— 重新传一份。',
   'err.path-outside-workspace': '这条路径不在这张卡够得着的地方（它的工作区与项目仓库），不给看。',
   'err.not-text': '这是个二进制文件，在这儿预览只会是一屏乱码。',
+  'err.bad-document': '这份 Word 文档读不出来 —— 可能是坏了、加了密、正文大到翻不动，也可能本来就是别的东西改了扩展名。',
+  'err.too-large': '这份文档太大了，读进来翻会把标签页顶住。在本机打开它。',
+  'err.not-inlineable': '这个格式不能直接在浏览器里打开。',
   'err.unreadable': '这个文件读不动 —— 多半是权限不够。它确实在那儿，但当前用户打不开它。',
   /* 文档预览与文件浏览共用这一条，所以两种成因都要说到：它可能刚被删掉或
      改了名，也可能是那次执行的工作区整个清掉了。 */
@@ -348,8 +356,6 @@ const en: Record<MessageKey, string> = {
   'files.loading': 'Loading\u2026',
   'files.empty': 'This directory is empty',
   'files.pickFile': 'Pick a file on the left to read it',
-  'files.binary': 'Binary file \u00b7 not shown',
-  'files.truncated': 'This file is too large to show in full; only the first part is here.',
   'files.noProject': 'No projects yet. Add one on the left — the file browser has to know which repo to show.',
 
   'term.title': 'Shell',
@@ -516,6 +522,13 @@ const en: Record<MessageKey, string> = {
   'preview.close': 'Close preview · esc',
   'preview.loading': 'Reading…',
   'preview.truncated': 'The file is too large to show in full; only the first part is here. The whole thing is on disk.',
+  'preview.rendered': 'Rendered',
+  'preview.source': 'Source',
+  'preview.binary': 'This format can’t be shown here.',
+  'preview.legacyDoc': 'Legacy .doc is a binary proprietary format. Save it as .docx in Word and it will show up.',
+  'preview.noRaw': 'This file has to be opened by the browser itself, and there’s no address for it here.',
+  'preview.emptyDoc': 'This document is empty.',
+  'preview.docTruncated': 'The document is long; only the first part is shown here.',
 
   'newProject.pickTitle': 'Pick a project folder',
   'newProject.pickHint': 'You’re browsing the machine running LoopKanban. Only git repos can be projects.',
@@ -592,6 +605,9 @@ const en: Record<MessageKey, string> = {
   'err.attachment-gone': 'That attachment’s file is no longer on disk — upload it again.',
   'err.path-outside-workspace': 'That path is outside what this card can reach (its worktree and the project repo).',
   'err.not-text': 'That’s a binary file — previewing it here would just be a screen of noise.',
+  'err.bad-document': 'This Word document can’t be read — it may be damaged, encrypted, too large to page through, or just something else with a .docx name.',
+  'err.too-large': 'This document is too large to read in and page through here. Open it on your machine.',
+  'err.not-inlineable': 'This format can’t be opened directly in the browser.',
   'err.unreadable': 'That file can’t be opened — most likely permissions. It is there, but this user can’t read it.',
   'err.no-such-file': 'That file is gone — deleted or renamed, or the worktree for that run was removed.',
   'err.no-such-dir': 'Can’t open that directory; it may have just been deleted or renamed.',

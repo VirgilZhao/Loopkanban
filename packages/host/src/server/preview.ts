@@ -13,11 +13,20 @@
 
 import { open, realpath, stat } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve } from 'node:path'
+import { DOCX_MAX_BYTES, readDocx, type RichDoc } from '../docs/docx.ts'
+import { kindByName, type FileKind } from '../docs/kind.ts'
 
 /** 预览上限。再大就不该在浏览器里翻了 —— 产物就在本机磁盘上。 */
 export const PREVIEW_MAX_BYTES = 400_000
 
 export interface FilePreview {
+  /**
+   * 这份文件该怎么看：代码、Markdown、PDF、Word、图片。
+   *
+   * 判定在服务端做而不是让前端看扩展名 —— `docx` 的正文是这里翻出来的，
+   * `pdf` 与图片则**根本不走 JSON**，两件事都得由这个值说了算。
+   */
+  readonly kind: FileKind
   /**
    * 这份文档的绝对路径，**用登记的根表述**（不是解完符号链接的那条）。
    *
@@ -33,15 +42,22 @@ export interface FilePreview {
   readonly size: number
   /** 是否因为过大而只给了前一段。 */
   readonly truncated: boolean
+  /** 正文。`pdf` / `image` / `docx` 没有正文可给，是空串。 */
   readonly content: string
+  /** `docx` 专有：翻出来的文档树。 */
+  readonly doc?: RichDoc
 }
 
 export type PreviewFailure =
   /** 路径不在这张卡够得着的目录里。 */
   | 'path-outside-workspace'
   | 'no-such-file'
-  /** 二进制。文本预览器展示它只会是一屏乱码。 */
+  /** 二进制，且不是我们认得的文档格式。展示它只会是一屏乱码。 */
   | 'not-text'
+  /** 是份 Word，但读不成一棵文档树（坏了、加密了、或者只是改了扩展名）。 */
+  | 'bad-document'
+  /** 认得这个格式，但它大到不该整个读进内存来翻。 */
+  | 'too-large'
   /** 在工作区里、也确实是个文件，但打不开（多半是权限）。 */
   | 'unreadable'
 
@@ -117,13 +133,31 @@ async function readHead(path: string, take: number): Promise<Buffer> {
   }
 }
 
+/** 一条路径在这张卡的围栏里落到了哪个真实文件上。 */
+export interface PreviewTarget {
+  /** 它落在哪个根里。相对路径按这个算。 */
+  readonly root: string
+  /** 用登记的根表述的绝对路径（见 {@link FilePreview.path}）。 */
+  readonly path: string
+  /** 解完符号链接的路径。真正拿去读的是它。 */
+  readonly real: string
+  readonly size: number
+}
+
+export type TargetResult =
+  | { readonly ok: true; readonly target: PreviewTarget }
+  | { readonly ok: false; readonly reason: 'path-outside-workspace' | 'no-such-file'; readonly detail: string }
+
 /**
- * 读一个文件用于预览。
+ * 把一条路径解到围栏里的一个真实文件上。
+ *
+ * 单独抽出来是因为**有两个口子要走同一套判定**：预览（回 JSON）和取原始
+ * 字节（PDF、图片直接流给浏览器）。围栏只写一遍，才不会有一天两边走岔。
  *
  * @param asked - 要看的路径，绝对或相对于某个根。
  * @param roots - 这张卡够得着的目录：它历次执行的 worktree，以及项目仓库。
  */
-export async function readFilePreview(asked: string, roots: readonly string[]): Promise<PreviewResult> {
+export async function resolvePreviewTarget(asked: string, roots: readonly string[]): Promise<TargetResult> {
   const raw = asked.trim()
   if (raw.length === 0) return { ok: false, reason: 'no-such-file', detail: '没给路径' }
 
@@ -140,29 +174,72 @@ export async function readFilePreview(asked: string, roots: readonly string[]): 
     const info = await stat(real).catch(() => null)
     if (info === null || !info.isFile()) continue
 
-    const take = Math.min(info.size, PREVIEW_MAX_BYTES)
-    // stat 过得去、open 过不去 —— 权限。这跟「文件不在」不是一回事，也不该
-    // 一路抛到最外层：那只会给调用方一个 500，日志里多一条未处理异常。
-    const head = await readHead(real, take).catch(() => null)
-    if (head === null) return { ok: false, reason: 'unreadable', detail: path }
-
-    // NUL 是判二进制最省事也最准的一条：文本文件里不会有它。
-    if (head.includes(0)) return { ok: false, reason: 'not-text', detail: path }
-
-    const truncated = info.size > take
-    return {
-      ok: true,
-      file: {
-        // 一律用候选路径表述，realpath 只用来判边界，不外传（见 FilePreview.path）。
-        path,
-        name: basename(path),
-        relative: relative(root, path),
-        size: info.size,
-        truncated,
-        content: (truncated ? trimPartialUtf8(head) : head).toString('utf8'),
-      },
-    }
+    return { ok: true, target: { root, path, real, size: info.size } }
   }
 
   return { ok: false, reason: 'no-such-file', detail: raw }
+}
+
+/**
+ * 读一个文件用于预览。
+ *
+ * 怎么呈现由扩展名说了算（见 `docs/kind.ts`）：文本与 Markdown 回正文，
+ * Word 回一棵翻好的文档树，PDF 与图片只回元信息、字节另走 raw 口子。
+ *
+ * @param asked - 要看的路径，绝对或相对于某个根。
+ * @param roots - 这张卡够得着的目录：它历次执行的 worktree，以及项目仓库。
+ */
+export async function readFilePreview(asked: string, roots: readonly string[]): Promise<PreviewResult> {
+  const found = await resolvePreviewTarget(asked, roots)
+  if (!found.ok) return found
+  const { root, path, real, size } = found.target
+
+  // 一眼就知道看不了的（压缩包、可执行文件、旧版 `.doc`）：一个字节都不必读。
+  const named = kindByName(path)
+  if (named === 'binary') return { ok: false, reason: 'not-text', detail: path }
+
+  const at = { path, name: basename(path), relative: relative(root, path), size }
+
+  /*
+   * PDF 和图片的字节**不走 JSON**。
+   *
+   * 塞进去要先 base64（凭空胖三分之一），前端再解回来交给浏览器 —— 而
+   * 浏览器本来就会渲染这两类东西，只要给它一个 URL。所以这里只回元信息，
+   * 字节由 `…/file/raw` 那个口子直接流出去。
+   */
+  if (named === 'pdf' || named === 'image') {
+    return { ok: true, file: { kind: named, ...at, truncated: false, content: '' } }
+  }
+
+  if (named === 'docx') {
+    // `.docx` 是个 ZIP，只读开头没有意义 —— 中央目录在文件末尾。要么整份
+    // 读进来，要么老实说它太大。
+    if (size > DOCX_MAX_BYTES) return { ok: false, reason: 'too-large', detail: path }
+    const bytes = await readHead(real, size).catch(() => null)
+    if (bytes === null) return { ok: false, reason: 'unreadable', detail: path }
+    const doc = readDocx(bytes)
+    if (doc === null) return { ok: false, reason: 'bad-document', detail: path }
+    return { ok: true, file: { kind: 'docx', ...at, truncated: doc.truncated, content: '', doc } }
+  }
+
+  const take = Math.min(size, PREVIEW_MAX_BYTES)
+  // stat 过得去、open 过不去 —— 权限。这跟「文件不在」不是一回事，也不该
+  // 一路抛到最外层：那只会给调用方一个 500，日志里多一条未处理异常。
+  const head = await readHead(real, take).catch(() => null)
+  if (head === null) return { ok: false, reason: 'unreadable', detail: path }
+
+  // NUL 是判二进制最省事也最准的一条：文本文件里不会有它。
+  if (head.includes(0)) return { ok: false, reason: 'not-text', detail: path }
+
+  const truncated = size > take
+  return {
+    ok: true,
+    // 扩展名认不出来（`Makefile`、`LICENSE`）但正文是文本 —— 那就是文本。
+    file: {
+      kind: named ?? 'text',
+      ...at,
+      truncated,
+      content: (truncated ? trimPartialUtf8(head) : head).toString('utf8'),
+    },
+  }
 }

@@ -19,8 +19,42 @@ export interface DiffView {
   truncated: boolean
 }
 
+/**
+ * 一份文件该按什么方式呈现。服务端按扩展名定（见 host 的 `docs/kind.ts`）。
+ *
+ * `pdf` 与 `image` **没有正文**：它们的字节不走 JSON，前端拿 raw 那个口子
+ * 交给浏览器自己渲染。`docx` 也没有正文，取而代之的是一棵 `doc` 文档树。
+ */
+export type FileKind = 'text' | 'markdown' | 'pdf' | 'docx' | 'image' | 'binary'
+
+/** Word 文档里的一段文字，以及它身上的格式。没有的格式字段不出现。 */
+export interface DocSpan {
+  text: string
+  bold?: boolean
+  italic?: boolean
+  underline?: boolean
+  /** 外部链接。服务端只放行 http(s)。 */
+  href?: string
+}
+
+/** Word 文档的一个块。表格的 rows 是「行 → 单元格 → 片段」三层。 */
+export type DocBlock =
+  | { kind: 'heading'; level: number; spans: DocSpan[] }
+  | { kind: 'paragraph'; spans: DocSpan[] }
+  /** `numId` 是这条属于哪一份编号定义 —— 换了一份就是换了个列表，序号重来。 */
+  | { kind: 'list'; ordered: boolean; level: number; numId: string; spans: DocSpan[] }
+  | { kind: 'table'; rows: DocSpan[][][] }
+
+/** 服务端翻出来的文档树。目前只有 `.docx` 会给。 */
+export interface RichDoc {
+  blocks: DocBlock[]
+  /** 块数太多，只给了前一段。 */
+  truncated: boolean
+}
+
 /** 工作区里的一个文件。讨论里点开一条文档链接看的就是它。 */
 export interface FilePreview {
+  kind: FileKind
   path: string
   name: string
   /** 相对所属根目录的路径 —— 界面上显示这个，绝对路径太长读不出重点。 */
@@ -28,7 +62,10 @@ export interface FilePreview {
   /** 文件真实大小（字节），不是 content 的长度。 */
   size: number
   truncated: boolean
+  /** 正文。`pdf` / `image` / `docx` 没有正文可给，是空串。 */
   content: string
+  /** `docx` 专有。 */
+  doc?: RichDoc
 }
 
 export interface Task {
@@ -130,11 +167,14 @@ export interface FileContent {
   path: string
   relative: string
   size: number
+  kind: FileKind
   /** 文件超过上限时只回了前一段。 */
   truncated: boolean
-  /** 二进制文件不回正文。 */
+  /** 二进制文件不回正文。`kind === 'binary'` 的另一种说法。 */
   binary: boolean
   content: string
+  /** `docx` 专有。 */
+  doc?: RichDoc
 }
 
 /** 跑一条命令的结果。命令自己失败也是这个形状 —— 那是它的输出，不是故障。 */

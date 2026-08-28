@@ -289,7 +289,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       if (method === 'PATCH') {
         const body = await readJsonBody(req) as
-          { autopilot?: boolean; maxConcurrent?: number; maxPerRepo?: number } | undefined
+          { autopilot?: boolean; maxPerProvider?: number; maxPerRepo?: number } | undefined
         const settings = scheduler.updateSettings(body ?? {})
         // 立刻跑一轮，让开关点下去马上有反应，而不是等下一个节拍。
         // tick() 会排在进行中的那一轮之后，所以这里拿到的一定是**新设置下**

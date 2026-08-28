@@ -319,7 +319,7 @@ async function main(): Promise<void> {
   console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
   console.log(C.dim(`    数据 ${join(dir, 'loopkanban.db')}`))
   console.log(scheduler.settings.autopilot
-    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 并发 ${String(scheduler.settings.maxConcurrent)}`)}\n`
+    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 每个执行器并发 ${String(scheduler.settings.maxPerProvider)}`)}\n`
     : C.dim('    自动认领当前关闭，可在界面左侧边栏底部打开。\n'))
 
   if (!process.argv.includes('--no-open')) openBrowser(server.url)

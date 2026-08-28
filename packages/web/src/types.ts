@@ -156,13 +156,14 @@ export interface RunStats {
 
 export interface SchedulerSettings {
   autopilot: boolean
-  maxConcurrent: number
+  /** 每个执行器的并发上限 —— 不是全局上限。 */
+  maxPerProvider: number
   maxPerRepo: number
 }
 
 export interface Skip {
   taskId: string
-  reason: 'blocked-by-dependency' | 'global-limit-reached' | 'repo-limit-reached' | 'provider-unavailable'
+  reason: 'blocked-by-dependency' | 'provider-limit-reached' | 'repo-limit-reached' | 'provider-unavailable'
   detail: string
 }
 

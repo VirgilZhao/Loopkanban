@@ -99,14 +99,20 @@ describe('设置', () => {
   })
 
   it('设置写进存储，重启后仍在', () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 5 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 5 })
     const revived = new Scheduler({ storage: store, runner, agents: [] })
-    expect(revived.settings).toMatchObject({ autopilot: true, maxConcurrent: 5 })
+    expect(revived.settings).toMatchObject({ autopilot: true, maxPerProvider: 5 })
+  })
+
+  it('旧库里的 maxConcurrent 照原值搬成 maxPerProvider —— 改名字不该把用户设过的数字弄丢', () => {
+    // 改名之前的世界：上限叫 maxConcurrent，语义是全局。
+    store.setSetting('scheduler', { autopilot: true, maxConcurrent: 5, maxPerRepo: 2 })
+    expect(scheduler.settings).toEqual({ autopilot: true, maxPerProvider: 5, maxPerRepo: 2 })
   })
 
   it('并发上限被夹到至少 1 —— 0 会让调度器静悄悄什么都不做', () => {
-    expect(scheduler.updateSettings({ maxConcurrent: 0 }).maxConcurrent).toBe(1)
-    expect(scheduler.updateSettings({ maxConcurrent: -3 }).maxConcurrent).toBe(1)
+    expect(scheduler.updateSettings({ maxPerProvider: 0 }).maxPerProvider).toBe(1)
+    expect(scheduler.updateSettings({ maxPerProvider: -3 }).maxPerProvider).toBe(1)
     expect(scheduler.updateSettings({ maxPerRepo: 2.7 }).maxPerRepo).toBe(2)
   })
 
@@ -148,7 +154,7 @@ describe('tick', () => {
   })
 
   it('开着时把 Ready 里的卡派出去', async () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 3, maxPerRepo: 3 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 3, maxPerRepo: 3 })
     for (const id of ['a', 'b']) store.createTask(task({ id, position: id === 'a' ? 1 : 2 }))
 
     const report = await scheduler.tick()
@@ -160,13 +166,13 @@ describe('tick', () => {
   })
 
   it('尊重并发上限，超出的带原因留在 skipped —— 不做静默截断', async () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 1, maxPerRepo: 9 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 1, maxPerRepo: 9 })
     for (const [i, id] of ['a', 'b', 'c'].entries()) store.createTask(task({ id, position: i + 1 }))
 
     const report = await scheduler.tick()
     expect(report.dispatched).toHaveLength(1)
     expect(report.skipped.map((s) => s.taskId)).toEqual(['b', 'c'])
-    expect(report.skipped.every((s) => s.reason === 'global-limit-reached')).toBe(true)
+    expect(report.skipped.every((s) => s.reason === 'provider-limit-reached')).toBe(true)
     // 界面要能照着这个原因回答"我的卡为什么不动"。
     expect(report.skipped[0]?.detail).toContain('1')
     await quiet()
@@ -192,7 +198,7 @@ describe('tick', () => {
   })
 
   it('单个派发失败不影响同一轮的其他卡', async () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 9, maxPerRepo: 9 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 9, maxPerRepo: 9 })
     store.createTask(task({ id: 'a', position: 1 }))
     // 仓库路径不存在 → 建 worktree 必失败。
     store.createTask(task({ id: 'bad', position: 2, repoPath: join(sandbox, 'no-such-repo') }))
@@ -206,7 +212,7 @@ describe('tick', () => {
   })
 
   it('重入被挡住：上一轮还没跑完时不会把同一张卡算两次', async () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 9, maxPerRepo: 9 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 9, maxPerRepo: 9 })
     store.createTask(task({ id: 'a' }))
 
     const [first, second] = await Promise.all([scheduler.tick(), scheduler.tick()])
@@ -224,7 +230,7 @@ describe('start / stop', () => {
   })
 
   it('节拍会自动把 Ready 里的卡跑完', async () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 2, maxPerRepo: 2 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 2, maxPerRepo: 2 })
     for (const [i, id] of ['a', 'b'].entries()) store.createTask(task({ id, position: i + 1 }))
 
     scheduler = new Scheduler({ storage: store, runner, agents: [{ provider: provider('alpha'), caps: caps('alpha') }], tickMs: 50 })
@@ -241,7 +247,7 @@ describe('start / stop', () => {
 
 describe('轮次串行（回归）', () => {
   it('tick 排在进行中的轮次之后，拿到的是自己这次的结果而非上一轮的陈旧报告', async () => {
-    scheduler.updateSettings({ autopilot: true, maxConcurrent: 9, maxPerRepo: 9 })
+    scheduler.updateSettings({ autopilot: true, maxPerProvider: 9, maxPerRepo: 9 })
     store.createTask(task({ id: 'a' }))
 
     const first = scheduler.tick()

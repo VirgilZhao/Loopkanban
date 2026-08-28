@@ -156,6 +156,17 @@ export default function App(): React.JSX.Element {
     return grouped
   }, [tasks, showArchived, view])
 
+  /** 每个执行器当前跑着几张卡。租约上写的 provider 才是真正在跑的那个。 */
+  const runningByAgent = useMemo(() => {
+    const counted: Record<string, number> = {}
+    for (const task of tasks) {
+      const provider = task.lease?.provider
+      if (task.column !== 'running' || provider === undefined) continue
+      counted[provider] = (counted[provider] ?? 0) + 1
+    }
+    return counted
+  }, [tasks])
+
   /** 侧边栏上的项目计数。归档的卡不算 —— 归档就是从视野里拿走。 */
   const projectCounts = useMemo(() => {
     const counted: Record<string, number> = {}
@@ -266,6 +277,7 @@ export default function App(): React.JSX.Element {
     <SidebarProvider>
       <AppSidebar
         agents={agents}
+        runningByAgent={runningByAgent}
         projects={projects}
         counts={projectCounts}
         total={tasks.filter((t) => t.archivedAt === undefined).length}

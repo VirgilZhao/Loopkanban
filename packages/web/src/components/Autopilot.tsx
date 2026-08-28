@@ -14,7 +14,7 @@ interface Props {
  * 所以给它一整块地方，而不是挤在工具条里当第七颗按钮。
  */
 export function Autopilot({ settings, running, busy, onChange }: Props): React.JSX.Element {
-  const { autopilot, maxConcurrent } = settings
+  const { autopilot, maxPerProvider } = settings
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-sidebar-border bg-sidebar-accent/20 p-2">
@@ -53,17 +53,18 @@ export function Autopilot({ settings, running, busy, onChange }: Props): React.J
       <div className="flex items-center gap-1.5 px-0.5">
         {/* 并发上限。开着自动驾驶时才有意义，所以关着就淡下去。 */}
         <div className={cn('flex items-center gap-1', !autopilot && 'opacity-40')}>
-          <span className="chrome-label">limit</span>
+          {/* 上限是按执行器算的：claude 排满了不该顺带把 codex 也堵住。 */}
+          <span className="chrome-label" title="每个执行器的并发上限">limit / agent</span>
           <Step
-            label="减少并发" disabled={busy || maxConcurrent <= 1}
-            onClick={() => { onChange({ maxConcurrent: maxConcurrent - 1 }) }}
+            label="减少每个执行器的并发" disabled={busy || maxPerProvider <= 1}
+            onClick={() => { onChange({ maxPerProvider: maxPerProvider - 1 }) }}
           >
             <Minus className="size-2.5" />
           </Step>
-          <span className="mono w-3 text-center text-[12px] text-ink">{maxConcurrent}</span>
+          <span className="mono w-3 text-center text-[12px] text-ink">{maxPerProvider}</span>
           <Step
-            label="增加并发" disabled={busy}
-            onClick={() => { onChange({ maxConcurrent: maxConcurrent + 1 }) }}
+            label="增加每个执行器的并发" disabled={busy}
+            onClick={() => { onChange({ maxPerProvider: maxPerProvider + 1 }) }}
           >
             <Plus className="size-2.5" />
           </Step>

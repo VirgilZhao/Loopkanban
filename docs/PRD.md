@@ -158,6 +158,16 @@ interface Run {
 interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; at: string }
 ```
 
+### 并发上限按执行器算，不是全局
+
+三个 CLI 各有各的额度与速率限制，claude 排满了不该顺带把 codex 也堵住 ——
+所以 `limit` 是**每个执行器**的位子数，界面上也这么写（`limit / agent`），
+本机 Agent 那一栏跟着显示「占用 / 总数」。
+
+由此带出一条调度规则：没指定执行器的卡，挑**当前跑得最少的那个**，而不是
+永远取第一个。上限按执行器算之后，总取第一个会让没指定的卡全堆在 claude 上
+排队，而 codex 闲着。打平时按探测顺序，结果仍然是确定的。
+
 ### 讨论取代打回
 
 评审意见原本是任务上的一个字段：打回时写一句，下一次执行读走，然后清空。

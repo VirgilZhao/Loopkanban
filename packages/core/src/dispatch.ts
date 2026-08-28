@@ -15,8 +15,14 @@ import type { TaskId } from './ids.ts'
 import { isLeaseExpired, type Task } from './task.ts'
 
 export interface DispatchLimits {
-  /** 全局同时运行的 Run 上限。 */
-  readonly maxConcurrent: number
+  /**
+   * **每个执行器**同时运行的上限。
+   *
+   * 不是全局上限：三个 CLI 各有各的额度与速率限制，claude 排满了不该顺带
+   * 把 codex 也堵住。想开多大取决于你各家的账号能扛多少，不取决于这台机器
+   * 有几个 CLI。
+   */
+  readonly maxPerProvider: number
   /** 单个仓库同时运行的上限，用来压住合并冲突。 */
   readonly maxPerRepo: number
 }
@@ -38,7 +44,7 @@ export interface Dispatch {
 
 export type SkipReason =
   | 'blocked-by-dependency'
-  | 'global-limit-reached'
+  | 'provider-limit-reached'
   | 'repo-limit-reached'
   | 'provider-unavailable'
 
@@ -55,12 +61,28 @@ export interface DispatchPlan {
   readonly reclaimable: readonly TaskId[]
 }
 
-/** 选一个可用的 provider：指定了就必须用指定的，否则取第一个可用的。 */
-function pickProvider(task: Task, available: readonly string[]): string | null {
+/**
+ * 选一个可用的 provider。
+ *
+ * 指定了就必须用指定的。没指定时挑**当前跑得最少的那个** —— 上限是按执行器
+ * 算的，总取第一个会让没指定的卡全堆在 claude 上排队，而 codex 闲着。
+ * 打平时按 `available` 的顺序，结果因此是确定的（纯函数，可测）。
+ */
+function pickProvider(
+  task: Task,
+  available: readonly string[],
+  running: ReadonlyMap<string, number>,
+): string | null {
   if (task.preferredProvider !== undefined) {
     return available.includes(task.preferredProvider) ? task.preferredProvider : null
   }
-  return available[0] ?? null
+  let best: string | null = null
+  let least = Number.POSITIVE_INFINITY
+  for (const provider of available) {
+    const busy = running.get(provider) ?? 0
+    if (busy < least) { best = provider; least = busy }
+  }
+  return best
 }
 
 /**
@@ -76,7 +98,7 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
   const completed = new Set<TaskId>(tasks.filter((t) => t.column === 'done').map((t) => t.id))
 
   const reclaimable: TaskId[] = []
-  let runningGlobal = 0
+  const runningPerProvider = new Map<string, number>()
   const runningPerRepo = new Map<string, number>()
 
   for (const task of tasks) {
@@ -87,7 +109,11 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
       reclaimable.push(task.id)
       continue
     }
-    runningGlobal += 1
+    // 名额算在**租约上写着的那个 provider** 头上：那才是真正在跑的东西。
+    const provider = task.lease?.provider
+    if (provider !== undefined) {
+      runningPerProvider.set(provider, (runningPerProvider.get(provider) ?? 0) + 1)
+    }
     runningPerRepo.set(task.repoPath, (runningPerRepo.get(task.repoPath) ?? 0) + 1)
   }
 
@@ -108,7 +134,7 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
       continue
     }
 
-    const provider = pickProvider(task, availableProviders)
+    const provider = pickProvider(task, availableProviders, runningPerProvider)
     if (provider === null) {
       skipped.push({
         taskId: task.id,
@@ -120,11 +146,12 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
       continue
     }
 
-    if (runningGlobal >= limits.maxConcurrent) {
+    const providerRunning = runningPerProvider.get(provider) ?? 0
+    if (providerRunning >= limits.maxPerProvider) {
       skipped.push({
         taskId: task.id,
-        reason: 'global-limit-reached',
-        detail: `全局并发已满 (${String(limits.maxConcurrent)})`,
+        reason: 'provider-limit-reached',
+        detail: `${provider} 并发已满 (${String(limits.maxPerProvider)})`,
       })
       continue
     }
@@ -140,7 +167,7 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
     }
 
     dispatches.push({ taskId: task.id, expectedRevision: task.revision, provider })
-    runningGlobal += 1
+    runningPerProvider.set(provider, providerRunning + 1)
     runningPerRepo.set(task.repoPath, repoRunning + 1)
   }
 

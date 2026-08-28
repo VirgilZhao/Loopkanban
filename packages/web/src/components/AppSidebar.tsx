@@ -14,6 +14,8 @@ export type View = { readonly kind: 'overview' } | { readonly kind: 'project'; r
 
 interface Props {
   agents: Agent[]
+  /** 每个执行器当前跑着几张卡。 */
+  runningByAgent: Record<string, number>
   projects: Project[]
   /** 每个项目的任务数；概览用 total。 */
   counts: Record<string, number>
@@ -36,10 +38,12 @@ interface Props {
 }
 
 export function AppSidebar({
-  agents, projects, counts, total, view, onView, onNewProject, onDeleteProject, onRenameProject,
+  agents, runningByAgent, projects, counts, total, view, onView, onNewProject, onDeleteProject, onRenameProject,
   onCreate, canCreate, archivedCount, showArchived, onToggleArchived,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
+  /** 每个执行器有几个位子。调度器没起来时按 1 显示，别在界面上编一个数字。 */
+  const limitPerAgent = scheduler?.settings.maxPerProvider ?? 1
   // 正在改名的那个项目。双击名字进入，回车 / 失焦落定，Esc 放弃。
   const [renaming, setRenaming] = useState<string | null>(null)
   return (
@@ -193,16 +197,24 @@ export function AppSidebar({
                     </span>
                   </div>
                 </SidebarMenuItem>
-              ) : agents.map((agent) => (
+              ) : agents.map((agent) => {
+                const running = runningByAgent[agent.id] ?? 0
+                return (
                 <SidebarMenuItem key={agent.id}>
                   <div
                     className={cn(
                       'flex h-8 items-center gap-2 rounded-md p-2 text-sm',
                       'group-data-[state=collapsed]/sidebar:size-8! group-data-[state=collapsed]/sidebar:p-2! group-data-[state=collapsed]/sidebar:justify-center',
                     )}
-                    title={[agent.bin, agent.version, agent.permissionCaveat?.detail].filter(Boolean).join('\n')}
+                    title={[
+                      agent.bin,
+                      agent.version,
+                      `占用 ${String(running)} / ${String(limitPerAgent)} 个执行位`,
+                      agent.permissionCaveat?.detail,
+                    ].filter(Boolean).join('\n')}
                   >
-                    <span className="lamp flex-none" data-state="done" />
+                    {/* 灯跟着这个执行器有没有活在跑 —— 不是"装没装"。 */}
+                    <span className="lamp flex-none" data-state={running > 0 ? 'running' : 'done'} />
                     <span className="chrome-label truncate !text-sidebar-foreground/80 group-data-[state=collapsed]/sidebar:hidden">
                       {agent.id}
                     </span>
@@ -217,12 +229,17 @@ export function AppSidebar({
                         {agent.permissionCaveat.label}
                       </span>
                     )}
-                    <SidebarMenuBadge className="mono !text-[10px]">
+                    <span className="mono ms-auto text-[10px] text-sidebar-foreground/60 group-data-[state=collapsed]/sidebar:hidden">
                       {/^[\d.]+/.exec(agent.version)?.[0] ?? agent.version}
+                    </span>
+                    {/* 占了几个执行位 / 一共几个。上限是按执行器算的。 */}
+                    <SidebarMenuBadge className={cn('mono !ms-0', running > 0 && '!text-sodium')}>
+                      {String(running)}/{String(limitPerAgent)}
                     </SidebarMenuBadge>
                   </div>
                 </SidebarMenuItem>
-              ))}
+                )
+              })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

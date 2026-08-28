@@ -1,3 +1,4 @@
+import { FileText } from 'lucide-react'
 import type { JSX } from 'react'
 
 /**
@@ -13,10 +14,44 @@ import type { JSX } from 'react'
  * 别的（表格、图片、脚注）按原文显示，不装作认识。
  */
 
+export interface MarkdownOptions {
+  /**
+   * 点开一条指向本机文件的链接。不给则这类链接退化成纯文本（原来的样子）。
+   *
+   * Agent 常常把方案写成一份文档，再在讨论里给出路径 —— 那是它自己的
+   * worktree 里的文件，`<a href>` 点了什么也不会发生。
+   */
+  onOpenFile?: (path: string) => void
+}
+
+/**
+ * 认出一个指向本机文件的链接目标。
+ *
+ * 放行的只有两种：`file://`，以及**完全没有协议**的路径（相对或绝对）。
+ * 其余一律 null —— `javascript:` / `data:` 这类伪协议不该有第二条路进来。
+ */
+function localPath(href: string): string | null {
+  if (href.length === 0 || href.startsWith('#')) return null
+  if (/^file:\/\//i.test(href)) {
+    try {
+      return decodeURIComponent(new URL(href).pathname)
+    } catch {
+      return null
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return null
+  // 带空格的路径在链接里是 %20。解不动就用原样 —— 路径里真有个 `%` 不该报错。
+  try {
+    return decodeURIComponent(href)
+  } catch {
+    return href
+  }
+}
+
 /** 行内标记：代码 / 粗体 / 斜体 / 链接。 */
 const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g
 
-function renderInline(text: string, key: string): (JSX.Element | string)[] {
+function renderInline(text: string, key: string, options: MarkdownOptions): (JSX.Element | string)[] {
   return text.split(INLINE).filter((part) => part.length > 0).map((part, index) => {
     const id = `${key}-${String(index)}`
     if (part.startsWith('`') && part.endsWith('`')) {
@@ -34,14 +69,30 @@ function renderInline(text: string, key: string): (JSX.Element | string)[] {
     }
     const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part)
     if (link !== null) {
-      // 只放行 http(s)：javascript: 这类伪协议一律退化成纯文本。
-      const href = link[2] ?? ''
+      // 只放行 http(s) 与本机路径：javascript: 这类伪协议一律退化成纯文本。
+      const href = (link[2] ?? '').trim()
       const label = link[1] ?? ''
       if (/^https?:\/\//.test(href)) {
         return (
           <a key={id} href={href} target="_blank" rel="noreferrer" className="text-sodium underline underline-offset-2">
             {label}
           </a>
+        )
+      }
+      const open = options.onOpenFile
+      const local = localPath(href)
+      if (open !== undefined && local !== null) {
+        return (
+          <button
+            key={id}
+            type="button"
+            title={local}
+            onClick={() => { open(local) }}
+            className="inline-flex max-w-full items-baseline gap-1 align-baseline text-sodium underline underline-offset-2 hover:text-sodium-deep"
+          >
+            <FileText className="size-3 flex-none self-center" />
+            <span className="min-w-0 truncate">{label}</span>
+          </button>
         )
       }
       return <span key={id}>{part}</span>
@@ -53,8 +104,9 @@ function renderInline(text: string, key: string): (JSX.Element | string)[] {
 /**
  * 把一段 Markdown 渲染成 React 元素。
  * @param source - 原文。
+ * @param options - 目前只有一项：本机文件链接点开时做什么。
  */
-export function renderMarkdown(source: string): JSX.Element[] {
+export function renderMarkdown(source: string, options: MarkdownOptions = {}): JSX.Element[] {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
   const out: JSX.Element[] = []
   let index = 0
@@ -90,7 +142,7 @@ export function renderMarkdown(source: string): JSX.Element[] {
           key={key()}
           className={depth <= 2 ? 'mt-3 mb-1 text-sm font-semibold text-ink' : 'mt-2 mb-1 font-medium text-ink'}
         >
-          {renderInline(heading[2] ?? '', key())}
+          {renderInline(heading[2] ?? '', key(), options)}
         </p>,
       )
       index += 1
@@ -109,7 +161,7 @@ export function renderMarkdown(source: string): JSX.Element[] {
       out.push(
         <Tag key={key()} className={`my-1.5 space-y-1 ps-5 ${ordered ? 'list-decimal' : 'list-disc'}`}>
           {items.map((item, i) => (
-            <li key={`${key()}-${String(i)}`}>{renderInline(item, `${key()}-${String(i)}`)}</li>
+            <li key={`${key()}-${String(i)}`}>{renderInline(item, `${key()}-${String(i)}`, options)}</li>
           ))}
         </Tag>,
       )
@@ -124,7 +176,7 @@ export function renderMarkdown(source: string): JSX.Element[] {
       }
       out.push(
         <blockquote key={key()} className="my-2 border-s-2 border-hairline ps-3 text-ink-faint">
-          {renderInline(quoted.join(' '), key())}
+          {renderInline(quoted.join(' '), key(), options)}
         </blockquote>,
       )
       continue
@@ -140,7 +192,7 @@ export function renderMarkdown(source: string): JSX.Element[] {
       index += 1
     }
     out.push(
-      <p key={key()} className="my-1.5 leading-relaxed">{renderInline(para.join(' '), key())}</p>,
+      <p key={key()} className="my-1.5 leading-relaxed">{renderInline(para.join(' '), key(), options)}</p>,
     )
   }
 

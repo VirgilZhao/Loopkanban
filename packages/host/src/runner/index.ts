@@ -24,6 +24,7 @@ import {
   acquireLease, asRunId, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
   taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
+import { humanSize, stageAttachments, type StagedAttachment } from '../attachments/index.ts'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
 import type { AgentPool, DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
@@ -191,15 +192,18 @@ export class Runner {
 
     const artifactsDir = join(artifactsRoot, runId)
     await mkdir(artifactsDir, { recursive: true })
+    // 附件先落进 worktree，再写 TASK.md —— 清单里的每一条都得真的在那儿，
+    // 拷不过去的不列出来，免得 Agent 去找一个不存在的文件。
+    const staged = await stageAttachments(worktree.path, storage.listAttachments(task.id))
     // 讨论线程一起写进 TASK.md：人和 Agent 的每一轮往来都是这次执行的上下文。
     const comments = storage.listComments(task.id)
-    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments), 'utf8')
+    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged), 'utf8')
 
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task, comments, prior !== undefined),
+      prompt: renderPrompt(task, comments, prior !== undefined, staged),
       permission: 'standard',
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
       ...(task.model === undefined ? {} : { model: task.model }),
@@ -234,6 +238,12 @@ export class Runner {
       text: `${provider.id} ${caps.version} · pid ${String(handle.pid)}`
         + (resumeSpec === null ? '' : ` · 接续会话 ${String(prior?.agentSessionId)}`),
     })
+    if (staged.length > 0) {
+      this.emit(runId, 'notice', {
+        level: 'info',
+        text: `带 ${String(staged.length)} 个附件：${staged.map((file) => file.filename).join('、')}`,
+      })
+    }
     const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
     if (lastHuman !== undefined) {
       this.emit(runId, 'notice', {
@@ -542,13 +552,26 @@ export class Runner {
  *
  * 讨论线程整段附在后面：人和 Agent 的往来是这张卡真正的上下文，只给最后
  * 一句会让 Agent 反复推翻自己已经确认过的结论。
+ *
+ * 附件列成一节**带上相对路径**：文件已经躺在 worktree 里了，但 Agent 只有
+ * 知道它们在哪儿、分别是什么，才会真的去读 —— 光把文件放进目录，多数时候
+ * 它连看都不会看一眼。
  */
-export function renderTaskSpec(task: Task, comments: readonly TaskComment[] = []): string {
+export function renderTaskSpec(
+  task: Task, comments: readonly TaskComment[] = [], attachments: readonly StagedAttachment[] = [],
+): string {
   const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
   // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
   if (task.acceptance.length > 0) {
     lines.push('## 验收标准', '')
     for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
+  }
+  if (attachments.length > 0) {
+    lines.push('', '## 附件', '', '这些文件是需求的一部分，已经放在工作区里，请读过再动手：', '')
+    for (const file of attachments) {
+      lines.push(`- \`${file.relPath}\` —— ${file.filename}（${file.mime}，${humanSize(file.size)}）`)
+    }
+    lines.push('', '读不了某个格式（比如 Word、PDF）就想办法转成文本再读，不要跳过它。')
   }
   if (comments.length > 0) {
     lines.push('', '## 讨论', '')
@@ -563,10 +586,20 @@ export function renderTaskSpec(task: Task, comments: readonly TaskComment[] = []
 
 /**
  * 交给 CLI 的 prompt。刻意指向 TASK.md，避免把长文本堆进命令行。
+ *
+ * 附件在这里**再点一次名**：TASK.md 里已经有完整清单，但 prompt 是 CLI
+ * 唯一保证会读的东西，附件是需求的一部分，不该指望它自己翻到那一节。
+ *
  * @param task - 目标任务。
  * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
+ * @param attachments - 已经拷进 worktree 的附件。
  */
-export function renderPrompt(task: Task, comments: readonly TaskComment[] = [], resuming = false): string {
+export function renderPrompt(
+  task: Task,
+  comments: readonly TaskComment[] = [],
+  resuming = false,
+  attachments: readonly StagedAttachment[] = [],
+): string {
   const lines: string[] = []
   const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
   if (lastHuman === undefined) {
@@ -580,6 +613,13 @@ export function renderPrompt(task: Task, comments: readonly TaskComment[] = [], 
       lastHuman.body,
       '',
       '完整需求与此前的往来见仓库根目录的 TASK.md 的「讨论」一节。',
+    )
+  }
+  if (attachments.length > 0) {
+    lines.push(
+      '',
+      `这张卡带了 ${String(attachments.length)} 个附件，是需求的一部分，动手前先读：`,
+      ...attachments.map((file) => `- ${file.relPath}（${file.filename}）`),
     )
   }
   lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')

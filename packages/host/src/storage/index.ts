@@ -40,6 +40,24 @@ export interface TaskComment {
   readonly at: number
 }
 
+/**
+ * 卡片带着的一个附件：图片、PDF、Word 文档之类。
+ *
+ * 库里只有元数据，字节在 `path` 指的文件里（见 `AttachmentStore`）。
+ * 派活时它们会被拷进 worktree，并列进 TASK.md 交给 Agent。
+ */
+export interface Attachment {
+  readonly id: string
+  readonly taskId: TaskId
+  /** 用户原来的文件名，界面上显示、写进 TASK.md 的都是它。 */
+  readonly filename: string
+  readonly mime: string
+  readonly size: number
+  /** 字节在磁盘上的绝对路径。 */
+  readonly path: string
+  readonly at: number
+}
+
 export type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
 
 export interface Run {
@@ -104,6 +122,16 @@ interface TaskRow {
   updated_at: number
 }
 
+interface AttachmentRow {
+  id: string
+  task_id: string
+  filename: string
+  mime: string
+  size: number
+  path: string
+  at: number
+}
+
 interface RunRow {
   id: string
   task_id: string
@@ -139,6 +167,18 @@ function toTask(row: TaskRow): Task {
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function toAttachment(row: AttachmentRow): Attachment {
+  return {
+    id: row.id,
+    taskId: asTaskId(row.task_id),
+    filename: row.filename,
+    mime: row.mime,
+    size: row.size,
+    path: row.path,
+    at: row.at,
   }
 }
 
@@ -252,6 +292,7 @@ export class Storage {
       `).run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM task_comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM task_attachments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
       if (removed.changes !== 1) {
@@ -289,6 +330,55 @@ export class Storage {
       ...(row.run_id === null ? {} : { runId: asRunId(row.run_id) }),
       at: row.at,
     }))
+  }
+
+  // ── 附件 ───────────────────────────────────────────────────────
+
+  addAttachment(attachment: Attachment): void {
+    this.db.prepare(
+      'INSERT INTO task_attachments (id, task_id, filename, mime, size, path, at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      attachment.id, attachment.taskId, attachment.filename,
+      attachment.mime, attachment.size, attachment.path, attachment.at,
+    )
+  }
+
+  /** 一张卡的附件，按上传顺序 —— TASK.md 里的清单也照这个顺序排。 */
+  listAttachments(taskId: TaskId): Attachment[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_attachments WHERE task_id = ? ORDER BY at, id',
+    ).all(taskId) as unknown as AttachmentRow[]
+    return rows.map(toAttachment)
+  }
+
+  /**
+   * 一个项目下所有卡片的附件。删项目时要拿它去收拾磁盘上的文件 ——
+   * 库里的记录被外键连带删掉了，字节可不会自己消失。
+   */
+  listProjectAttachments(projectId: ProjectId): Attachment[] {
+    const rows = this.db.prepare(`
+      SELECT a.* FROM task_attachments a
+      JOIN tasks t ON t.id = a.task_id
+      WHERE t.project_id = ?
+    `).all(projectId) as unknown as AttachmentRow[]
+    return rows.map(toAttachment)
+  }
+
+  getAttachment(id: string): Attachment | null {
+    const row = this.db.prepare('SELECT * FROM task_attachments WHERE id = ?').get(id) as unknown as
+      AttachmentRow | undefined
+    return row === undefined ? null : toAttachment(row)
+  }
+
+  /**
+   * 删掉一条附件记录。**字节由调用方另行删除** —— 这一层只管库，
+   * 磁盘归 `AttachmentStore`，两者的失败方式不一样，混在一起只会让
+   * "库里没了、文件还在"更难查。
+   *
+   * @returns 是否删到了；false 表示这条记录本来就不在。
+   */
+  deleteAttachment(id: string): boolean {
+    return this.db.prepare('DELETE FROM task_attachments WHERE id = ?').run(id).changes === 1
   }
 
   // ── Task ───────────────────────────────────────────────────────
@@ -376,6 +466,7 @@ export class Storage {
     try {
       // 顺序是外键定的：事件 → Run → 卡片。反过来第一步就会被 runs 的引用挡住。
       this.db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
+      this.db.prepare('DELETE FROM task_attachments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)

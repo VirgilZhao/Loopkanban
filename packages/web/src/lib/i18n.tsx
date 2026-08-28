@@ -79,6 +79,7 @@ const zh = {
   // ── 卡片 ───────────────────────────────────────────────
   'card.empty': '还没写内容',
   'card.leaseExpired': '租约已过期 · 待回收',
+  'card.draftCleanupFailed': '那张没写内容的新卡没能删掉，它还留在想法池里，请手动删一下。',
 
   // ── 调度器为什么没派它 ─────────────────────────────────
   'skip.blocked-by-dependency': '依赖未完成: {0}',
@@ -112,6 +113,9 @@ const zh = {
   'panel.accept': '通过',
   'panel.discard': '废弃',
   'panel.acceptNote': '通过只把改动提交到分支 {branch}，不动你的主工作区；废弃会删掉分支并把卡退回 Backlog。要它再改一版，去讨论里说 —— 留言会把卡送回队列。',
+  'panel.rounds': '第 {n} 轮',
+  'panel.roundsHint': '这个会话跑过的轮次 —— 每派出去跑一次 +1，第二轮起接的是同一个 Agent 会话',
+  'panel.round': '#{n}',
   'panel.tab.spec': '规格',
   'panel.tab.talk': '讨论',
   'panel.tab.diff': 'Diff',
@@ -152,6 +156,18 @@ const zh = {
   'editor.modelUnknown': '没能列出 {provider} 的可选模型（离线或它报不出来），这次只能用它自己的默认。',
   'editor.modelHint': '{count} 个可选；不选就用 {provider} 自己的默认',
   'editor.modelDefault': '（默认模型）',
+  // ── 附件 ───────────────────────────────────────────────
+  'editor.attachments': '附件',
+  'editor.attachmentsHint': '图片、PDF、Word 都行。派活时会拷进工作区，并在 TASK.md 里点名交给 Agent',
+  'editor.attachmentsDrop': '把文件拖到这儿，或点击选择',
+  'editor.attachmentsDropActive': '松手就传上去',
+  'editor.attachmentsAdd': '添加附件',
+  'editor.attachmentsRemove': '删除这个附件',
+  'editor.attachmentsOpen': '在新标签页里打开',
+  'editor.attachmentsUploading': '正在上传 {name}',
+  'editor.attachmentsFull': '一张卡最多 {max} 个附件',
+  'editor.attachmentsLocked': '这张卡当前不能改附件',
+  'editor.attachmentsEmpty': '还没有附件',
   'editor.project': '项目',
   'editor.projectHint': '任务在它派生出来的 worktree 里执行，做完再合回基线',
   'editor.baseline': '基线 {branch}',
@@ -162,6 +178,11 @@ const zh = {
   // ── Diff ───────────────────────────────────────────────
   'diff.empty': '这次执行没有产生任何改动',
   'diff.truncated': '改动过大，这里只显示了前一部分。完整补丁在产物目录里。',
+
+  // ── 文档预览 ───────────────────────────────────────────
+  'preview.close': '关闭预览 · esc',
+  'preview.loading': '读取中…',
+  'preview.truncated': '文件太大，这里只显示了前一部分。完整的那份在本机磁盘上。',
 
   // ── 新增 / 删除项目 ───────────────────────────────────
   'newProject.pickTitle': '选择项目文件夹',
@@ -237,6 +258,15 @@ const zh = {
   'err.no-project': '还没有项目。先在左侧新增一个 —— 任务得知道自己在哪个仓库里干活。',
   'err.task-not-found': '这张卡已经不在了，可能刚被删掉。',
   'err.no-such-branch': '这个仓库里没有这条分支，可能刚被删掉。',
+  'err.task-running': '这张卡正在执行，内容和附件都冻结着。要改先终止执行。',
+  'err.too-many-attachments': '附件太多了。删掉几个再传 —— 一次给 Agent 塞几十份材料，它反而抓不住重点。',
+  'err.no-attachments': '当前实例没有配置附件存储，传不了文件。',
+  'err.attachment-not-found': '这个附件已经不在了，可能刚被删掉。',
+  'err.attachment-gone': '这个附件的文件已经不在磁盘上了 —— 重新传一份。',
+  'err.no-such-file': '这个文件不在了 —— 多半是这次执行的工作区已经删掉，或者路径写错了。',
+  'err.path-outside-workspace': '这条路径不在这张卡够得着的地方（它的工作区与项目仓库），不给看。',
+  'err.not-text': '这是个二进制文件，在这儿预览只会是一屏乱码。',
+  'err.unreadable': '这个文件读不动 —— 多半是权限不够。它确实在那儿，但当前用户打不开它。',
 }
 
 export type MessageKey = keyof typeof zh
@@ -297,6 +327,7 @@ const en: Record<MessageKey, string> = {
 
   'card.empty': 'Nothing written yet',
   'card.leaseExpired': 'Lease expired · to be reclaimed',
+  'card.draftCleanupFailed': 'That blank new card could not be removed — it is still in the idea pool, so delete it by hand.',
 
   'skip.blocked-by-dependency': 'Unfinished dependencies: {0}',
   'skip.provider-unavailable': 'No agent CLI detected on this machine',
@@ -328,6 +359,9 @@ const en: Record<MessageKey, string> = {
   'panel.accept': 'Accept',
   'panel.discard': 'Discard',
   'panel.acceptNote': 'Accepting only commits the work to branch {branch}; your main worktree is untouched. Discarding deletes the branch and sends the card back to Backlog. Want another pass? Say so in Talk — a comment requeues the card.',
+  'panel.rounds': 'round {n}',
+  'panel.roundsHint': 'Rounds this session has run — +1 each time the card is handed out; from the second one on it resumes the same agent session',
+  'panel.round': '#{n}',
   'panel.tab.spec': 'Spec',
   'panel.tab.talk': 'Talk',
   'panel.tab.diff': 'Diff',
@@ -366,6 +400,17 @@ const en: Record<MessageKey, string> = {
   'editor.modelUnknown': 'Couldn’t list models for {provider} (offline, or it won’t report them) — this run uses its own default.',
   'editor.modelHint': '{count} available; leave it unset to use {provider}’s own default',
   'editor.modelDefault': '(default model)',
+  'editor.attachments': 'Attachments',
+  'editor.attachmentsHint': 'Images, PDFs, Word documents. They are copied into the workspace at dispatch and listed for the agent in TASK.md',
+  'editor.attachmentsDrop': 'Drop files here, or click to pick',
+  'editor.attachmentsDropActive': 'Let go to upload',
+  'editor.attachmentsAdd': 'Add files',
+  'editor.attachmentsRemove': 'Remove this attachment',
+  'editor.attachmentsOpen': 'Open in a new tab',
+  'editor.attachmentsUploading': 'Uploading {name}',
+  'editor.attachmentsFull': 'A card holds at most {max} attachments',
+  'editor.attachmentsLocked': 'Attachments are frozen on this card right now',
+  'editor.attachmentsEmpty': 'No attachments yet',
   'editor.project': 'Project',
   'editor.projectHint': 'The task runs in a worktree derived from it, then merges back into the base',
   'editor.baseline': 'base {branch}',
@@ -375,6 +420,10 @@ const en: Record<MessageKey, string> = {
 
   'diff.empty': 'This run produced no changes',
   'diff.truncated': 'The change is too large to show in full; only the first part is here. The complete patch is in the artifacts directory.',
+
+  'preview.close': 'Close preview · esc',
+  'preview.loading': 'Reading…',
+  'preview.truncated': 'The file is too large to show in full; only the first part is here. The whole thing is on disk.',
 
   'newProject.pickTitle': 'Pick a project folder',
   'newProject.pickHint': 'You’re browsing the machine running LoopKanban. Only git repos can be projects.',
@@ -444,6 +493,15 @@ const en: Record<MessageKey, string> = {
   'err.no-project': 'No projects yet. Add one on the left — a task has to know which repo it works in.',
   'err.task-not-found': 'This card is gone; it may have just been deleted.',
   'err.no-such-branch': 'That branch isn’t in this repo — it may have just been deleted.',
+  'err.task-running': 'A run is in progress, so the spec and its attachments are frozen. Stop the run to edit.',
+  'err.too-many-attachments': 'Too many attachments. Remove a few first — dozens of files at once and the agent loses the thread.',
+  'err.no-attachments': 'This instance has no attachment storage configured, so files can’t be uploaded.',
+  'err.attachment-not-found': 'That attachment is gone; it may have just been deleted.',
+  'err.attachment-gone': 'That attachment’s file is no longer on disk — upload it again.',
+  'err.no-such-file': 'That file is gone — most likely the worktree for this run was removed, or the path is wrong.',
+  'err.path-outside-workspace': 'That path is outside what this card can reach (its worktree and the project repo).',
+  'err.not-text': 'That’s a binary file — previewing it here would just be a screen of noise.',
+  'err.unreadable': 'That file can’t be opened — most likely permissions. It is there, but this user can’t read it.',
 }
 
 const TABLES: Record<Lang, Record<MessageKey, string>> = { zh, en }

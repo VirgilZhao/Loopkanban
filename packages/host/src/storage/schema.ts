@@ -125,6 +125,23 @@ export const MIGRATIONS: readonly string[] = [
 
   ALTER TABLE tasks DROP COLUMN feedback;
   `,
+  // 附件：卡片带着的图片、PDF、Word 文档。**只记元数据**，字节落在数据目录
+  // 下的 attachments/ 里 —— 几十 MB 的 PDF 塞进库会让每一次读卡都拖着它走，
+  // 而 Agent 要的本来就是一个能打开的文件路径。
+  `
+  CREATE TABLE task_attachments (
+    id       TEXT PRIMARY KEY,
+    task_id  TEXT    NOT NULL REFERENCES tasks(id),
+    -- 用户原来的文件名，界面上显示的就是它。
+    filename TEXT    NOT NULL,
+    mime     TEXT    NOT NULL,
+    size     INTEGER NOT NULL,
+    -- 字节在磁盘上的绝对路径。
+    path     TEXT    NOT NULL,
+    at       INTEGER NOT NULL
+  );
+  CREATE INDEX idx_attachments_task ON task_attachments(task_id, at);
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

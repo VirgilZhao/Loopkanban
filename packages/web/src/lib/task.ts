@@ -27,3 +27,19 @@ export function modelOptions(agent: Agent, current: string | undefined): string[
   if (current === undefined || agent.models.includes(current)) return agent.models
   return [current, ...agent.models]
 }
+
+/**
+ * 这张卡是不是"建出来就没动过"。
+ *
+ * 新卡是先落地、再在弹窗里动笔的（服务端建的是一张空白卡）。所以直接叉掉
+ * 弹窗时得能认出"其实什么都没写"，把那张空卡收走 —— 否则想法池里会堆着
+ * 一排只有 id 的卡片。
+ *
+ * 判据是两条一起看：revision 还停在建卡那一版（存过、归档过、挪过都会让它
+ * 往前走），并且内容确实还空着。
+ */
+export function isUntouchedDraft(task: Pick<Task, 'revision' | 'description' | 'acceptance'>): boolean {
+  return task.revision === 1
+    && task.description.trim().length === 0
+    && task.acceptance.every((item) => item.trim().length === 0)
+}

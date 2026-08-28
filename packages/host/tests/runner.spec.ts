@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId, moveTask, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
+import { listStaged } from '../src/attachments/index.ts'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
@@ -119,6 +120,96 @@ describe('renderTaskSpec / renderPrompt', () => {
 
   it('prompt 指向 TASK.md 而不是把长文堆进命令行', () => {
     expect(renderPrompt(task({ id: 't1' }))).toContain('TASK.md')
+  })
+})
+
+describe('附件', () => {
+  /** 造一个真的附件文件，并把记录挂到卡上。 */
+  async function attach(taskId: string, filename: string, body: string): Promise<void> {
+    const path = join(sandbox, `blob-${filename}`)
+    await writeFile(path, body, 'utf8')
+    store.addAttachment({
+      id: `a-${filename}`,
+      taskId: asTaskId(taskId),
+      filename,
+      mime: 'text/plain',
+      size: body.length,
+      path,
+      at: T0,
+    })
+  }
+
+  it('派活时拷进 worktree，并在 TASK.md 与 prompt 里点名', async () => {
+    store.createTask(task({ id: 't1' }))
+    await attach('t1', '需求.txt', '照着这个做')
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const wt = worktreeDir(repo, 't1')
+    expect(await readFile(join(wt, '.loopkanban/attachments/需求.txt'), 'utf8')).toBe('照着这个做')
+
+    const spec = await readFile(join(wt, 'TASK.md'), 'utf8')
+    expect(spec).toContain('## 附件')
+    expect(spec).toContain('.loopkanban/attachments/需求.txt')
+  })
+
+  it('附件不进 diff —— 它是输入不是产出', async () => {
+    store.createTask(task({ id: 't1' }))
+    await attach('t1', '需求.txt', '照着这个做')
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    // 附件躺在 .loopkanban/ 下，而那条排除规则让 git 根本看不见它 ——
+    // 否则每次验收都会把一堆二进制材料提交进仓库。
+    expect(await isClean(worktreeDir(repo, 't1'))).toBe(false) // TASK.md 本来就在
+    const { stdout } = await capture(['git', '-C', worktreeDir(repo, 't1'), 'status', '--porcelain'])
+    expect(stdout).not.toContain('.loopkanban')
+  })
+
+  it('撤回的附件下一轮不会还留在工作区里', async () => {
+    store.createTask(task({ id: 't1' }))
+    await attach('t1', '旧的.txt', 'x')
+
+    const provider = scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })])
+    const first = await runner(provider).start(asTaskId('t1'))
+    if (!first.ok) return
+    await settle(first.run.id)
+    expect(await listStaged(worktreeDir(repo, 't1'))).toEqual(['旧的.txt'])
+
+    store.deleteAttachment('a-旧的.txt')
+    // 卡跑完停在 review，先放回队列才能再派一次。
+    const reviewed = store.getTask(asTaskId('t1'))
+    if (reviewed === null) throw new Error('setup')
+    const back = moveTask(reviewed, { expectedRevision: reviewed.revision, to: 'ready', now: T0 })
+    if (!back.ok) throw new Error('setup')
+    store.commitTask(back.value)
+
+    const second = await runner(provider).start(asTaskId('t1'))
+    if (!second.ok) return
+    await settle(second.run.id)
+    expect(await listStaged(worktreeDir(repo, 't1'))).toEqual([])
+  })
+
+  it('没有附件时 TASK.md 里不摆一个空的「附件」节', () => {
+    expect(renderTaskSpec(task({ id: 't1' }))).not.toContain('## 附件')
+    expect(renderPrompt(task({ id: 't1' }))).not.toContain('附件')
+  })
+
+  it('清单带上相对路径、类型与大小，Agent 才知道该怎么读它', () => {
+    const spec = renderTaskSpec(task({ id: 't1' }), [], [{
+      filename: '合同.pdf', mime: 'application/pdf', size: 2048,
+      relPath: '.loopkanban/attachments/合同.pdf',
+    }])
+    expect(spec).toContain('`.loopkanban/attachments/合同.pdf`')
+    expect(spec).toContain('application/pdf')
+    expect(spec).toContain('2.0 KB')
   })
 })
 

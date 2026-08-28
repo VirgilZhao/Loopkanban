@@ -8,6 +8,7 @@ import { Autopilot } from '@/components/Autopilot.tsx'
 import { Column } from '@/components/Column.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
+import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { insertPosition } from '@/lib/position.ts'
 import { cn } from '@/lib/utils.ts'
 import {
@@ -262,6 +263,8 @@ export default function App(): React.JSX.Element {
 
         <span className="flex-1" />
 
+        <ThemeToggle />
+
         {scheduler === null ? null : (
           <Autopilot
             settings={scheduler.settings}
@@ -285,62 +288,61 @@ export default function App(): React.JSX.Element {
           </span>
           <button
             onClick={() => { setNotice(null) }}
-            className="chrome-label border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
+            className="chrome-label rounded-md border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
           >
             dismiss
           </button>
         </div>
       )}
 
-      {/* ── 看板 + 详情面板 ────────────────────────────────────── */}
-      <div className="flex min-h-0 flex-1">
-        <DndContext
-          sensors={sensors}
-          onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
-          onDragCancel={() => { setDraggingId(null) }}
-          onDragEnd={(e) => { void handleDragEnd(e) }}
-        >
-          <div className="flex min-w-0 flex-1 overflow-x-auto">
-            {COLUMNS.map((column, index) => (
-              <Column
-                key={column}
-                column={column}
-                index={index}
-                tasks={byColumn[column]}
-                now={now}
-                selectedId={selectedId}
-                liveTools={liveTools}
-                skips={skipsByTask}
-                onSelect={(task) => { setSelectedId(task.id) }}
-                onCreate={column === 'backlog' ? createTask : undefined}
-              />
-            ))}
-          </div>
+      {/* ── 看板 ─────────────────────────────────────────────── */}
+      <DndContext
+        sensors={sensors}
+        onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
+        onDragCancel={() => { setDraggingId(null) }}
+        onDragEnd={(e) => { void handleDragEnd(e) }}
+      >
+        <div className="flex min-h-0 flex-1 overflow-x-auto">
+          {COLUMNS.map((column, index) => (
+            <Column
+              key={column}
+              column={column}
+              index={index}
+              tasks={byColumn[column]}
+              now={now}
+              selectedId={selectedId}
+              liveTools={liveTools}
+              skips={skipsByTask}
+              onSelect={(task) => { setSelectedId(task.id) }}
+              onCreate={column === 'backlog' ? createTask : undefined}
+            />
+          ))}
+        </div>
 
-          {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
-          <DragOverlay dropAnimation={null}>
-            {dragged === null ? null : (
-              <div className="rounded-[3px] border border-sodium bg-raised px-2.5 py-2 shadow-[0_10px_30px_oklch(0_0_0/0.7)]">
-                <span className="tag">{dragged.id}</span>
-                <p className="mt-1.5 line-clamp-2 text-ink">{dragged.subject}</p>
-              </div>
-            )}
-          </DragOverlay>
-        </DndContext>
+        {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
+        <DragOverlay dropAnimation={null}>
+          {dragged === null ? null : (
+            <div className="rounded-lg border border-sodium bg-panel px-2.5 py-2 shadow-lg">
+              <span className="tag">{dragged.id}</span>
+              <p className="mt-1.5 line-clamp-2 text-ink">{dragged.subject}</p>
+            </div>
+          )}
+        </DragOverlay>
+      </DndContext>
 
-        {selected === null ? null : (
-          <RunPanel
-            task={selected}
-            agents={agents}
-            onLiveTool={onLiveTool}
-            onChanged={() => { void refresh() }}
-            onError={(code, detail) => {
-              setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
-            }}
-            onClose={() => { setSelectedId(null) }}
-          />
-        )}
-      </div>
+      {/* ── 任务详情：弹窗 ───────────────────────────────────── */}
+      {selected === null ? null : (
+        <RunPanel
+          task={selected}
+          agents={agents}
+          onLiveTool={onLiveTool}
+          onChanged={() => { void refresh() }}
+          onError={(code, detail) => {
+            setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
+          }}
+          onClose={() => { setSelectedId(null) }}
+        />
+      )}
 
       {stats === null ? null : <StatsBar stats={stats} />}
     </div>

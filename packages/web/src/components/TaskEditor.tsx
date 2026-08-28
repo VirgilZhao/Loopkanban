@@ -47,7 +47,7 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {locked ? (
-          <p className="cjk-label mb-3 border border-sodium-deep/40 bg-sodium/[0.06] p-2 !text-sodium">
+          <p className="cjk-label mb-3 rounded-md border border-sodium-deep/40 bg-sodium/[0.06] p-2 !text-sodium">
             正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。
           </p>
         ) : null}
@@ -161,7 +161,7 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
             })
           }}
           className={cn(
-            'cjk-label border px-2.5 py-1 !text-[11px] transition-colors',
+            'cjk-label rounded-md border px-2.5 py-1 !text-[11px] transition-colors',
             'disabled:cursor-not-allowed disabled:opacity-40',
             dirty ? 'border-sodium !text-sodium hover:bg-sodium/10' : 'border-hairline',
           )}
@@ -175,7 +175,7 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
 
 /** 裸输入框：只留一条发丝下划线，和整套面板的语言一致。 */
 const inputClass = cn(
-  'my-1 w-full rounded-[2px] border border-hairline bg-void px-2 py-1 text-[12px] text-ink',
+  'my-1 w-full rounded-md border border-hairline bg-void px-2 py-1 text-[12px] text-ink',
   'placeholder:text-ink-faint/50 focus:border-sodium-deep focus:outline-none',
   'disabled:cursor-not-allowed disabled:opacity-50',
 )
@@ -221,7 +221,7 @@ function Chip({ children, active, disabled, onClick, title }: {
       onClick={onClick}
       title={title}
       className={cn(
-        'chrome-label border px-2 py-1 transition-colors disabled:opacity-40',
+        'chrome-label rounded-md border px-2 py-1 transition-colors disabled:opacity-40',
         active ? 'border-sodium !text-sodium' : 'border-hairline hover:border-hairline-bright hover:!text-ink-dim',
       )}
     >

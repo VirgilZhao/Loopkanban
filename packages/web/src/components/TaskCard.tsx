@@ -40,8 +40,8 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
         'transition-colors duration-150',
         'hover:border-hairline-bright hover:bg-raised',
         selected && 'border-sodium-deep bg-raised',
-        isDragging && 'z-50 cursor-grabbing opacity-90 shadow-[0_8px_24px_oklch(0_0_0/0.6)]',
-        'rounded-[3px]',
+        isDragging && 'z-50 cursor-grabbing opacity-90 shadow-lg',
+        'rounded-lg',
       )}
     >
       {/* 正在执行的卡片带一条持续扫描的轨 —— 界面里唯一恒动的元素。 */}

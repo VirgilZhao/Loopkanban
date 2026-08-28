@@ -44,14 +44,14 @@ export function Column({
             title="新建任务"
             onClick={onCreate}
             className={cn(
-              'flex size-4 items-center justify-center border border-hairline text-ink-faint',
+              'flex size-4 items-center justify-center rounded-sm border border-hairline text-ink-faint',
               'transition-colors hover:border-sodium hover:text-sodium',
             )}
           >
             <Plus className="size-2.5" />
           </button>
         )}
-        <span className="mono border border-hairline px-1 text-[10px] leading-4 text-ink-faint">
+        <span className="mono rounded-sm border border-hairline px-1 text-[10px] leading-4 text-ink-faint">
           {tasks.length}
         </span>
       </header>
@@ -76,7 +76,7 @@ export function Column({
         {/* 空列给一个矮的虚线槽位，像机架上空着的插槽；撑满整列会太吵。 */}
         </SortableContext>
         {tasks.length === 0 ? (
-          <div className="mx-1.5 mt-1.5 h-14 rounded-[3px] border border-dashed border-hairline/40" />
+          <div className="mx-1.5 mt-1.5 h-14 rounded-lg border border-dashed border-hairline/60" />
         ) : null}
       </div>
     </section>

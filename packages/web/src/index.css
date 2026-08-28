@@ -1,65 +1,120 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:is(.dark *));
+
 /* ─────────────────────────────────────────────────────────────
-   OpenKanban — 工业调度台
-   参考物是 CNC 机床 HMI 与塔台进程条，不是 SaaS 看板。
-   暖黑底 + 钠灯琥珀单一强调色 + 发丝分隔线 + 高信息密度。
+   OpenKanban — Future Teal
+   配色取自 tweakcn「Future Teal」，令牌值与 shadcn 安装产物逐字一致。
+   工业调度台的骨架（发丝线、状态灯、扫描轨、高信息密度）保留，
+   底下第二段把调度台自己的语义色接到这套主题令牌上。
    ───────────────────────────────────────────────────────────── */
 
-@font-face { font-display: swap; }
-
-@theme {
-  /* 面板层次：暖黑，不是常见的蓝灰。 */
-  --color-void:      oklch(0.145 0.004 70);
-  --color-panel:     oklch(0.185 0.005 70);
-  --color-raised:    oklch(0.225 0.006 70);
-  --color-hairline:  oklch(0.30 0.006 70);
-  --color-hairline-bright: oklch(0.42 0.008 70);
-
-  --color-ink:       oklch(0.93 0.006 80);
-  --color-ink-dim:   oklch(0.70 0.008 80);
-  --color-ink-faint: oklch(0.52 0.008 80);
-
-  /* 钠灯琥珀 —— 整个界面唯一的强调色，只给"正在发生的事"。 */
-  --color-sodium:      oklch(0.80 0.155 72);
-  --color-sodium-deep: oklch(0.62 0.14 62);
-
-  /* 状态灯，只用在小圆点和细轨上，绝不铺面积。 */
-  --color-lamp-idle:   oklch(0.55 0.01 80);
-  --color-lamp-live:   oklch(0.80 0.155 72);
-  --color-lamp-ok:     oklch(0.76 0.15 152);
-  --color-lamp-fail:   oklch(0.65 0.19 30);
-  --color-lamp-review: oklch(0.75 0.12 230);
-
-  --font-chrome: "Martian Mono", ui-monospace, monospace;
-  --font-body:   "Archivo", ui-sans-serif, system-ui, sans-serif;
-  --font-code:   "JetBrains Mono", ui-monospace, monospace;
-
-  --radius-panel: 3px;
+:root {
+  --background: #f9fdff;
+  --foreground: #031a1e;
+  --card: #ffffff;
+  --card-foreground: #031a1e;
+  --popover: #ffffff;
+  --popover-foreground: #1c1c34;
+  --primary: #00bba7;
+  --primary-foreground: #fcfcfc;
+  --secondary: #e4f2f2;
+  --secondary-foreground: #2d4e54;
+  --muted: #ebf4f4;
+  --muted-foreground: #50686d;
+  --accent: #c3ecdf;
+  --accent-foreground: #006363;
+  --destructive: #ce514d;
+  --destructive-foreground: #ffffff;
+  --border: #dae3e4;
+  --input: #dae3e4;
+  --ring: #00bba7;
+  --chart-1: #00bba7;
+  --chart-2: #00a3d7;
+  --chart-3: #b18cfe;
+  --chart-4: #ffc677;
+  --chart-5: #cce8b5;
+  --sidebar: #f5f9fa;
+  --sidebar-foreground: #0e262a;
+  --sidebar-primary: #00bba7;
+  --sidebar-primary-foreground: #fafafd;
+  --sidebar-accent: #c3ecdf;
+  --sidebar-accent-foreground: #1c1c34;
+  --sidebar-border: #d6e9ea;
+  --sidebar-ring: #735fce;
+  --font-sans: Inter, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: JetBrains Mono, monospace;
+  --radius: 0.5rem;
+  --shadow-x: 0px;
+  --shadow-y: 4px;
+  --shadow-blur: 10px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0.12;
+  --shadow-color: #2d2d53;
+  --shadow-2xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
+  --shadow-xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
+  --shadow-sm: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-md: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 2px 4px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-lg: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 4px 6px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 8px 10px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-2xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.30);
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
 }
 
-/* shadcn 的语义变量映射到上面的调色板。 */
-:root {
-  --background: var(--color-void);
-  --foreground: var(--color-ink);
-  --card: var(--color-panel);
-  --card-foreground: var(--color-ink);
-  --popover: var(--color-raised);
-  --popover-foreground: var(--color-ink);
-  --primary: var(--color-sodium);
-  --primary-foreground: var(--color-void);
-  --secondary: var(--color-raised);
-  --secondary-foreground: var(--color-ink);
-  --muted: var(--color-raised);
-  --muted-foreground: var(--color-ink-faint);
-  --accent: var(--color-raised);
-  --accent-foreground: var(--color-sodium);
-  --destructive: var(--color-lamp-fail);
-  --destructive-foreground: var(--color-ink);
-  --border: var(--color-hairline);
-  --input: var(--color-hairline);
-  --ring: var(--color-sodium-deep);
-  --radius: 3px;
+.dark {
+  --background: #030b0b;
+  --foreground: #e4edee;
+  --card: #061415;
+  --card-foreground: #e4edee;
+  --popover: #161724;
+  --popover-foreground: #e6e6f5;
+  --primary: #00bba7;
+  --primary-foreground: #ffffff;
+  --secondary: #0b2425;
+  --secondary-foreground: #b8d4d5;
+  --muted: #0f1d1e;
+  --muted-foreground: #7a9596;
+  --accent: #005f5a;
+  --accent-foreground: #90caca;
+  --destructive: #f84b4b;
+  --destructive-foreground: #fafafd;
+  --border: #142223;
+  --input: #142223;
+  --ring: #00bba7;
+  --chart-1: #00bba7;
+  --chart-2: #00a3d7;
+  --chart-3: #b18cfe;
+  --chart-4: #ffc677;
+  --chart-5: #cce8b5;
+  --sidebar: #031011;
+  --sidebar-foreground: #e4edee;
+  --sidebar-primary: #00bba7;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #005f5a;
+  --sidebar-accent-foreground: #e6e6f5;
+  --sidebar-border: #2b2c3f;
+  --sidebar-ring: #a190ff;
+  --font-sans: Inter, sans-serif;
+  --font-serif: Georgia, serif;
+  --font-mono: JetBrains Mono, monospace;
+  --radius: 0.5rem;
+  --shadow-x: 0px;
+  --shadow-y: 4px;
+  --shadow-blur: 10px;
+  --shadow-spread: 0px;
+  --shadow-opacity: 0.12;
+  --shadow-color: #2d2d53;
+  --shadow-2xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
+  --shadow-xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
+  --shadow-sm: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-md: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 2px 4px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-lg: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 4px 6px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 8px 10px -1px hsl(240 29.6875% 25.0980% / 0.12);
+  --shadow-2xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.30);
 }
 
 @theme inline {
@@ -78,59 +133,153 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --radius-sm: 2px;
-  --radius-md: 3px;
-  --radius-lg: 4px;
-  --radius-xl: 6px;
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   调度台自己的语义色。
+   界面里两百多处 text-ink-faint / border-hairline / text-sodium
+   都指向这一层，所以换主题只需要重新接线，不用动组件。
+   ───────────────────────────────────────────────────────────── */
+
+:root {
+  /* 面板层次。亮色下 card 是纯白，浮起层用 secondary。 */
+  --void: var(--background);
+  --panel: var(--card);
+  --raised: var(--secondary);
+  --hairline: var(--border);
+  --hairline-bright: #c2d2d4;
+
+  --ink: var(--foreground);
+  --ink-dim: var(--secondary-foreground);
+  --ink-faint: var(--muted-foreground);
+
+  /* 强调色。在白底上它要能当正文颜色用，所以取 accent-foreground
+     这一档深青（#00bba7 在白底上只有 2.3:1，做 11px 中文太虚）。 */
+  --sodium: var(--accent-foreground);
+  --sodium-deep: var(--primary);
+
+  /* 状态灯，只用在小圆点和细轨上，绝不铺面积。 */
+  --lamp-idle: #9aacae;
+  --lamp-live: var(--primary);
+  --lamp-ok: #1f8f5f;
+  --lamp-fail: var(--destructive);
+  --lamp-review: #0a7fa8;
+}
+
+.dark {
+  --void: var(--background);
+  --panel: var(--card);
+  --raised: var(--secondary);
+  --hairline: var(--border);
+  --hairline-bright: #23383a;
+
+  --ink: var(--foreground);
+  --ink-dim: var(--secondary-foreground);
+  --ink-faint: var(--muted-foreground);
+
+  --sodium: var(--primary);
+  --sodium-deep: var(--accent);
+
+  --lamp-idle: #3d5556;
+  --lamp-live: var(--primary);
+  --lamp-ok: #6fdc9e;
+  --lamp-fail: var(--destructive);
+  --lamp-review: var(--chart-2);
+}
+
+@theme inline {
+  --color-void:      var(--void);
+  --color-panel:     var(--panel);
+  --color-raised:    var(--raised);
+  --color-hairline:  var(--hairline);
+  --color-hairline-bright: var(--hairline-bright);
+  --color-ink:       var(--ink);
+  --color-ink-dim:   var(--ink-dim);
+  --color-ink-faint: var(--ink-faint);
+  --color-sodium:      var(--sodium);
+  --color-sodium-deep: var(--sodium-deep);
+  --color-lamp-idle:   var(--lamp-idle);
+  --color-lamp-live:   var(--lamp-live);
+  --color-lamp-ok:     var(--lamp-ok);
+  --color-lamp-fail:   var(--lamp-fail);
+  --color-lamp-review: var(--lamp-review);
+
+  --radius-xs: calc(var(--radius) - 6px);
+  --radius-panel: calc(var(--radius) - 2px);
+}
+
+/* 界面里三种角色的字：骨架微标签 / 正文 / 代码。 */
+@theme {
+  --font-chrome: Inter, sans-serif;
+  --font-body:   Inter, sans-serif;
+  --font-code:   JetBrains Mono, monospace;
 }
 
 @layer base {
-  * { border-color: var(--color-hairline); }
+  * {
+    @apply border-border outline-ring/50;
+  }
 
   html, body, #root { height: 100%; }
 
   body {
-    background: var(--color-void);
-    color: var(--color-ink);
+    @apply bg-background text-foreground;
     font-family: var(--font-body);
     font-size: 13px;
     line-height: 1.45;
+    letter-spacing: var(--tracking-normal);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* 工程纸网格：两组极淡的线，给底面一点"图纸"质感而不喧宾夺主。 */
-    background-image:
-      linear-gradient(oklch(1 0 0 / 0.015) 1px, transparent 1px),
-      linear-gradient(90deg, oklch(1 0 0 / 0.015) 1px, transparent 1px);
-    background-size: 44px 44px;
-  }
-
-  /* 颗粒层：低透明度噪点，让大片暗面不至于像塑料。 */
-  body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 9999;
-    opacity: 0.028;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-hairline);
+    background: var(--color-hairline-bright);
     border: 2px solid var(--color-void);
     border-radius: 99px;
   }
-  ::-webkit-scrollbar-thumb:hover { background: var(--color-hairline-bright); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-sodium-deep); }
 
-  ::selection { background: var(--color-sodium-deep); color: var(--color-ink); }
+  ::selection { background: var(--color-sodium-deep); color: var(--color-void); }
 
   :focus-visible {
-    outline: 1px solid var(--color-sodium);
+    outline: 2px solid var(--color-ring);
     outline-offset: 1px;
   }
 }
@@ -140,8 +289,8 @@
   .chrome-label {
     font-family: var(--font-chrome);
     font-size: 9px;
-    font-weight: 500;
-    letter-spacing: 0.16em;
+    font-weight: 600;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--color-ink-faint);
   }
@@ -163,9 +312,9 @@
     font-family: var(--font-code);
     font-size: 10px;
     letter-spacing: 0.03em;
-    padding: 1px 4px;
+    padding: 1px 5px;
     border: 1px solid var(--color-hairline);
-    border-radius: 2px;
+    border-radius: calc(var(--radius) - 4px);
     color: var(--color-ink-faint);
   }
 

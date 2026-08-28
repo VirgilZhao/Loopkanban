@@ -762,7 +762,8 @@ function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend
             // ⌘/Ctrl + Enter 发出去；单独回车留给换行 —— 这里写的是段落，不是聊天。
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send()
           }}
-          className="min-h-20"
+          // 固定高度：这儿贴在面板底上，跟着内容长会把上面的对话挤没了。
+          className="field-sizing-fixed h-24"
         />
 
         {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}

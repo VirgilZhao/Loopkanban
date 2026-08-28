@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CornerLeftUp, File, FileCode, FileText, Folder, GitBranch, RefreshCw } from 'lucide-react'
-import { api, ApiError } from '@/api.ts'
+import { api, ApiError, workspaceFileUrl } from '@/api.ts'
+import { FileView } from '@/components/FileView.tsx'
 import { Terminal } from '@/components/Terminal.tsx'
 import { maybe, useT, type Translate } from '@/lib/i18n.tsx'
+import { resolveFrom } from '@/lib/path.ts'
 import { cn } from '@/lib/utils.ts'
-import type { FileContent, FileEntry, FileListing, Project, Workspace } from '@/types.ts'
+import type { FileContent, FileListing, Project, Workspace } from '@/types.ts'
 
 /** 一眼能认出是代码的后缀，给它一个不同的图标。纯装饰，认不出就用通用的。 */
 const CODE_EXT = new Set([
@@ -111,10 +113,11 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
     open(root)
   }, [root, open])
 
-  const readFile = useCallback((entry: FileEntry) => {
+  /** 打开一个文件到右边那一栏。 */
+  const readFile = useCallback((path: string) => {
     if (root === null) return
     setError(null)
-    void api.fileContent(root, entry.path)
+    void api.fileContent(root, path)
       .then((next) => { setFile(next) })
       .catch((failure: unknown) => { fail(failure); setFile(null) })
   }, [root, fail])
@@ -246,7 +249,7 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
                 type="button"
                 title={entry.path}
                 onClick={() => {
-                  if (entry.kind === 'dir') { if (root !== null) open(root, entry.path) } else readFile(entry)
+                  if (entry.kind === 'dir') { if (root !== null) open(root, entry.path) } else readFile(entry.path)
                 }}
                 className={cn(
                   'flex w-full items-center gap-2 border-b border-hairline/40 px-3 py-1.5 text-left',
@@ -279,18 +282,20 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
                 </span>
                 <span className="mono flex-none text-[10px] text-ink-faint">{humanSize(file.size)}</span>
               </header>
-              {file.binary ? (
-                <p className="flex flex-1 items-center justify-center text-xs text-ink-faint">
-                  {t('files.binary')}
-                </p>
-              ) : (
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <pre className="mono px-3 py-2 text-[11px] leading-[1.55] text-ink-dim">{file.content}</pre>
-                  {file.truncated ? (
-                    <p className="cjk-label px-3 pb-2 !text-lamp-fail">{t('files.truncated')}</p>
-                  ) : null}
-                </div>
-              )}
+              {/* 正文怎么显示和任务弹窗里那一栏共用一套（见 `FileView`）——
+                  同一份 .md 在两处一个渲染一个是原文，只会让人以为自己看错了。 */}
+              <FileView
+                name={file.path.split(/[/\\]/).pop() ?? file.relative}
+                kind={file.kind}
+                content={file.content}
+                doc={file.doc}
+                truncated={file.truncated}
+                rawUrl={root === null ? null : workspaceFileUrl(root, file.path)}
+                // 文档里指向邻居文件的链接是相对**它自己**说的。接好了直接
+                // 在这一栏里打开 —— 一份方案引着一份规格，读的人不该被迫
+                // 回到左边的树里自己找。
+                onOpenFile={(next) => { readFile(resolveFrom(file.path, next)) }}
+              />
             </>
           )}
         </div>

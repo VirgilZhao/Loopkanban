@@ -11,6 +11,7 @@ import { api, ApiError, subscribeRun, type NextRound } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
+import { TestEnvPanel } from '@/components/TestEnvPanel.tsx'
 import { summarize } from '@/lib/events.ts'
 import { maybe, useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
@@ -510,6 +511,13 @@ export function RunPanel({
             </div>
           ) : null}
 
+          {/* 一键试跑：在这张卡自己的 worktree 里把改动跑起来。
+              放在验收动作**上面** —— 先验，再判。反过来的话，按钮的顺序是在
+              暗示可以先盖章再验货。 */}
+          {!archived && task.column === 'review' ? (
+            <TestEnvPanel task={task} project={project} onChanged={onChanged} onError={onError} />
+          ) : null}
+
           {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
           {!archived && task.column === 'review' ? (
             <div className="border-b border-hairline px-4 py-3">
@@ -961,7 +969,8 @@ function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend
             // ⌘/Ctrl + Enter 发出去；单独回车留给换行 —— 这里写的是段落，不是聊天。
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send()
           }}
-          className="min-h-20"
+          // 固定高度：这儿贴在面板底上，跟着内容长会把上面的对话挤没了。
+          className="field-sizing-fixed h-24"
         />
 
         {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}

@@ -46,8 +46,6 @@ const zh = {
   'files.loading': '读取中…',
   'files.empty': '这个目录是空的',
   'files.pickFile': '点左边的文件看内容',
-  'files.binary': '二进制文件 · 不显示内容',
-  'files.truncated': '文件过大，这里只显示了前一部分。',
   'files.noProject': '还没有项目。先在左侧新增一个 —— 文件浏览要知道逛哪个仓库。',
 
   // ── 命令行 ─────────────────────────────────────────────
@@ -58,6 +56,32 @@ const zh = {
   'term.run': '执行',
   'term.clear': '清空',
   'term.clearHint': '清空这块屏 —— 不影响已经跑完的命令',
+
+  // ── 一键测试环境 ───────────────────────────────────────
+  'testenv.title': '测试环境',
+  'testenv.start': '启动测试环境',
+  'testenv.stop': '停止',
+  'testenv.edit': '改启动命令',
+  'testenv.cancelEdit': '不改了',
+  'testenv.save': '保存',
+  'testenv.commandLabel': '启动命令',
+  'testenv.commandPlaceholder': 'pnpm install && pnpm dev',
+  'testenv.needCommand': '这个项目还没配启动命令。写一条能把它跑起来的命令 —— 卡片的 worktree 是一份干净的源码副本，装依赖也写在这条命令里。',
+  'testenv.commandHint': '跑在这张卡自己的 worktree 里。端口由看板分配，命令里写 {{port}} 或读环境变量 PORT。',
+  'testenv.status.starting': '启动中',
+  'testenv.status.ready': '就绪',
+  'testenv.status.running': '运行中',
+  'testenv.status.exited': '已停止',
+  'testenv.logsEmpty': '还没有输出',
+  'testenv.autostop': '关掉这个面板一分钟后自动收掉，最多跑 30 分钟。验收、打回、废弃时也会立刻停。',
+  'testenv.noPort': '这条命令没有监听端口 —— 日志就是它的全部产出。',
+  'testenv.exited': '进程自己退出了（{code}）。上面的日志里有原因。',
+  'testenv.stoppedBy.manual': '已停止。',
+  'testenv.stoppedBy.idle': '没人看着，已经自动收掉了。再点一次启动就能回来。',
+  'testenv.stoppedBy.expired': '跑满 30 分钟，自动收掉了。要接着验就再启动一次。',
+  'testenv.stoppedBy.verdict': '这张卡判完了，环境跟着收掉 —— 它的工作区马上就不在了。',
+  'testenv.stoppedBy.shutdown': '看板退出，环境跟着收掉了。',
+
   'term.empty': '还没跑过命令。',
   'term.hint': '每条命令在新的 shell 里跑，所以 `cd` 不会留到下一条 —— 换目录请在上面点。',
   'term.cwd': '工作目录 {path}',
@@ -69,6 +93,9 @@ const zh = {
   'term.truncated': '输出过长，这里只显示了前一部分。',
   'term.failed': '这条命令没能起来。',
   'term.historyHint': '↑ ↓ 翻历史',
+  'term.tabHint': '⇥ 补路径',
+  'term.noMatch': '这个前缀在当前目录下没有匹配的路径。',
+  'term.moreMatches': '还有 {n} 个没列出来 —— 多敲几个字符再补。',
 
   // ── 侧边栏 ─────────────────────────────────────────────
   'sidebar.tagline': 'agent dispatch',
@@ -109,6 +136,9 @@ const zh = {
   'autopilot.limitHint': '每个执行器的并发上限',
   'autopilot.less': '减少每个执行器的并发',
   'autopilot.more': '增加每个执行器的并发',
+  'autopilot.repoLimitHint': '同一个仓库同时跑几个任务。每个 Run 有自己的 worktree，调大是安全的；默认 1 是为了少几次合并冲突',
+  'autopilot.repoLess': '减少每个仓库的并发',
+  'autopilot.repoMore': '增加每个仓库的并发',
 
   // ── 列 ─────────────────────────────────────────────────
   'column.backlog.hint': '想法池 · Agent 不可领',
@@ -127,7 +157,7 @@ const zh = {
   'skip.provider-unavailable': '本机没有探测到任何可用的 Agent CLI',
   'skip.provider-unavailable.pinned': '指定的 {0} 未探测到',
   'skip.provider-limit-reached': '{0} 并发已满 ({1})',
-  'skip.repo-limit-reached': '{0} 并发已满 ({1})',
+  'skip.repo-limit-reached': '{0} 仓库并发已满 ({1})',
 
   // ── 任务弹窗 ───────────────────────────────────────────
   'panel.unknownProject': '未知项目',
@@ -245,6 +275,13 @@ const zh = {
   'preview.close': '关闭预览 · esc',
   'preview.loading': '读取中…',
   'preview.truncated': '文件太大，这里只显示了前一部分。完整的那份在本机磁盘上。',
+  'preview.rendered': '预览',
+  'preview.source': '原文',
+  'preview.binary': '这个格式在这儿看不了。',
+  'preview.legacyDoc': '旧版 .doc 是二进制私有格式。在 Word 里另存为 .docx 就能看了。',
+  'preview.noRaw': '这份文件要浏览器自己打开，而这里拿不到它的地址。',
+  'preview.emptyDoc': '这份文档是空的。',
+  'preview.docTruncated': '文档太长，这里只显示了前一部分。',
 
   // ── 新增 / 删除项目 ───────────────────────────────────
   'newProject.pickTitle': '选择项目文件夹',
@@ -335,6 +372,9 @@ const zh = {
   'err.attachment-gone': '这个附件的文件已经不在磁盘上了 —— 重新传一份。',
   'err.path-outside-workspace': '这条路径不在这张卡够得着的地方（它的工作区与项目仓库），不给看。',
   'err.not-text': '这是个二进制文件，在这儿预览只会是一屏乱码。',
+  'err.bad-document': '这份 Word 文档读不出来 —— 可能是坏了、加了密、正文大到翻不动，也可能本来就是别的东西改了扩展名。',
+  'err.too-large': '这份文档太大了，读进来翻会把标签页顶住。在本机打开它。',
+  'err.not-inlineable': '这个格式不能直接在浏览器里打开。',
   'err.unreadable': '这个文件读不动 —— 多半是权限不够。它确实在那儿，但当前用户打不开它。',
   /* 文档预览与文件浏览共用这一条，所以两种成因都要说到：它可能刚被删掉或
      改了名，也可能是那次执行的工作区整个清掉了。 */
@@ -343,6 +383,8 @@ const zh = {
   'err.outside-project': '只能逛这个项目的仓库 —— 请求的路径不在里面。',
   'err.repo-missing': '这个项目的仓库目录已经不在了。它可能被移走或删掉了 —— 把它放回原处，或者删掉这个项目重建一个。',
   'err.empty-command': '得先写一条命令。',
+  'err.no-testenv': '当前实例没有启用测试环境，起不了。',
+  'err.no-test-command': '这个项目还没配启动命令 —— 在上面填一条，比如 `pnpm install && pnpm dev`。',
 }
 
 export type MessageKey = keyof typeof zh
@@ -374,8 +416,6 @@ const en: Record<MessageKey, string> = {
   'files.loading': 'Loading\u2026',
   'files.empty': 'This directory is empty',
   'files.pickFile': 'Pick a file on the left to read it',
-  'files.binary': 'Binary file \u00b7 not shown',
-  'files.truncated': 'This file is too large to show in full; only the first part is here.',
   'files.noProject': 'No projects yet. Add one on the left — the file browser has to know which repo to show.',
 
   'term.title': 'Shell',
@@ -385,6 +425,32 @@ const en: Record<MessageKey, string> = {
   'term.run': 'Run',
   'term.clear': 'Clear',
   'term.clearHint': 'Clear the screen — commands already run are unaffected',
+
+  // ── One-click test environment ─────────────────────────
+  'testenv.title': 'Test environment',
+  'testenv.start': 'Start it up',
+  'testenv.stop': 'Stop',
+  'testenv.edit': 'Edit the start command',
+  'testenv.cancelEdit': 'Never mind',
+  'testenv.save': 'Save',
+  'testenv.commandLabel': 'Start command',
+  'testenv.commandPlaceholder': 'pnpm install && pnpm dev',
+  'testenv.needCommand': 'This project has no start command yet. Write one that gets it running — the card’s worktree is a clean copy of the source, so installing dependencies belongs in this command too.',
+  'testenv.commandHint': 'Runs in this card’s own worktree. The board picks the port: write {{port}} in the command, or read the PORT environment variable.',
+  'testenv.status.starting': 'starting',
+  'testenv.status.ready': 'ready',
+  'testenv.status.running': 'running',
+  'testenv.status.exited': 'stopped',
+  'testenv.logsEmpty': 'No output yet',
+  'testenv.autostop': 'Closes itself a minute after you close this panel, and runs 30 minutes at most. Accepting, sending back, or discarding stops it immediately.',
+  'testenv.noPort': 'This command isn’t listening on a port — the log is all it produces.',
+  'testenv.exited': 'The process exited on its own ({code}). The log above says why.',
+  'testenv.stoppedBy.manual': 'Stopped.',
+  'testenv.stoppedBy.idle': 'Nobody was watching, so it was cleaned up. Start it again to get it back.',
+  'testenv.stoppedBy.expired': 'It hit the 30-minute cap and was cleaned up. Start it again to keep testing.',
+  'testenv.stoppedBy.verdict': 'The card was decided, so the environment went with it — its worktree is about to be gone.',
+  'testenv.stoppedBy.shutdown': 'The board shut down and took the environment with it.',
+
   'term.empty': 'Nothing run yet.',
   'term.hint': 'Each command runs in a fresh shell, so `cd` doesn\u2019t carry to the next one — change directory above instead.',
   'term.cwd': 'in {path}',
@@ -396,6 +462,9 @@ const en: Record<MessageKey, string> = {
   'term.truncated': 'Output was too long; only the first part is here.',
   'term.failed': 'That command could not be started.',
   'term.historyHint': '\u2191 \u2193 for history',
+  'term.tabHint': '\u21e5 to complete',
+  'term.noMatch': 'No path in this directory starts with that.',
+  'term.moreMatches': '{n} more not listed \u2014 type a few more characters.',
 
   'sidebar.tagline': 'agent dispatch',
   'sidebar.newTask': 'New task',
@@ -433,6 +502,9 @@ const en: Record<MessageKey, string> = {
   'autopilot.limitHint': 'Concurrency limit per agent',
   'autopilot.less': 'Fewer concurrent runs per agent',
   'autopilot.more': 'More concurrent runs per agent',
+  'autopilot.repoLimitHint': 'Concurrent runs in one repository. Each run gets its own worktree, so raising this is safe; the default of 1 just keeps merge conflicts down',
+  'autopilot.repoLess': 'Fewer concurrent runs per repository',
+  'autopilot.repoMore': 'More concurrent runs per repository',
 
   'column.backlog.hint': 'Idea pool · agents can’t claim',
   'column.ready.hint': 'Queue · waiting to be claimed',
@@ -448,7 +520,7 @@ const en: Record<MessageKey, string> = {
   'skip.provider-unavailable': 'No agent CLI detected on this machine',
   'skip.provider-unavailable.pinned': 'Pinned agent {0} was not detected',
   'skip.provider-limit-reached': '{0} is at its concurrency limit ({1})',
-  'skip.repo-limit-reached': '{0} is at its concurrency limit ({1})',
+  'skip.repo-limit-reached': '{0} is at its per-repository limit ({1})',
 
   'panel.unknownProject': 'Unknown project',
   'panel.baseLabel': 'base',
@@ -559,6 +631,13 @@ const en: Record<MessageKey, string> = {
   'preview.close': 'Close preview · esc',
   'preview.loading': 'Reading…',
   'preview.truncated': 'The file is too large to show in full; only the first part is here. The whole thing is on disk.',
+  'preview.rendered': 'Rendered',
+  'preview.source': 'Source',
+  'preview.binary': 'This format can’t be shown here.',
+  'preview.legacyDoc': 'Legacy .doc is a binary proprietary format. Save it as .docx in Word and it will show up.',
+  'preview.noRaw': 'This file has to be opened by the browser itself, and there’s no address for it here.',
+  'preview.emptyDoc': 'This document is empty.',
+  'preview.docTruncated': 'The document is long; only the first part is shown here.',
 
   'newProject.pickTitle': 'Pick a project folder',
   'newProject.pickHint': 'You’re browsing the machine running LoopKanban. Only git repos can be projects.',
@@ -643,12 +722,17 @@ const en: Record<MessageKey, string> = {
   'err.attachment-gone': 'That attachment’s file is no longer on disk — upload it again.',
   'err.path-outside-workspace': 'That path is outside what this card can reach (its worktree and the project repo).',
   'err.not-text': 'That’s a binary file — previewing it here would just be a screen of noise.',
+  'err.bad-document': 'This Word document can’t be read — it may be damaged, encrypted, too large to page through, or just something else with a .docx name.',
+  'err.too-large': 'This document is too large to read in and page through here. Open it on your machine.',
+  'err.not-inlineable': 'This format can’t be opened directly in the browser.',
   'err.unreadable': 'That file can’t be opened — most likely permissions. It is there, but this user can’t read it.',
   'err.no-such-file': 'That file is gone — deleted or renamed, or the worktree for that run was removed.',
   'err.no-such-dir': 'Can’t open that directory; it may have just been deleted or renamed.',
   'err.outside-project': 'Browsing stays inside this project’s repo, and the requested path is outside it.',
   'err.repo-missing': 'This project’s repo directory is gone — moved or deleted. Put it back, or delete the project and add it again.',
   'err.empty-command': 'Type a command first.',
+  'err.no-testenv': 'This instance has no test environments enabled.',
+  'err.no-test-command': 'This project has no start command yet — write one above, e.g. `pnpm install && pnpm dev`.',
 }
 
 const TABLES: Record<Lang, Record<MessageKey, string>> = { zh, en }

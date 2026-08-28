@@ -142,6 +142,10 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX idx_attachments_task ON task_attachments(task_id, at);
   `,
+  // 一键测试环境的启动命令。**记在项目上而不是卡上**：同一个仓库怎么跑起来是
+  // 仓库的事实，不是某张卡的；每张卡各配一遍，等于让人在验收前先做一次配置。
+  // 留空表示这个项目没配，界面上那个按钮会引导他填一条。
+  `ALTER TABLE projects ADD COLUMN test_command TEXT;`,
   // 卡片开出去的 Pull Request。**一张卡可以有多条** —— Done 里再说一句就是
   // 下一轮，那一轮合上去的是另一条 PR；把它们都记着，"这张卡到底改进主干
   // 几次、分别是哪几条"才有得查。
@@ -166,8 +170,7 @@ export const MIGRATIONS: readonly string[] = [
     updated_at  INTEGER NOT NULL
   );
   CREATE UNIQUE INDEX idx_prs_task_number ON task_prs(task_id, number);
-  `,
-]
+  `,]
 
 /** 当前代码期望的结构版本。 */
 export const SCHEMA_VERSION = MIGRATIONS.length

@@ -13,12 +13,25 @@ import { moveTask, taskTitle, type Task, type TaskId } from '@loopkanban/core'
 import { GitHub, type PullRequestView, type RepoSlug } from '../pr/index.ts'
 import type { Run, Storage, TaskPullRequest } from '../storage/index.ts'
 import {
-  commitAll, defaultRemote, fetchBranch, mergeBranch, mergeIntoBranch, pushBranch,
-  removeWorktree, unresolvedConflicts, worktreeDiff, worktreeDir, type Worktree,
+  commitAll, defaultRemote, fetchBranch, mergeBranch, mergeIntoBranch, mergePreflight,
+  pushBranch, removeWorktree, unresolvedConflicts, worktreeDiff, worktreeDir, type Worktree,
 } from '../worktree/index.ts'
 
 export interface ReviewOptions {
   readonly storage: Storage
+  /**
+   * 在真正动这张卡的 worktree 之前叫一声。
+   *
+   * 有一个东西必须先让开：跑在那个 worktree 里的测试环境（见 `testenv/`）——
+   * 提交时它可能正往里写缓存，删除时那更是在拆它脚下的地板。
+   *
+   * **挂在这儿而不是挂在路由上**，是因为位置比动作重要：它必须在所有会被拒绝
+   * 的校验都过完之后、第一个副作用之前。挂在路由上就只能"进门先杀"，于是主
+   * 工作区脏这种把验收挡回去的情况，也会顺手把人正在用的测试环境收掉。
+   *
+   * 失败会被忽略（内部自己吞掉）：让不开也不该把验收变成一半成功。
+   */
+  readonly beforeMutate?: (taskId: TaskId) => Promise<unknown>
   readonly now?: () => number
   /** GitHub 侧。不给就自己造一个（会去找本机的 `gh`）。 */
   readonly github?: GitHub
@@ -126,19 +139,35 @@ export class Review {
     const verdict = moveTask(task, { expectedRevision: task.revision, to: 'done', now: this.now })
     if (!verdict.ok) return { ok: false, reason: verdict.reason, detail: verdict.detail }
 
-    // 解冲突那一轮跑失败的话，卡会带着满是冲突标记的工作区回到 Review。
-    // commitAll 在那种工作区上会抛 —— 抛出去就成了一个只说"服务端出错"的
-    // 500，而这件事明明有话可说，也明明有下一步可做。
+    // 两道只读的前置判定，副作用一律排在它们后面 —— 被拒时这张卡一个字都
+    // 没动过。
+    //
+    // 一是这次成果本身：解冲突那一轮跑失败的话，卡会带着满是冲突标记的工作区
+    // 回到 Review，而 commitAll 在那种工作区上会抛 —— 抛出去就成了一个只说
+    // "服务端出错"的 500，可这件事明明有话可说，也明明有下一步可做。
     const stuck = await this.conflictRefusal(worktree)
     if (stuck !== null) return stuck
+
+    // 二是合并的两个前置条件（主工作区干净、停在基线分支上）。它们出在
+    // **用户的主工作区**上，跟这次成果无关 —— 否则人拿到的是"验收被拒，
+    // 但分支上已经多了一个提交、测试环境也没了"。
+    if (merge) {
+      const ready = await mergePreflight(task.repoPath, task.baseBranch)
+      if (!ready.ok) return { ok: false, reason: ready.reason, detail: ready.detail }
+    }
+
+    // 从这里开始有副作用了。请测试环境让开 —— 它可能正往这个 worktree 里写东西，
+    // 而下面第一件事就是把整个目录提交进去。
+    await this.options.beforeMutate?.(taskId).catch(() => undefined)
 
     const commit = await commitAll(worktree, commitMessage(task, run))
 
     let merged = false
     if (merge) {
       const result = await mergeBranch(task.repoPath, run.branch, task.baseBranch)
-      // 合并失败不等于验收失败：改动已经提交在分支上，不会丢。
-      // 但必须如实告诉用户没合上，否则他会以为已经进主干了。
+      // 走到这儿还失败，是前置条件在这几百毫秒里变了（有人动了主工作区）。
+      // 不等于验收失败：改动已经提交在分支上，不会丢 —— 但必须如实告诉用户
+      // 没合上，否则他会以为已经进主干了。
       if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail }
       merged = true
     }
@@ -181,6 +210,8 @@ export class Review {
 
     const run = this.latestRun(taskId)
     if (run !== null) {
+      // 状态已经落定，接下来是不可逆的删除 —— 先请测试环境让开。
+      await this.options.beforeMutate?.(taskId).catch(() => undefined)
       // 连分支一起删：用户明确表示这次成果不要了。
       await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
       await rm(worktreeDir(task.repoPath, taskId), { recursive: true, force: true })

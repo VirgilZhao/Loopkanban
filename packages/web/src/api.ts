@@ -9,7 +9,7 @@
 import type {
   Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
   FilePreview, LiveLine, PrCapability, Project, PullRequest, Run, RunStats, SchedulerSettings,
-  SchedulerState, StreamEvent, Task, TaskComment, TaskEdit, Workspace,
+  SchedulerState, StreamEvent, Task, TaskComment, TaskEdit, TestEnv, TestEnvEvent, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
@@ -75,7 +75,12 @@ export const api = {
    * 改项目名或换基线分支。仓库路径不在其列 —— 那是项目的身份，换了仓库
    * 就是另一个项目。换基线只影响此后新建的卡。
    */
-  updateProject: (projectId: string, patch: { name?: string; baseBranch?: string }) =>
+  updateProject: (
+    projectId: string,
+    // testCommand 传 null 是"清空"。省略与清空必须分得开，否则改个名字就会
+    // 顺手把启动命令抹掉。
+    patch: { name?: string; baseBranch?: string; testCommand?: string | null },
+  ) =>
     call<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
       method: 'PATCH', body: JSON.stringify(patch),
     }),
@@ -295,6 +300,20 @@ export const api = {
   discard: (taskId: string) =>
     call(`/api/tasks/${encodeURIComponent(taskId)}/discard`, { method: 'POST' }),
 
+  /** 这张卡当前的测试环境；没起过就是 null（不是错）。 */
+  testEnv: (taskId: string) =>
+    call<{ env: TestEnv | null }>(`/api/tasks/${encodeURIComponent(taskId)}/testenv`),
+
+  /** 起一个测试环境。已经有活着的就把它给回来，不会起第二个。 */
+  startTestEnv: (taskId: string) =>
+    call<{ env: TestEnv }>(`/api/tasks/${encodeURIComponent(taskId)}/testenv`, { method: 'POST' }),
+
+  stopTestEnv: (taskId: string) =>
+    call<{ stopped: boolean; env: TestEnv | null }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/testenv`,
+      { method: 'DELETE' },
+    ),
+
   /** 归档：把卡从看板上收走，列与内容原样保留。 */
   archive: (taskId: string, expectedRevision: number) =>
     call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}/archive`, {
@@ -313,6 +332,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ expectedRevision, to, position }),
     }),
+}
+
+/**
+ * 一张卡够得着的某个文件的**原始字节**的地址。`<iframe src>` / `<img src>` 用它。
+ *
+ * PDF 与图片不走 JSON：浏览器自带 PDF 阅读器，图片给个 URL 就完事，绕一圈
+ * base64 只是凭空胖三分之一。围栏和预览接口是同一套，一个字都不松。
+ */
+export function taskFileUrl(taskId: string, path: string): string {
+  return `/api/tasks/${encodeURIComponent(taskId)}/file/raw?path=${encodeURIComponent(path)}`
+}
+
+/** 文件浏览页里同一件事：工作区某个文件的原始字节。 */
+export function workspaceFileUrl(root: string, path: string): string {
+  return `/api/files/raw?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`
 }
 
 /**
@@ -335,6 +369,31 @@ export function attachmentUrl(attachmentId: string): string {
  * @param onEvent - 每条事件的回调。
  * @returns 关闭订阅的函数。
  */
+/**
+ * 订阅一个测试环境的日志与状态。
+ *
+ * **这条连接就是心跳**：断开之后服务端会开始倒计时，到点把环境收掉。所以
+ * 返回的取消函数必须在组件卸载时调用 —— 漏掉的话那个 dev server 会一直
+ * 以为还有人在看。反过来也成立：关掉面板就等于"我验完了"。
+ */
+export function subscribeTestEnv(taskId: string, onEvent: (event: TestEnvEvent) => void): () => void {
+  const source = new EventSource(
+    `/api/tasks/${encodeURIComponent(taskId)}/testenv/events`,
+    { withCredentials: true },
+  )
+  const handle = (message: MessageEvent<string>): void => {
+    try {
+      onEvent(JSON.parse(message.data) as TestEnvEvent)
+    } catch {
+      // 半条 JSON 不该把整条流带走。
+    }
+  }
+  // 服务端用 `event:` 分了类型，默认的 message 监听器收不到它们。
+  source.addEventListener('status', handle as EventListener)
+  source.addEventListener('log', handle as EventListener)
+  return () => { source.close() }
+}
+
 export function subscribeRun(runId: string, onEvent: (event: StreamEvent) => void): () => void {
   const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`, { withCredentials: true })
   const kinds = ['session', 'notice', 'text', 'tool', 'usage', 'finished', 'raw']

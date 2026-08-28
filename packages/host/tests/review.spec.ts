@@ -240,6 +240,63 @@ describe('CAS 与不可逆操作的顺序（回归）', () => {
   })
 })
 
+describe('beforeMutate：动 worktree 之前先让测试环境让开', () => {
+  /** 记下它被叫了几次、以及叫的时候仓库里是什么样子。 */
+  function spy(): { calls: string[]; hook: (id: ReturnType<typeof asTaskId>) => Promise<void> } {
+    const calls: string[] = []
+    return { calls, hook: async (id) => { calls.push(String(id)) } }
+  }
+
+  it('验收通过时，在第一个副作用之前叫一次', async () => {
+    const { calls, hook } = spy()
+    const withHook = new Review({ storage: store, beforeMutate: hook, now: () => T0 + 5000 })
+    await reviewable()
+    expect(await withHook.accept(asTaskId('t1'))).toMatchObject({ ok: true })
+    expect(calls).toEqual(['t1'])
+  })
+
+  it('废弃时也叫 —— 那一步要把 worktree 连同分支一起删掉', async () => {
+    const { calls, hook } = spy()
+    const withHook = new Review({ storage: store, beforeMutate: hook, now: () => T0 + 5000 })
+    await reviewable()
+    expect(await withHook.discard(asTaskId('t1'))).toMatchObject({ ok: true })
+    expect(calls).toEqual(['t1'])
+  })
+
+  it('验收被拒时一次都不叫 —— 这张卡一个字都没动过', async () => {
+    // 回归：原本挂在路由上"进门先杀"，于是主工作区脏这种把验收挡回去的情况，
+    // 也会顺手把人正在用的测试环境收掉，让他重新装一遍依赖。
+    const { calls, hook } = spy()
+    const withHook = new Review({ storage: store, beforeMutate: hook, now: () => T0 + 5000 })
+    const { branch } = await reviewable()
+    await writeFile(join(repo, 'scratch.txt'), 'wip\n', 'utf8')
+
+    const result = await withHook.accept(asTaskId('t1'), true)
+    expect(result).toMatchObject({ ok: false, reason: 'dirty-worktree' })
+    expect(calls).toEqual([])
+    // 而且这一次连提交都不该发生：前置条件是只读检查，早查早退。
+    expect((await git(repo, 'log', '--oneline', branch)).stdout.trim().split('\n')).toHaveLength(1)
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+  })
+
+  it('不在 review 列的卡被拒时也不叫', async () => {
+    const { calls, hook } = spy()
+    const withHook = new Review({ storage: store, beforeMutate: hook, now: () => T0 + 5000 })
+    store.createTask(task({ id: 't9', column: 'running' }))
+    expect(await withHook.accept(asTaskId('t9'))).toMatchObject({ ok: false, reason: 'illegal-transition' })
+    expect(calls).toEqual([])
+  })
+
+  it('让不开也不该把验收变成一半成功', async () => {
+    const withHook = new Review({
+      storage: store,
+      beforeMutate: () => Promise.reject(new Error('收不掉')),
+      now: () => T0 + 5000,
+    })
+    await reviewable()
+    expect(await withHook.accept(asTaskId('t1'))).toMatchObject({ ok: true })
+  })
+})
 /* ── PR 那条路 ──────────────────────────────────────────────
  *
  * 真的建一个裸仓库当 origin（推是真推），只有 `gh` 是假的 —— 它那一头是

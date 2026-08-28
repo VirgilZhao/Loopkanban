@@ -32,8 +32,8 @@ export interface SchedulerSettings {
 
 export const DEFAULT_SETTINGS: SchedulerSettings = {
   autopilot: false,
-  maxPerProvider: 2,
-  maxPerRepo: 1,
+  maxPerProvider: 50,
+  maxPerRepo: 20,
 }
 
 export interface TickReport {

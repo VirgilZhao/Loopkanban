@@ -21,6 +21,16 @@ export interface Project {
   readonly name: string
   readonly repoPath: string
   readonly baseBranch: string
+  /**
+   * 一键测试环境的启动命令，例如 `pnpm install && pnpm dev`。
+   *
+   * 缺席表示没配 —— 那个按钮会引导人填一条，而不是猜一条替他跑。猜错的代价
+   * 是在他的仓库里跑了一条他没写过的命令，这个工具不做这种事。
+   *
+   * 命令里可以写 `{{port}}`；host 分配的端口会替换进去，也会以 `PORT`
+   * 环境变量给到进程。
+   */
+  readonly testCommand?: string | undefined
   readonly createdAt: number
 }
 
@@ -280,19 +290,27 @@ export class Storage {
 
   createProject(project: Project): void {
     this.db.prepare(
-      'INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
-    ).run(project.id, project.name, project.repoPath, project.baseBranch, project.createdAt)
+      'INSERT INTO projects (id, name, repo_path, base_branch, test_command, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(
+      project.id, project.name, project.repoPath, project.baseBranch,
+      project.testCommand ?? null, project.createdAt,
+    )
   }
 
   listProjects(): Project[] {
     const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at').all() as unknown as {
-      id: string; name: string; repo_path: string; base_branch: string; created_at: number
+      id: string; name: string; repo_path: string; base_branch: string
+      test_command: string | null; created_at: number
     }[]
     return rows.map((row) => ({
       id: asProjectId(row.id),
       name: row.name,
       repoPath: row.repo_path,
       baseBranch: row.base_branch,
+      // 空串与 NULL 都当没配：清空是把输入框留白，那一路存下来的是空串。
+      ...(row.test_command === null || row.test_command.trim() === ''
+        ? {}
+        : { testCommand: row.test_command }),
       createdAt: row.created_at,
     }))
   }
@@ -309,15 +327,26 @@ export class Storage {
    * 改动只影响此后新建的卡；已经建出来的卡各自记着自己的基线，不动它们，
    * 否则它们的 diff 与合并目标会在脚下悄悄换掉。
    *
+   * 启动命令也在其列，且**允许清空**：配错了要能退回"没配"的状态，而不是
+   * 只能塞一条 `true` 进去凑数。传 `null` 或空串就是清空。
+   *
    * @param id - 目标项目。
    * @param patch - 要改的字段；给空对象等于什么都不改。
    * @returns 是否改到了；false 表示这个项目不在。
    */
-  updateProject(id: ProjectId, patch: { name?: string; baseBranch?: string }): boolean {
+  updateProject(
+    id: ProjectId,
+    patch: { name?: string; baseBranch?: string; testCommand?: string | null },
+  ): boolean {
     const sets: string[] = []
-    const values: string[] = []
+    const values: (string | null)[] = []
     if (patch.name !== undefined) { sets.push('name = ?'); values.push(patch.name) }
     if (patch.baseBranch !== undefined) { sets.push('base_branch = ?'); values.push(patch.baseBranch) }
+    if (patch.testCommand !== undefined) {
+      sets.push('test_command = ?')
+      const command = patch.testCommand?.trim() ?? ''
+      values.push(command.length === 0 ? null : command)
+    }
     if (sets.length === 0) return this.getProject(id) !== null
     return this.db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`)
       .run(...values, id).changes === 1

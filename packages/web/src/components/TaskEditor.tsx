@@ -81,9 +81,10 @@ export function TaskEditor({
             autoFocus={draft.description.trim().length === 0}
             placeholder={t('editor.descriptionPlaceholder')}
             onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
-            // Textarea 用的是 field-sizing:content，高度跟着内容走、rows 说了不算，
-            // 所以要给它更大的起始高度得抬 min-h（rows 只在不支持的浏览器上兜底）。
-            className="min-h-32 leading-relaxed"
+            // Textarea 默认 field-sizing:content —— 高度跟着内容走，写长了就把
+            // 下面的字段一路顶下去。这里按住不动：固定高度、写满了自己滚。
+            // （rows 只在不认 field-sizing 的浏览器上兜底。）
+            className="field-sizing-fixed h-40 leading-relaxed"
           />
         </Field>
 

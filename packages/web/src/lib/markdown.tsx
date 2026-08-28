@@ -1,5 +1,6 @@
 import { FileText } from 'lucide-react'
 import type { JSX } from 'react'
+import { CodeBlock } from '@/components/CodeBlock.tsx'
 
 /**
  * 一个刻意简化的 Markdown 渲染器。
@@ -127,9 +128,11 @@ export function renderMarkdown(source: string, options: MarkdownOptions = {}): J
       }
       index += 1
       out.push(
-        <pre key={key()} className="mono my-2 overflow-x-auto rounded-md border border-hairline bg-sunken/60 p-2.5 text-[11px] leading-relaxed">
-          <code>{body.join('\n')}</code>
-        </pre>,
+        <div key={key()} className="my-2 overflow-x-auto rounded-md border border-hairline bg-sunken/60 p-2.5">
+          {/* 围栏上写的语言名当文件名喂给高亮器 —— 它本来就按扩展名认。
+              没写语言（Agent 常常不写）就是一片等宽灰字，和以前一样。 */}
+          <CodeBlock code={body.join('\n')} name={`x.${fence[1] ?? ''}`} className="leading-relaxed" />
+        </div>,
       )
       continue
     }

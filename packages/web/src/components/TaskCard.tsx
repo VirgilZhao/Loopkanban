@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
+import { taskClockFrom } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type { LiveLine, PullRequest, Skip, Task } from '@/types.ts'
 
@@ -68,7 +69,7 @@ export function TaskCard({
         archived && 'cursor-default border-dashed opacity-45 shadow-none',
       )}
     >
-      {/* 正在执行的卡片带一条持续扫描的轨 —— 界面里唯一恒动的元素。 */}
+      {/* 正在执行的卡片带一条持续扫描的轨 —— 与 Running 列头那个转圈一起，是界面里仅有的恒动元素。 */}
       {running && !leaseExpired ? <span className="scan-rail" aria-hidden /> : null}
       {leaseExpired ? <span className="absolute inset-y-0 start-0 w-0.5 bg-lamp-fail" aria-hidden /> : null}
 
@@ -156,7 +157,7 @@ export function TaskCard({
           </span>
         )}
         <span className="flex-1" />
-        <span className="mono text-[10px]">{since(task.updatedAt, now)}</span>
+        <span className="mono text-[10px]">{since(taskClockFrom(task), now)}</span>
       </div>
     </div>
   )

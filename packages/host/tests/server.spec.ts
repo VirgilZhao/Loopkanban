@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { connect, type AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { Storage } from '../src/storage/index.ts'
@@ -121,6 +121,72 @@ describe('POST /api/projects', () => {
     expect(created.projectId).toBe(project.id)
     expect(created.repoPath).toBe(repo)
     expect(created.baseBranch).toBe('main')
+  })
+})
+
+describe('DELETE /api/projects/:id', () => {
+  it('删掉项目，连同它名下的卡与执行历史', async () => {
+    store.createTask(task({ id: 't1' }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+
+    const res = await api(`/api/projects/${PROJECT}`, { method: 'DELETE' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ deleted: true, tasks: 2 })
+    expect(store.listProjects()).toHaveLength(0)
+    expect(store.listTasks()).toHaveLength(0)
+  })
+
+  it('还有卡在执行时拒绝 —— 账本抽走了，那个进程会继续跑到没人认识它', async () => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    const res = await api(`/api/projects/${PROJECT}`, { method: 'DELETE' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('project-busy')
+    // 拒绝就是什么都没动。
+    expect(store.listProjects()).toHaveLength(1)
+    expect(store.listTasks()).toHaveLength(1)
+  })
+
+  it('项目不存在返回 404', async () => {
+    expect((await api('/api/projects/nope', { method: 'DELETE' })).status).toBe(404)
+  })
+})
+
+describe('GET /api/fs', () => {
+  let sandbox: string
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-fs-'))
+    await mkdir(join(sandbox, 'a-repo'), { recursive: true })
+    await mkdir(join(sandbox, 'b-plain'), { recursive: true })
+    await mkdir(join(sandbox, '.hidden'), { recursive: true })
+    await new Promise((resolve, reject) => {
+      const child = spawn('git', ['init', '-q', join(sandbox, 'a-repo')], { stdio: 'ignore' })
+      child.on('exit', resolve)
+      child.on('error', reject)
+    })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('列子目录并标出哪些是 git 仓库；点开头的不列', async () => {
+    const res = await api(`/api/fs?path=${encodeURIComponent(sandbox)}`)
+    expect(res.status).toBe(200)
+    const listing = await res.json() as
+      { path: string; parent: string | null; entries: { name: string; isRepo: boolean }[] }
+    expect(listing.entries.map((e) => e.name)).toEqual(['a-repo', 'b-plain'])
+    expect(listing.entries.find((e) => e.name === 'a-repo')?.isRepo).toBe(true)
+    expect(listing.entries.find((e) => e.name === 'b-plain')?.isRepo).toBe(false)
+    expect(listing.parent).not.toBeNull()
+  })
+
+  it('不传 path 就落在家目录', async () => {
+    const listing = await (await api('/api/fs')).json() as { path: string }
+    expect(listing.path).toBe(homedir())
+  })
+
+  it('打不开的目录 404，相对路径 422', async () => {
+    expect((await api(`/api/fs?path=${encodeURIComponent(join(sandbox, '不存在'))}`)).status).toBe(404)
+    expect((await api('/api/fs?path=./relative')).status).toBe(422)
   })
 })
 

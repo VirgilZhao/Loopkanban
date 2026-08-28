@@ -25,6 +25,7 @@ import type { Scheduler } from '../scheduler/index.ts'
 import type { Storage } from '../storage/index.ts'
 import { detectBaseBranch, isGitRepo } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
+import { browseDirectory, defaultBrowseRoot } from './browse.ts'
 import { RunBus } from './bus.ts'
 
 /** 只监听回环地址。**绝不 `0.0.0.0`** —— 那等于把执行任意代码的接口挂到局域网。 */
@@ -185,6 +186,23 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    // ── 本机目录浏览：新增项目时选文件夹用 ───────────────────
+    if (method === 'GET' && pathname === '/api/fs') {
+      const asked = url.searchParams.get('path')
+      const target = asked === null || asked.trim().length === 0 ? defaultBrowseRoot() : asked
+      if (!isAbsolute(target)) {
+        sendJson(res, 422, { error: 'path-not-absolute', detail: '要绝对路径' })
+        return
+      }
+      try {
+        sendJson(res, 200, await browseDirectory(target), extraHeaders)
+      } catch {
+        // 不存在、不是目录、没权限 —— 对调用方是同一件事：这儿看不了。
+        sendJson(res, 404, { error: 'no-such-dir', detail: `打不开 ${target}` })
+      }
+      return
+    }
+
     // ── 项目：列出与新增 ─────────────────────────────────────
     if (pathname === '/api/projects') {
       if (method === 'GET') {
@@ -270,6 +288,40 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         sendJson(res, 200, { settings, lastTick }, extraHeaders)
         return
       }
+    }
+
+    // ── 删除项目 ────────────────────────────────────────────
+    const projectId = matchPath(pathname, /^\/api\/projects\/([^/]+)$/)
+    if (method === 'DELETE' && projectId !== null) {
+      const target = asProjectId(decodeURIComponent(projectId))
+      const project = storage.getProject(target)
+      if (project === null) { sendJson(res, 404, { error: 'project-not-found' }); return }
+
+      const tasks = storage.listTasks(target)
+      // 正在跑的卡意味着有个活着的进程正在改这个仓库。把它的账本抽走，
+      // 那个进程会继续跑到没人认识它 —— 先停下来，再删。
+      const running = tasks.filter((task) => task.column === 'running')
+      if (running.length > 0) {
+        sendJson(res, 422, {
+          error: 'project-busy',
+          detail: `还有 ${String(running.length)} 张卡在执行，先终止它们`,
+        })
+        return
+      }
+
+      // Run 要在删库之前读出来 —— 删完就查不到该收拾哪些 worktree 了。
+      const runsOfTask = new Map(tasks.map((task) => [task.id, storage.listRuns(task.id)]))
+      if (!storage.deleteProject(target)) {
+        sendJson(res, 404, { error: 'project-not-found' })
+        return
+      }
+      // 同 accept / discard / 删卡：状态先落定，不可逆的删除在后。
+      // 收拾的只是我们自己建的 worktree 与任务分支，仓库本身一个字不动。
+      if (review !== undefined) {
+        for (const task of tasks) await review.purge(task, runsOfTask.get(task.id) ?? [])
+      }
+      sendJson(res, 200, { deleted: true, tasks: tasks.length }, extraHeaders)
+      return
     }
 
     // ── 新建任务 ────────────────────────────────────────────

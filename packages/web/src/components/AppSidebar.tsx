@@ -1,8 +1,9 @@
-import { Archive, Bot, FolderGit2, LayoutGrid, Plus } from 'lucide-react'
+import { Archive, Bot, FolderGit2, LayoutGrid, Plus, Trash2 } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
-  SidebarHeader, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarSeparator,
+  SidebarHeader, SidebarMenu, SidebarMenuAction, SidebarMenuBadge, SidebarMenuButton,
+  SidebarMenuItem, SidebarSeparator,
 } from '@/components/ui/sidebar.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, SchedulerState, SchedulerSettings } from '@/types.ts'
@@ -19,6 +20,7 @@ interface Props {
   view: View
   onView: (view: View) => void
   onNewProject: () => void
+  onDeleteProject: (project: Project) => void
   onCreate: () => void
   /** 概览里没有"当前项目"，新建任务无处可落，这时按钮是灰的。 */
   canCreate: boolean
@@ -32,7 +34,7 @@ interface Props {
 }
 
 export function AppSidebar({
-  agents, projects, counts, total, view, onView, onNewProject, onCreate, canCreate,
+  agents, projects, counts, total, view, onView, onNewProject, onDeleteProject, onCreate, canCreate,
   archivedCount, showArchived, onToggleArchived,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
@@ -134,8 +136,20 @@ export function AppSidebar({
                   >
                     <FolderGit2 />
                     <span>{project.name}</span>
-                    <SidebarMenuBadge>{counts[project.id] ?? 0}</SidebarMenuBadge>
+                    {/* 鼠标移上来时计数让位给删除按钮 —— 240px 宽的边栏里
+                        塞不下两个东西，而此刻你要的是那颗按钮。 */}
+                    <SidebarMenuBadge className="group-hover/menu-item:invisible">
+                      {counts[project.id] ?? 0}
+                    </SidebarMenuBadge>
                   </SidebarMenuButton>
+                  <SidebarMenuAction
+                    aria-label={`删除项目 ${project.name}`}
+                    title="删除项目"
+                    onClick={() => { onDeleteProject(project) }}
+                    className="hover:!text-lamp-fail"
+                  >
+                    <Trash2 />
+                  </SidebarMenuAction>
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>

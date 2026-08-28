@@ -7,8 +7,8 @@
  */
 
 import type {
-  Agent, DiffView, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task,
-  TaskEdit,
+  Agent, DiffView, DirListing, Project, Run, RunStats, SchedulerSettings, SchedulerState,
+  StreamEvent, Task, TaskEdit,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -35,6 +35,19 @@ export const api = {
   state: () => call<{ projects: Project[]; tasks: Task[] }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
+
+  /**
+   * 删除项目，连同它名下所有卡片、执行历史，以及这些卡留下的分支与 worktree。
+   * **仓库本身不动**。还有卡在执行时会被拒绝。
+   */
+  deleteProject: (projectId: string) =>
+    call<{ deleted: boolean; tasks: number }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+    }),
+
+  /** 列出本机某个目录下的子目录，供新增项目时挑文件夹。不传则从家目录起步。 */
+  browse: (path?: string) =>
+    call<DirListing>(`/api/fs${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`),
 
   /** 新增项目。目录必须是本机上的一个 git 仓库，基线分支由它自己说了算。 */
   createProject: (input: { name: string; path: string }) =>

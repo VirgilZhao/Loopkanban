@@ -48,6 +48,21 @@ export interface TaskEdit {
   preferredProvider?: string | undefined
 }
 
+/** 目录选择框的一层：当前目录、上一级、以及下面的子目录。 */
+export interface DirEntry {
+  name: string
+  path: string
+  /** 是不是 git 仓库 —— 能直接选来当项目的就是它们。 */
+  isRepo: boolean
+}
+
+export interface DirListing {
+  path: string
+  parent: string | null
+  isRepo: boolean
+  entries: DirEntry[]
+}
+
 /** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
 export interface Project {
   id: string

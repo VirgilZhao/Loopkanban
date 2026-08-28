@@ -191,6 +191,44 @@ export class Storage {
     return this.listProjects().find((project) => project.id === id) ?? null
   }
 
+  /**
+   * 删除项目，连同它名下所有卡片与执行历史。
+   *
+   * 同 `deleteTask`，这是 `run_events` 只插不改不删的另一处例外：整个项目都
+   * 没了，留着一串指向空 taskId 的事件只是垃圾，外键也不允许它们留着。
+   *
+   * **不碰仓库本身**。删的只是 LoopKanban 记的账；仓库里那些 worktree 与
+   * 分支由调用方（Review.purge）收拾，也只收拾我们自己建的那些。
+   *
+   * 整件事在一个事务里：要么全成、要么全不动。
+   *
+   * @param id - 要删的项目。
+   * @returns 是否删掉了；false 表示这个项目本来就不在。
+   */
+  deleteProject(id: ProjectId): boolean {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      // 顺序是外键定的：事件 → Run → 卡片 → 项目。
+      this.db.prepare(`
+        DELETE FROM run_events WHERE run_id IN (
+          SELECT id FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+        )
+      `).run(id)
+      this.db.prepare('DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
+      const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
+      if (removed.changes !== 1) {
+        this.db.exec('ROLLBACK')
+        return false
+      }
+      this.db.exec('COMMIT')
+      return true
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   // ── Task ───────────────────────────────────────────────────────
 
   createTask(task: Task): void {

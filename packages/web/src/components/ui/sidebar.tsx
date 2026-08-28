@@ -242,6 +242,31 @@ function SidebarMenuButton({
   )
 }
 
+/**
+ * 菜单项右侧的动作按钮。
+ *
+ * 是菜单按钮的**兄弟**而不是子元素 —— 按钮套按钮不是合法的 HTML，点击区域
+ * 也会打架。默认藏起来，鼠标移到这一项上（或键盘聚焦进来）才出现。
+ */
+function SidebarMenuAction({ className, ...props }: React.ComponentProps<'button'>) {
+  return (
+    <button
+      type="button"
+      data-slot="sidebar-menu-action"
+      className={cn(
+        'absolute end-1 top-1.5 flex aspect-square w-5 items-center justify-center rounded-md p-0',
+        'text-sidebar-foreground/70 outline-hidden ring-sidebar-ring transition-opacity',
+        'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2',
+        'opacity-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 focus-visible:opacity-100',
+        'group-data-[state=collapsed]/sidebar:hidden',
+        '[&>svg]:size-3.5 [&>svg]:shrink-0',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
 function SidebarMenuBadge({ className, ...props }: React.ComponentProps<'span'>) {
   return (
     <span
@@ -318,6 +343,7 @@ export {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,

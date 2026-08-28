@@ -6,6 +6,7 @@ import {
 import { api, ApiError } from '@/api.ts'
 import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { Column } from '@/components/Column.tsx'
+import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
 import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
@@ -65,6 +66,7 @@ export default function App(): React.JSX.Element {
   // 看哪一堆卡：概览（全部）或某个项目。
   const [view, setView] = useState<View>({ kind: 'overview' })
   const [newProject, setNewProject] = useState(false)
+  const [deleting, setDeleting] = useState<Project | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [liveTools, setLiveTools] = useState<Record<string, string>>({})
@@ -278,6 +280,7 @@ export default function App(): React.JSX.Element {
         view={view}
         onView={setView}
         onNewProject={() => { setNewProject(true) }}
+        onDeleteProject={setDeleting}
         onCreate={createTask}
         canCreate={activeProject !== null}
         archivedCount={archivedCount}
@@ -380,6 +383,21 @@ export default function App(): React.JSX.Element {
               setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
             }}
             onClose={() => { setSelectedId(null) }}
+          />
+        )}
+
+        {deleting === null ? null : (
+          <DeleteProjectDialog
+            project={deleting}
+            taskCount={tasks.filter((t) => t.projectId === deleting.id).length}
+            onSubmit={() => api.deleteProject(deleting.id)}
+            onDeleted={() => {
+              // 删掉的正是当前视角的话，退回概览 —— 否则界面停在一个不存在的项目上。
+              if (view.kind === 'project' && view.id === deleting.id) setView({ kind: 'overview' })
+              setDeleting(null)
+              void refresh()
+            }}
+            onClose={() => { setDeleting(null) }}
           />
         )}
 

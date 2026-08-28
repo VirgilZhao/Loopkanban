@@ -331,6 +331,142 @@ describe('GET /api/fs', () => {
   })
 })
 
+describe('文件浏览与命令行', () => {
+  let sandbox: string
+  let repo: string
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-browse-'))
+    repo = join(sandbox, 'repo')
+    await mkdir(join(repo, 'src'), { recursive: true })
+    await writeFile(join(repo, 'README.md'), '# hi\n', 'utf8')
+    await writeFile(join(repo, 'src', 'main.ts'), 'export const x = 1\n', 'utf8')
+    await new Promise((resolve, reject) => {
+      const child = spawn('git', ['init', '-q', '-b', 'main', repo], { stdio: 'ignore' })
+      child.on('exit', resolve)
+      child.on('error', reject)
+    })
+    store.createProject({ id: asProjectId('p-fs'), name: 'fs', repoPath: repo, baseBranch: 'main', createdAt: T0 })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('列出项目的工作区', async () => {
+    const res = await api('/api/workspaces?projectId=p-fs')
+    expect(res.status).toBe(200)
+    const { workspaces } = await res.json() as { workspaces: { kind: string; branch: string | null }[] }
+    expect(workspaces).toHaveLength(1)
+    expect(workspaces[0]?.kind).toBe('repo')
+  })
+
+  it('项目不存在返回 404', async () => {
+    expect((await api('/api/workspaces?projectId=nope')).status).toBe(404)
+    expect((await api('/api/workspaces')).status).toBe(404)
+  })
+
+  it('不给 path 就列工作区根', async () => {
+    const res = await api(`/api/files?root=${encodeURIComponent(repo)}`)
+    expect(res.status).toBe(200)
+    const listing = await res.json() as { relative: string; entries: { name: string }[] }
+    expect(listing.relative).toBe('')
+    expect(listing.entries.map((e) => e.name)).toEqual(['src', 'README.md'])
+  })
+
+  it('读文件正文', async () => {
+    const res = await api(
+      `/api/files/content?root=${encodeURIComponent(repo)}&path=${encodeURIComponent(join(repo, 'src', 'main.ts'))}`,
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json() as { content: string }).content).toBe('export const x = 1\n')
+  })
+
+  /*
+   * 围栏是这组接口唯一的实质防线：token 挡得住外人，挡不住我们自己写错的
+   * 路径拼接，而这几条接口一旦漏了就是把整台机器的内容摊开。
+   */
+  it('围栏外的路径一律 422 —— 没登记的目录、爬出去的 `..`、相对路径', async () => {
+    const outside = join(sandbox, 'outside')
+    await mkdir(outside, { recursive: true })
+    expect((await api(`/api/files?root=${encodeURIComponent(outside)}`)).status).toBe(422)
+    expect((await api(
+      `/api/files?root=${encodeURIComponent(repo)}&path=${encodeURIComponent(join(repo, '..'))}`,
+    )).status).toBe(422)
+    expect((await api(
+      `/api/files/content?root=${encodeURIComponent(repo)}&path=${encodeURIComponent('/etc/hosts')}`,
+    )).status).toBe(422)
+    expect((await api('/api/files?root=./relative')).status).toBe(422)
+  })
+
+  it('围栏里但打不开的路径是 404，不是 422 —— 两件事对用户是不同的话', async () => {
+    const res = await api(
+      `/api/files?root=${encodeURIComponent(repo)}&path=${encodeURIComponent(join(repo, '不存在'))}`,
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('跑命令，回退出码与输出', async () => {
+    const res = await api('/api/exec', {
+      method: 'POST',
+      body: JSON.stringify({ root: repo, cwd: join(repo, 'src'), command: 'cat main.ts' }),
+    })
+    expect(res.status).toBe(200)
+    const result = await res.json() as { stdout: string; code: number; cwd: string }
+    expect(result.stdout).toBe('export const x = 1\n')
+    expect(result.code).toBe(0)
+  })
+
+  it('命令失败照样 200 —— 那是它的输出，不是我们的故障', async () => {
+    const res = await api('/api/exec', {
+      method: 'POST', body: JSON.stringify({ root: repo, command: 'exit 7' }),
+    })
+    expect(res.status).toBe(200)
+    expect((await res.json() as { code: number }).code).toBe(7)
+  })
+
+  /*
+   * 目录在你浏览的这会儿被删掉，是这几个接口最常见的失败 —— 废弃一张卡就会
+   * 连它的 worktree 一起删。三条路都得说人话，不能一句 500 了事。
+   */
+  it('cwd 没了是 404，不是 500 —— spawn 的报错会把锅甩给 shell', async () => {
+    const res = await api('/api/exec', {
+      method: 'POST',
+      body: JSON.stringify({ root: repo, cwd: join(repo, '走了'), command: 'pwd' }),
+    })
+    expect(res.status).toBe(404)
+    expect((await res.json() as { error: string }).error).toBe('no-such-dir')
+  })
+
+  /*
+   * 仓库整个不见了，不能说成「你逛的不是你自己的项目」—— 用户送来的**正是**
+   * 这个项目登记的路径，那句话会把人往完全错误的方向带。
+   */
+  it('仓库目录没了报 repo-missing，不是 outside-project', async () => {
+    await rm(repo, { recursive: true, force: true })
+    for (const path of [
+      `/api/files?root=${encodeURIComponent(repo)}`,
+      `/api/files/content?root=${encodeURIComponent(repo)}&path=${encodeURIComponent(join(repo, 'README.md'))}`,
+    ]) {
+      const res = await api(path)
+      expect(res.status).toBe(410)
+      expect((await res.json() as { error: string }).error).toBe('repo-missing')
+    }
+    const ran = await api('/api/exec', {
+      method: 'POST', body: JSON.stringify({ root: repo, command: 'pwd' }),
+    })
+    expect(ran.status).toBe(410)
+    expect((await ran.json() as { error: string }).error).toBe('repo-missing')
+  })
+
+  it('空命令 422，围栏外的 cwd 422', async () => {
+    expect((await api('/api/exec', {
+      method: 'POST', body: JSON.stringify({ root: repo, command: '   ' }),
+    })).status).toBe(422)
+    expect((await api('/api/exec', {
+      method: 'POST', body: JSON.stringify({ root: '/etc', command: 'ls' }),
+    })).status).toBe(422)
+  })
+})
+
 describe('GET /api/agents', () => {
   /** 造一个探测结果，只填这条测试关心的字段。 */
   const detected = (id: string, caveat?: { label: string; detail: string }) => ({

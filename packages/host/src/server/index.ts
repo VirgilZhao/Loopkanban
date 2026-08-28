@@ -27,6 +27,8 @@ import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../work
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
 import { RunBus } from './bus.ts'
+import { runCommand } from './exec.ts'
+import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
 
 /** 只监听回环地址。**绝不 `0.0.0.0`** —— 那等于把执行任意代码的接口挂到局域网。 */
 const LOOPBACK = '127.0.0.1'
@@ -260,6 +262,118 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         branches: await listBranches(repoPath).catch(() => []),
         base: await detectBaseBranch(repoPath),
       }, extraHeaders)
+      return
+    }
+
+    /*
+     * ── 文件浏览与命令行 ─────────────────────────────────────
+     *
+     * 三个接口共用一条围栏：路径必须落在**已登记项目的仓库**里面（worktree
+     * 长在 `<repo>/.loopkanban/worktrees/` 下，天然包含在内）。围栏防的是我们
+     * 自己的路径拼接写错 —— 那种 bug 在「只列目录名」时是噪音，在「读文件正文」
+     * 和「跑命令」时就是把整台机器摊开。
+     */
+    const projectRoots = (): string[] => storage.listProjects().map((project) => project.repoPath)
+
+    /**
+     * 围栏没放行时的应答。
+     *
+     * 一律说成「在项目外面」是不行的：仓库被移走或删掉时，用户送来的**正是**
+     * 这个项目登记的路径，那句话等于告诉他「你逛的不是你自己的项目」，而他逛的
+     * 恰恰就是 —— 把人往完全错误的方向带。所以要分清是哪一种。
+     *
+     * @param roots - 与 `confine` 拿到的是同一份。
+     * @param asked - 被拒的那个路径。
+     * @param outside - 真的越界时说什么。
+     */
+    const refuse = async (roots: readonly string[], asked: string, outside: string): Promise<void> => {
+      const reason = await refusalFor(roots, asked)
+      // 410 而不是 422：路径没错，是它指向的东西整个不在了。
+      sendJson(res, reason === 'repo-missing' ? 410 : 422, {
+        error: reason,
+        detail: reason === 'repo-missing' ? `项目的仓库目录已经不在了：${asked}` : outside,
+      })
+    }
+
+    /** 一个项目能逛哪些工作区：主仓库，加上卡片留下的 worktree。 */
+    if (method === 'GET' && pathname === '/api/workspaces') {
+      const asked = url.searchParams.get('projectId')?.trim() ?? ''
+      const project = asked.length === 0 ? null : storage.getProject(asProjectId(asked))
+      if (project === null) {
+        sendJson(res, 404, { error: 'project-not-found', detail: '没有这个项目' })
+        return
+      }
+      sendJson(res, 200, { workspaces: await listWorkspaces(project.repoPath) }, extraHeaders)
+      return
+    }
+
+    /** 某个文件的正文。放在 `/api/files` 前面 —— 两条都是精确匹配，顺序只为读着清楚。 */
+    if (method === 'GET' && pathname === '/api/files/content') {
+      const roots = projectRoots()
+      const askedRoot = url.searchParams.get('root')?.trim() ?? ''
+      const askedPath = url.searchParams.get('path')?.trim() ?? ''
+      const root = await confine(roots, askedRoot)
+      if (root === null) { await refuse(roots, askedRoot, '只能看已登记项目仓库里的文件'); return }
+      const target = await confine([root], askedPath)
+      if (target === null) { await refuse([root], askedPath, '只能看已登记项目仓库里的文件'); return }
+      try {
+        sendJson(res, 200, await readFileText(root, target), extraHeaders)
+      } catch {
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${target}` })
+      }
+      return
+    }
+
+    /** 列一个目录。不给 path 就列工作区根。 */
+    if (method === 'GET' && pathname === '/api/files') {
+      const roots = projectRoots()
+      const askedRoot = url.searchParams.get('root')?.trim() ?? ''
+      const asked = url.searchParams.get('path')?.trim() ?? ''
+      const root = await confine(roots, askedRoot)
+      if (root === null) { await refuse(roots, askedRoot, '只能逛已登记项目仓库里的目录'); return }
+      const target = asked.length === 0 ? root : await confine([root], asked)
+      if (target === null) { await refuse([root], asked, '只能逛已登记项目仓库里的目录'); return }
+      try {
+        sendJson(res, 200, await listFiles(root, target), extraHeaders)
+      } catch {
+        sendJson(res, 404, { error: 'no-such-dir', detail: `打不开 ${target}` })
+      }
+      return
+    }
+
+    /*
+     * 在工作区里跑一条命令。
+     *
+     * 这是用户自己的手，不是 Agent 的 —— 他正在看某个 worktree，想 `git log`
+     * 一下就得切出去开终端、再 cd 到那个七层深的路径。命令自己失败（非零退出）
+     * 照样是 200：那是它的输出，不是我们的故障。
+     */
+    if (method === 'POST' && pathname === '/api/exec') {
+      const body = (await readJsonBody(req) ?? {}) as Record<string, unknown>
+      const command = typeof body['command'] === 'string' ? body['command'].trim() : ''
+      if (command.length === 0) {
+        sendJson(res, 422, { error: 'empty-command', detail: '要一条命令' })
+        return
+      }
+      const roots = projectRoots()
+      const askedRoot = typeof body['root'] === 'string' ? body['root'].trim() : ''
+      const asked = typeof body['cwd'] === 'string' ? body['cwd'].trim() : ''
+      const root = await confine(roots, askedRoot)
+      if (root === null) { await refuse(roots, askedRoot, '只能在已登记项目的仓库里跑命令'); return }
+      const cwd = asked.length === 0 ? root : await confine([root], asked)
+      if (cwd === null) { await refuse([root], asked, '只能在已登记项目的仓库里跑命令'); return }
+
+      /*
+       * cwd 可能在你浏览的这会儿就没了 —— 废弃一张卡会连它的 worktree 一起删掉。
+       * 不先探一下的话，spawn 会以 `spawn /bin/zsh ENOENT` 失败，而那句话把锅
+       * 甩给了 shell：真正不见的是目录，用户照着去查 shell 只会白费一晚上。
+       */
+      if (!await stat(cwd).then((info) => info.isDirectory(), () => false)) {
+        sendJson(res, 404, { error: 'no-such-dir', detail: `打不开 ${cwd}` })
+        return
+      }
+      const timeout = typeof body['timeoutMs'] === 'number' ? body['timeoutMs'] : undefined
+      sendJson(res, 200, await runCommand(command, cwd, timeout), extraHeaders)
       return
     }
 

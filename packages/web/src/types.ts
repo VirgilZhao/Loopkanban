@@ -65,6 +65,67 @@ export interface DirListing {
   entries: DirEntry[]
 }
 
+/**
+ * 一个可浏览的工作区：项目主仓库，或某张卡派生出来的 worktree。
+ *
+ * worktree 才是 Agent 真正干活的地方 —— 能切过去看，「它到底改了什么」
+ * 就不必只靠 diff 猜。
+ */
+export interface Workspace {
+  path: string
+  /** 当前分支；detached HEAD 或读不出来时为 null。 */
+  branch: string | null
+  kind: 'repo' | 'worktree'
+  /** worktree 属于哪张卡。主仓库没有。 */
+  taskId?: string
+}
+
+export interface FileEntry {
+  name: string
+  path: string
+  kind: 'dir' | 'file'
+  /** 目录恒为 0 —— 算目录大小要递归整棵树，代价与用处不成比例。 */
+  size: number
+  modifiedAt: number
+}
+
+export interface FileListing {
+  /** 这次浏览的根（工作区）。 */
+  root: string
+  path: string
+  /** 相对根的路径，根本身是空串。面包屑用它。 */
+  relative: string
+  /** 上一级；已经在根上时为 null —— 根就是围栏，不能再往上。 */
+  parent: string | null
+  entries: FileEntry[]
+}
+
+export interface FileContent {
+  path: string
+  relative: string
+  size: number
+  /** 文件超过上限时只回了前一段。 */
+  truncated: boolean
+  /** 二进制文件不回正文。 */
+  binary: boolean
+  content: string
+}
+
+/** 跑一条命令的结果。命令自己失败也是这个形状 —— 那是它的输出，不是故障。 */
+export interface ExecResult {
+  command: string
+  cwd: string
+  stdout: string
+  stderr: string
+  /** 被信号打断时为 null，此时看 signal。 */
+  code: number | null
+  signal: string | null
+  /** 有一路输出撞到了上限。 */
+  truncated: boolean
+  timedOut: boolean
+  durationMs: number
+}
+
 /** 一个仓库有哪些本地分支，以及推荐当基线的那条。 */
 export interface BranchListing {
   path: string

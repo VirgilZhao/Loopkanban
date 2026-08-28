@@ -29,6 +29,22 @@
         document.documentElement.classList.toggle('dark', dark)
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
       })()
+
+      // 同理定好语言：html[lang] 管断词与朗读，让它从第一帧起就是对的。
+      // 没手动切换过就跟浏览器走。真正的文案由 React 那边的 I18nProvider 出。
+      ;(function () {
+        var stored = null
+        try {
+          stored = localStorage.getItem('loopkanban.lang')
+        } catch (_) {
+          // 隐私模式下 localStorage 会抛。当作没选过，跟随浏览器。
+        }
+        var zh =
+          stored === 'zh' || stored === 'en'
+            ? stored === 'zh'
+            : navigator.language.toLowerCase().indexOf('zh') === 0
+        document.documentElement.lang = zh ? 'zh-CN' : 'en'
+      })()
     </script>
   </head>
   <body>

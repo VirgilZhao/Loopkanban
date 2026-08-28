@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Moon, Sun } from 'lucide-react'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 
 const KEY = 'loopkanban.theme'
@@ -23,6 +24,7 @@ function storedTheme(): 'dark' | 'light' | null {
  * 开着的页面立刻跟上，不用刷新。一旦手动切过，那次选择就压过系统。
  */
 export function ThemeToggle(): React.JSX.Element {
+  const t = useT()
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
 
   // state 是唯一真相，DOM 跟着它走。
@@ -55,8 +57,8 @@ export function ThemeToggle(): React.JSX.Element {
   return (
     <button
       onClick={toggle}
-      aria-label={dark ? '切换到亮色' : '切换到暗色'}
-      title={dark ? '切换到亮色' : '切换到暗色'}
+      aria-label={dark ? t('theme.toLight') : t('theme.toDark')}
+      title={dark ? t('theme.toLight') : t('theme.toDark')}
       className={cn(
         'flex size-6 items-center justify-center rounded-md border border-hairline text-ink-faint',
         'transition-colors hover:border-sodium hover:text-sodium',

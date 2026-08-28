@@ -10,6 +10,7 @@ import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { summarize } from '@/lib/events.ts'
+import { useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
 import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
@@ -41,6 +42,7 @@ interface Props {
 export function RunPanel({
   task, project, agents, onChanged, onError, onClose,
 }: Props): React.JSX.Element {
+  const t = useT()
   const [runs, setRuns] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
   const [diff, setDiff] = useState<Diff | null>(null)
@@ -189,30 +191,31 @@ export function RunPanel({
               </h2>
             </DialogTitle>
             <DialogDescription className="mt-1 text-xs text-ink-faint">
-              {project?.name ?? '未知项目'} · 基线 <span className="mono">{task.baseBranch}</span>
+              {project?.name ?? t('panel.unknownProject')} · {t('panel.baseLabel')}{' '}
+              <span className="mono">{task.baseBranch}</span>
             </DialogDescription>
           </div>
           <Button
             variant="outline"
             size="sm"
             disabled={busy || task.column === 'running'}
-            {...(task.column === 'running' ? { title: '正在执行的卡片不能归档，先终止执行' } : {})}
+            {...(task.column === 'running' ? { title: t('panel.archiveBlocked') } : {})}
             onClick={() => {
               void act(() => (archived
                 ? api.unarchive(task.id, task.revision)
                 : api.archive(task.id, task.revision)))
             }}
           >
-            {archived ? <><ArchiveRestore />取出</> : <><Archive />归档</>}
+            {archived
+              ? <><ArchiveRestore />{t('panel.unarchive')}</>
+              : <><Archive />{t('panel.archive')}</>}
           </Button>
           {deletable ? (
             <Button
               variant="outline"
               size="sm"
               disabled={busy}
-              title={confirmDelete
-                ? '再点一次就删掉了，不可撤销'
-                : '删除这张卡：执行历史与它留下的分支、工作区一并抹掉'}
+              title={confirmDelete ? t('panel.deleteArmed') : t('panel.deleteHint')}
               onClick={() => {
                 if (!confirmDelete) { setConfirmDelete(true); return }
                 remove()
@@ -222,10 +225,10 @@ export function RunPanel({
                 confirmDelete && 'border-lamp-fail bg-lamp-fail/10',
               )}
             >
-              <Trash2 />{confirmDelete ? '确认删除' : '删除'}
+              <Trash2 />{confirmDelete ? t('panel.deleteConfirm') : t('panel.delete')}
             </Button>
           ) : null}
-          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="关闭" title="关闭 · esc">
+          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={t('panel.close')} title={t('panel.closeHint')}>
             <X />
           </Button>
         </header>
@@ -237,9 +240,10 @@ export function RunPanel({
           <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-4 py-2.5">
             <Archive className="mt-[3px] size-3.5 flex-none text-ink-faint" />
             <p className="min-w-0 text-xs leading-relaxed text-ink-faint">
-              已归档{task.archivedAt === undefined ? '' : ` · ${new Date(task.archivedAt).toLocaleString()}`}。
-              它留在 {task.column} 列但不出现在看板上，也不会被自动认领。
-              取出后回到原位。
+              {task.archivedAt === undefined
+                ? null
+                : `${t('panel.archivedAt', { at: new Date(task.archivedAt).toLocaleString() })} `}
+              {t('panel.archivedNote', { column: task.column })}
             </p>
           </div>
         ) : null}
@@ -249,9 +253,9 @@ export function RunPanel({
           <div className="flex flex-wrap items-center gap-2 border-b border-hairline px-4 py-2.5">
             {task.column === 'ready' ? (
               <>
-                <span className="text-xs text-ink-faint">派给</span>
+                <span className="text-xs text-ink-faint">{t('panel.dispatchTo')}</span>
                 {agents.length === 0 ? (
-                  <span className="cjk-label !text-lamp-fail">没有可用的 Agent CLI</span>
+                  <span className="cjk-label !text-lamp-fail">{t('panel.noAgents')}</span>
                 ) : task.preferredProvider === undefined ? (
                   // 没指定执行器：三个都摆出来，点哪个是哪个。
                   agents.map((agent) => (
@@ -273,7 +277,7 @@ export function RunPanel({
                   // 指定的执行器本机没探测到。这里不给"换一个派"的口子 ——
                   // 卡上写着要谁干，就不该在派活这一步偷偷换人。
                   <span className="text-xs text-lamp-fail">
-                    指定的 <span className="mono">{task.preferredProvider}</span> 本机没探测到，去规格里换一个
+                    {t('panel.pinnedMissing', { provider: task.preferredProvider })}
                   </span>
                 ) : (
                   <>
@@ -304,7 +308,7 @@ export function RunPanel({
                 }}
                 className="border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
               >
-                <Square />终止执行
+                <Square />{t('panel.stop')}
               </Button>
             )}
           </div>
@@ -319,11 +323,11 @@ export function RunPanel({
               <div className="mb-3 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-3 py-2">
                 <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
                 <p className="min-w-0 text-xs leading-relaxed text-lamp-fail">
-                  这次执行{latest.status === 'aborted' ? '被终止' : '失败'}了。
+                  {latest.status === 'aborted' ? t('panel.runAborted') : t('panel.runFailed')}
                   {latest.diagnostic === undefined ? null : (
                     <span className="mono block break-words">{latest.diagnostic}</span>
                   )}
-                  看完日志后去讨论里说一句让它重跑，或者废弃。
+                  {t('panel.runFailedHint')}
                 </p>
               </div>
             ) : null}
@@ -332,24 +336,22 @@ export function RunPanel({
               {/* 验收动作都是"对这张卡的最后一句话"：判完就回看板。
                   失败留在原地，让人看见错误再决定（同保存、同留言）。 */}
               <Action
-                icon={<GitMerge />} label="通过并合并" tone="primary" busy={busy}
+                icon={<GitMerge />} label={t('panel.acceptMerge')} tone="primary" busy={busy}
                 onClick={() => { void act(() => api.accept(task.id, true)).then(closeIfOk) }}
               />
               <Action
-                icon={<Check />} label="通过" tone="ok" busy={busy}
+                icon={<Check />} label={t('panel.accept')} tone="ok" busy={busy}
                 onClick={() => { void act(() => api.accept(task.id, false)).then(closeIfOk) }}
               />
               <span className="flex-1" />
               <Action
-                icon={<Trash2 />} label="废弃" tone="fail" busy={busy}
+                icon={<Trash2 />} label={t('panel.discard')} tone="fail" busy={busy}
                 onClick={() => { void act(() => api.discard(task.id)).then(closeIfOk) }}
               />
             </div>
 
             <p className="mt-2 text-xs leading-relaxed text-ink-faint">
-              通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区；
-              废弃会删掉分支并把卡退回 Backlog。
-              要它再改一版，去<span className="text-sodium">讨论</span>里说 —— 留言会把卡送回队列。
+              {t('panel.acceptNote', { branch: latest?.branch ?? '' })}
             </p>
           </div>
         ) : null}
@@ -358,15 +360,9 @@ export function RunPanel({
         <Tabs defaultValue="spec" className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex-none border-b border-hairline px-4 py-2.5">
             <TabsList>
-              {([
-                ['spec', '规格'],
-                ['talk', '讨论'],
-                ['diff', 'Diff'],
-                ['stream', '事件流'],
-                ['runs', '执行历史'],
-              ] as const).map(([value, label]) => (
+              {(['spec', 'talk', 'diff', 'stream', 'runs'] as const).map((value) => (
                 <TabsTrigger key={value} value={value} className="px-3">
-                  {label}
+                  {t(`panel.tab.${value}`)}
                   {value === 'talk' && comments.length > 0 ? (
                     <span className="mono text-[10px] text-ink-faint">{comments.length}</span>
                   ) : null}
@@ -413,12 +409,12 @@ export function RunPanel({
           </TabsContent>
 
           <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
-            {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
+            {diff === null ? <Empty text={t('panel.noDiff')} /> : <DiffView diff={diff} />}
           </TabsContent>
 
           <TabsContent value="stream" className="mt-0 flex min-h-0 flex-1 flex-col">
             {latest === undefined ? (
-              <Empty text="这张卡还没有执行记录" />
+              <Empty text={t('panel.noRun')} />
             ) : (
               <>
                 <div className="flex items-center gap-2 border-b border-hairline/60 px-4 py-2">
@@ -441,7 +437,7 @@ export function RunPanel({
                       </div>
                     )
                   })}
-                  {events.length === 0 ? <Empty text="等待事件…" /> : null}
+                  {events.length === 0 ? <Empty text={t('panel.waiting')} /> : null}
                 </div>
                 {toolCounts.length > 0 ? (
                   <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-hairline/60 px-4 py-2">
@@ -457,7 +453,7 @@ export function RunPanel({
           </TabsContent>
 
           <TabsContent value="runs" className="mt-0 min-h-0 flex-1 overflow-y-auto">
-            {runs.length === 0 ? <Empty text="暂无执行记录" /> : runs.map((run) => (
+            {runs.length === 0 ? <Empty text={t('panel.noRuns')} /> : runs.map((run) => (
               <div key={run.id} className="border-b border-hairline/60 px-4 py-2.5">
                 <div className="flex items-center gap-2">
                   <span className="lamp" data-state={run.status === 'completed' ? 'done' : run.status} />
@@ -465,7 +461,9 @@ export function RunPanel({
                   <span className="mono text-[10px] text-ink-faint">{run.cliVersion}</span>
                   <span className="flex-1" />
                   <span className="mono text-[10px] text-ink-faint">
-                    {run.endedAt === undefined ? '进行中' : `${String(Math.round((run.endedAt - run.startedAt) / 1000))}s`}
+                    {run.endedAt === undefined
+                      ? t('panel.inProgress')
+                      : `${String(Math.round((run.endedAt - run.startedAt) / 1000))}s`}
                   </span>
                 </div>
                 {run.diagnostic === undefined ? null : (
@@ -520,6 +518,7 @@ function Discussion({ comments, busy, requeues, onSend }: {
   requeues: boolean
   onSend: (body: string) => void
 }): React.JSX.Element {
+  const t = useT()
   const [draft, setDraft] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -536,7 +535,7 @@ function Discussion({ comments, busy, requeues, onSend }: {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
         {comments.length === 0 ? (
-          <Empty text="还没有讨论。跑完一轮 Agent 会把它做了什么写在这儿，你也可以先留个话" />
+          <Empty text={t('talk.empty')} />
         ) : comments.map((comment) => (
           <div key={comment.id} className="space-y-1.5">
             <div className="flex items-center gap-1.5">
@@ -547,7 +546,7 @@ function Discussion({ comments, busy, requeues, onSend }: {
                 'text-xs font-medium',
                 comment.author === 'agent' ? 'text-sodium' : 'text-ink',
               )}>
-                {comment.author === 'agent' ? 'Agent' : '你'}
+                {comment.author === 'agent' ? 'Agent' : t('talk.you')}
               </span>
               <span className="mono text-[10px] text-ink-faint">
                 {new Date(comment.at).toLocaleString()}
@@ -570,7 +569,7 @@ function Discussion({ comments, busy, requeues, onSend }: {
         <Textarea
           value={draft}
           disabled={busy}
-          placeholder={requeues ? '要它再改什么？发出去这张卡就回队列' : '留一条话，下次执行会带上它'}
+          placeholder={requeues ? t('talk.placeholderRequeue') : t('talk.placeholder')}
           onChange={(event) => { setDraft(event.target.value) }}
           onKeyDown={(event) => {
             // ⌘/Ctrl + Enter 发出去；单独回车留给换行 —— 这里写的是段落，不是聊天。
@@ -580,12 +579,10 @@ function Discussion({ comments, busy, requeues, onSend }: {
         />
         <div className="flex items-center gap-2">
           <p className="flex-1 text-xs text-ink-faint">
-            {requeues
-              ? '发出去这张卡回到 Ready，下一次执行会带着整条讨论走。'
-              : '下一次执行会带着整条讨论走。'}
+            {requeues ? t('talk.noteRequeue') : t('talk.note')}
           </p>
           <Button size="sm" disabled={busy || draft.trim().length === 0} onClick={send}>
-            <Send />发送
+            <Send />{t('talk.send')}
           </Button>
         </div>
       </div>

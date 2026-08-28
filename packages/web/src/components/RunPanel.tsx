@@ -52,6 +52,9 @@ export function RunPanel({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
+  // 跑过几轮 = 这张卡有几条执行记录。第二轮起 Agent 接的是同一个会话（见
+  // runner 的续跑），所以这个数就是"这次会话来回了几趟"，不是重新开始了几次。
+  const rounds = runs.length
   const archived = task.archivedAt !== undefined
   /** 卡上指定的执行器，且本机确实探测到了它。 */
   const pinned = agents.find((agent) => agent.id === task.preferredProvider)
@@ -184,6 +187,14 @@ export function RunPanel({
               <span className="tag">{task.id}</span>
               <span className="lamp" data-state={archived ? 'idle' : task.column} />
               <span className="chrome-label !text-[9px]">{task.column}</span>
+              {rounds > 0 ? (
+                <span
+                  className="mono text-[10px] text-sodium-deep"
+                  title={t('panel.roundsHint')}
+                >
+                  {t('panel.rounds', { n: rounds })}
+                </span>
+              ) : null}
             </div>
             <DialogTitle asChild>
               <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug text-ink">
@@ -453,10 +464,14 @@ export function RunPanel({
           </TabsContent>
 
           <TabsContent value="runs" className="mt-0 min-h-0 flex-1 overflow-y-auto">
-            {runs.length === 0 ? <Empty text={t('panel.noRuns')} /> : runs.map((run) => (
+            {runs.length === 0 ? <Empty text={t('panel.noRuns')} /> : runs.map((run, index) => (
               <div key={run.id} className="border-b border-hairline/60 px-4 py-2.5">
                 <div className="flex items-center gap-2">
                   <span className="lamp" data-state={run.status === 'completed' ? 'done' : run.status} />
+                  {/* 最新的排在最前面，所以轮次要倒着数回去。 */}
+                  <span className="mono text-[10px] text-sodium-deep">
+                    {t('panel.round', { n: rounds - index })}
+                  </span>
                   <span className="chrome-label">{run.provider}</span>
                   <span className="mono text-[10px] text-ink-faint">{run.cliVersion}</span>
                   <span className="flex-1" />

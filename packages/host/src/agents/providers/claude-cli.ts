@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import type { SpawnSpec } from '../../subprocess/index.ts'
 import { capture, findExecutable, probeVersion } from '../discover.ts'
 import { scrubEnv } from '../env.ts'
-import { choicesOf, hasFlag, parseHelp } from '../help-parser.ts'
+import { choicesOf, describeFlag, hasFlag, parseHelp } from '../help-parser.ts'
 import type { AgentCaps, AgentEvent, AgentProvider, PermissionTier, RunContext } from '../types.ts'
 
 /**
@@ -36,6 +36,24 @@ function resolveMode(tier: PermissionTier, available: readonly string[]): string
 function supportedTiers(modes: readonly string[]): PermissionTier[] {
   if (modes.length === 0) return []
   return (Object.keys(TIER_TO_MODE) as PermissionTier[]).filter((tier) => resolveMode(tier, modes) !== undefined)
+}
+
+/**
+ * 从 `--model` 的帮助文本里捞出可用的模型名。
+ *
+ * claude 没有列模型的子命令，但它把别名写在描述里：
+ * 「Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet')
+ * or a model's full name (e.g. 'claude-fable-5')」。引号里的每一个都是
+ * CLI 自己给的、当前版本认得的写法 —— 比我们硬编一份清单可靠得多，
+ * 措辞变了最多是捞不到，退回自由输入，不会给出过期的错答案。
+ */
+export function modelsFromHelp(help: ReturnType<typeof parseHelp>): string[] {
+  const block = describeFlag(help, 'model')
+  if (block === undefined) return []
+  const quoted = [...block.matchAll(/['"]([A-Za-z0-9][\w.-]*)['"]/g)]
+    .map((match) => match[1])
+    .filter((name): name is string => name !== undefined)
+  return [...new Set(quoted)]
 }
 
 /** 挑一个这个版本支持的输出格式，流式优先。 */
@@ -92,6 +110,7 @@ export const claudeCliProvider: AgentProvider = {
       canPinSessionId: hasFlag(help, 'session-id'),
       canResume: hasFlag(help, 'resume'),
       canPickModel: hasFlag(help, 'model'),
+      models: modelsFromHelp(help),
       permissionTiers: supportedTiers(choicesOf(help, 'permission-mode')),
       help,
     }

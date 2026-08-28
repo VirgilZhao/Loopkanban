@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { FolderGit2, Plus, X } from 'lucide-react'
+import { ChevronRight, FolderGit2, Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
@@ -8,11 +8,10 @@ import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
 /**
- * 模型名的占位提示。
+ * 枚举不出模型时的占位提示。
  *
- * **刻意只给一个例子而不是一份清单**：模型名是各家 CLI 自己的说法，随版本变；
- * claude 与 codex 都没有可枚举模型的命令，硬编一份清单只会过期误导人。
- * 这里给的是"长什么样"，真正认不认由 CLI 说了算。
+ * 只在 CLI 自己列不出清单（目前是 codex）时才用得上，给的是"长什么样"，
+ * 不是一份要维护的清单。
  */
 const MODEL_PLACEHOLDER: Record<string, string> = {
   claude: '例如 opus / sonnet',
@@ -85,11 +84,19 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
             autoFocus={draft.description.trim().length === 0}
             placeholder="要 Agent 做什么？"
             onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
-            className="leading-relaxed"
+            // Textarea 用的是 field-sizing:content，高度跟着内容走、rows 说了不算，
+            // 所以要给它更大的起始高度得抬 min-h（rows 只在不支持的浏览器上兜底）。
+            className="min-h-32 leading-relaxed"
           />
         </Field>
 
-        <Field label="验收标准" hint="可选。写了 Agent 就照着做、你就照着验；不写也能派活">
+        {/* 验收标准是可选的，所以默认收起来 —— 没写的时候它不该占着屏幕。 */}
+        <Collapsible
+          label="验收标准"
+          hint="可选。写了 Agent 就照着做、你就照着验；不写也能派活"
+          count={draft.acceptance.filter((item) => item.trim().length > 0).length}
+          defaultOpen={task.acceptance.length > 0}
+        >
           <div className="space-y-2">
             {draft.acceptance.map((item, index) => (
               <div key={index} className="flex items-center gap-2">
@@ -123,7 +130,7 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
               <Plus />新增一条
             </Button>
           </div>
-        </Field>
+        </Collapsible>
 
         <Field label="指定执行器" hint="不指定就由调度器按可用性挑一个">
           <div className="flex flex-wrap gap-2">
@@ -164,17 +171,30 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
         {/* 只有选定了执行器、且那个 CLI 认 --model 时才出现这一栏。
             能不能指定模型是**探测**出来的，不是写死的。 */}
         {picked === undefined ? null : picked.canPickModel ? (
-          <Field label="模型" hint={`留空用 ${picked.id} 自己的默认模型`}>
+          <Field
+            label="模型"
+            hint={picked.models.length > 0
+              ? `${picked.id} 报了 ${String(picked.models.length)} 个可用模型；留空就用它自己的默认`
+              : `留空用 ${picked.id} 自己的默认模型`}
+          >
+            {/* 有清单就给建议，但仍然允许自由输入：清单可能不全也可能过期，
+                真正认不认由 CLI 说了算。 */}
             <Input
               value={draft.model ?? ''}
               disabled={locked}
               className="mono"
-              placeholder={MODEL_PLACEHOLDER[picked.id] ?? '模型名'}
+              list={picked.models.length > 0 ? `models-${picked.id}` : undefined}
+              placeholder={picked.models.length > 0 ? '点开选，或直接输入' : MODEL_PLACEHOLDER[picked.id] ?? '模型名'}
               onChange={(e) => {
                 const next = e.target.value.trim()
                 setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
               }}
             />
+            {picked.models.length === 0 ? null : (
+              <datalist id={`models-${picked.id}`}>
+                {picked.models.map((model) => <option key={model} value={model} />)}
+              </datalist>
+            )}
           </Field>
         ) : (
           <Field label="模型">
@@ -230,6 +250,43 @@ function Field({ label, hint, children }: {
         {hint === undefined ? null : <p className="text-xs text-ink-faint">{hint}</p>}
       </div>
       {children}
+    </div>
+  )
+}
+
+/** 可折叠的一组字段。收起时只留标题那一行，右侧标出里面有几条。 */
+function Collapsible({ label, hint, count, defaultOpen, children }: {
+  label: string
+  hint?: string
+  count: number
+  defaultOpen: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => { setOpen((on) => !on) }}
+        className="flex w-full items-start gap-1.5 text-left"
+      >
+        <ChevronRight
+          className={cn('mt-0.5 size-3.5 flex-none text-ink-faint transition-transform', open && 'rotate-90')}
+        />
+        <div className="min-w-0 flex-1 space-y-1">
+          <Label className="cursor-pointer">
+            {label}
+            {count > 0 ? <span className="mono text-xs text-ink-faint">{count}</span> : null}
+          </Label>
+        </div>
+      </button>
+      {open ? (
+        <div className="space-y-2 ps-5">
+          {hint === undefined ? null : <p className="text-xs text-ink-faint">{hint}</p>}
+          {children}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -16,6 +16,13 @@ export interface HelpSurface {
   readonly flags: ReadonlySet<string>
   /** 长参数名 → 候选值列表。 */
   readonly choices: ReadonlyMap<string, readonly string[]>
+  /**
+   * 长参数名 → 它那一块的原文（含描述）。
+   *
+   * 有些事实只写在描述里而不是候选值里 —— 例如 claude 的 `--model` 把可用
+   * 别名写在「e.g. 'opus', 'sonnet'」这句话中间。要把它们捞出来，就得留着原文。
+   */
+  readonly descriptions: ReadonlyMap<string, string>
 }
 
 /** 匹配一个参数块的起始行，例如 `  -s, --sandbox <MODE>` 或 `  --verbose`。 */
@@ -55,6 +62,7 @@ export function parseHelp(helpText: string): HelpSurface {
   // 按「参数块」切分：一行以参数开头，直到下一个参数开头行为止都算它的描述。
   const lines = helpText.split('\n')
   const choices = new Map<string, readonly string[]>()
+  const descriptions = new Map<string, string>()
   let currentFlags: string[] = []
   let buffer: string[] = []
 
@@ -69,6 +77,7 @@ export function parseHelp(helpText: string): HelpSurface {
       // 一个块可能同时声明短参数与长参数，候选值对每个长参数都成立。
       if (values.length > 0) for (const flag of currentFlags) choices.set(flag, values)
     }
+    for (const flag of currentFlags) descriptions.set(flag, block)
     currentFlags = []
     buffer = []
   }
@@ -82,7 +91,7 @@ export function parseHelp(helpText: string): HelpSurface {
   }
   flush()
 
-  return { flags, choices }
+  return { flags, choices, descriptions }
 }
 
 /**
@@ -101,4 +110,13 @@ export function hasFlag(surface: HelpSurface, flag: string): boolean {
  */
 export function choicesOf(surface: HelpSurface, flag: string): readonly string[] {
   return surface.choices.get(flag) ?? []
+}
+
+/**
+ * 取某个参数那一块的原文（含描述）。
+ * @param surface - {@link parseHelp} 的结果。
+ * @param flag - 长参数名，不含 `--`。
+ */
+export function describeFlag(surface: HelpSurface, flag: string): string | undefined {
+  return surface.descriptions.get(flag)
 }

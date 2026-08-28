@@ -222,7 +222,11 @@ describe('GET /api/agents', () => {
       streaming: true, canPinSessionId: false, canResume: true,
       permissionTiers: ['standard'],
       ...(caveat === undefined ? {} : { permissionCaveat: caveat }),
-      help: { flags: new Set<string>(), choices: new Map<string, readonly string[]>() },
+      help: {
+        flags: new Set<string>(),
+        choices: new Map<string, readonly string[]>(),
+        descriptions: new Map<string, string>(),
+      },
     } as never,
   })
 

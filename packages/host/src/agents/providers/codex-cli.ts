@@ -127,6 +127,9 @@ export const codexCliProvider: AgentProvider = {
       canPinSessionId: false,
       canResume,
       canPickModel: hasFlag(help, 'model'),
+      // codex 没有列模型的子命令，help 里也没写候选 —— 枚举不出来就如实
+      // 给空，界面退回自由输入，而不是编一份清单出来。
+      models: [],
       permissionTiers: supportedTiers(choicesOf(help, 'sandbox'), help),
       help,
       ...(canResume ? { resumeHelp } : {}),

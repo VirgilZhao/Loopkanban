@@ -54,7 +54,7 @@ function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvid
 
 const caps = (): AgentCaps => ({
   id: 'scripted', bin: '/fake', version: '9.9.9',
-  streaming: true, canPinSessionId: true, canResume: false, canPickModel: true,
+  streaming: true, canPinSessionId: true, canResume: false, canPickModel: true, models: [],
   permissionTiers: ['standard'], help: parseHelp(''),
 })
 

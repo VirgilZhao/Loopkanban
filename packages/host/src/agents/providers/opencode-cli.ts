@@ -138,6 +138,38 @@ const DIAGNOSTIC_MAX = 512
 /** notice 里附带的细节长度上限，别把整坨 JSON 倒进界面。 */
 const DETAIL_MAX = 160
 
+/**
+ * `opencode models` 一行一个，形如 `anthropic/claude-sonnet-4-5`。
+ *
+ * 段数不止两段：`siliconflow-cn/deepseek-ai/DeepSeek-R1` 这种转售商的 id
+ * 有三段甚至四段，只认两段会把它们整片丢掉。
+ */
+const MODEL_LINE = /^[A-Za-z0-9][\w.-]*(?:\/[A-Za-z0-9][\w.:-]*)+$/
+
+/**
+ * 把 `opencode models` 的输出解析成模型清单。
+ *
+ * 只收形如 `provider/model` 的行 —— 那个命令偶尔会先吐一行提示或空行，
+ * 认不出的一概丢掉，宁可少给几个建议，也不要把噪音塞进下拉框。
+ */
+export function parseModelList(stdout: string): string[] {
+  return [...new Set(
+    stdout.split('\n').map((line) => line.trim()).filter((line) => MODEL_LINE.test(line)),
+  )]
+}
+
+/**
+ * 列出这台机器上 opencode 能用的模型。
+ *
+ * opencode 是三个 CLI 里唯一有 `models` 子命令的 —— 它自己知道装了哪些
+ * provider、登录了哪几家，比任何硬编清单都准。失败就返回空，界面退回自由输入：
+ * **探测不到不是错误，只是这次没得建议**。
+ */
+async function listModels(bin: string): Promise<string[]> {
+  const { stdout, code } = await capture([bin, 'models'], 10_000)
+  return code === 0 ? parseModelList(stdout) : []
+}
+
 export const opencodeCliProvider: AgentProvider = {
   id: 'opencode',
 
@@ -166,6 +198,7 @@ export const opencodeCliProvider: AgentProvider = {
       canPinSessionId: false,
       canResume: hasFlag(help, 'session'),
       canPickModel: hasFlag(help, 'model'),
+      models: await listModels(bin),
       permissionTiers: supportedTiers(help),
       // 档位名字对不上实际约束，这句话必须一路传到界面上。
       permissionCaveat: OPENCODE_PERMISSION_CAVEAT,

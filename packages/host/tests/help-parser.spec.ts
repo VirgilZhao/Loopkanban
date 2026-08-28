@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { choicesOf, hasFlag, parseHelp } from '../src/agents/help-parser.ts'
+import { describeFlag, choicesOf, hasFlag, parseHelp } from '../src/agents/help-parser.ts'
 
 const fixture = (name: string): string =>
   readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8')
@@ -62,5 +62,26 @@ describe('parseHelp', () => {
     const surface = parseHelp('')
     expect(surface.flags.size).toBe(0)
     expect(surface.choices.size).toBe(0)
+  })
+})
+
+describe('describeFlag', () => {
+  it('留住参数块的原文 —— 有些事实只写在描述里', () => {
+    const help = parseHelp([
+      '  --model <model>       Model for the current session. Provide an alias',
+      "                        for the latest model (e.g. 'fable', 'opus', or",
+      "                        'sonnet') or a model's full name (e.g.",
+      "                        'claude-fable-5').",
+      '  --verbose             Override verbose mode',
+    ].join('\n'))
+    const block = describeFlag(help, 'model')
+    expect(block).toContain("'opus'")
+    expect(block).toContain("'claude-fable-5'")
+    // 下一个参数块不该混进来。
+    expect(block).not.toContain('verbose mode')
+  })
+
+  it('没有这个参数就没有原文', () => {
+    expect(describeFlag(parseHelp('  --verbose  x'), 'model')).toBeUndefined()
   })
 })

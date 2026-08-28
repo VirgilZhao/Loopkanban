@@ -257,6 +257,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           canPinSessionId: caps.canPinSessionId,
           canResume: caps.canResume,
           canPickModel: caps.canPickModel,
+          // 探测到的模型清单。空数组表示这个 CLI 没法枚举，界面据此退回自由输入。
+          models: caps.models,
           permissionTiers: caps.permissionTiers,
           // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
           ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),

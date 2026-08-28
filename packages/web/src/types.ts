@@ -89,6 +89,8 @@ export interface Agent {
   canResume: boolean
   /** 能否指定模型。不支持的 CLI 界面上直接没有这一栏。 */
   canPickModel: boolean
+  /** 探测到的可用模型。空数组表示这个 CLI 没法枚举，此时只能自由输入。 */
+  models: string[]
   permissionTiers: string[]
   /** 档位语义与别家不一致时的警示；有就必须显示出来。 */
   permissionCaveat?: PermissionCaveat

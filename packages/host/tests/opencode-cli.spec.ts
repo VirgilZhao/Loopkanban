@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { parseHelp } from '../src/agents/help-parser.ts'
-import { OPENCODE_PERMISSION_CAVEAT, opencodeCliProvider } from '../src/agents/providers/opencode-cli.ts'
+import { OPENCODE_PERMISSION_CAVEAT, opencodeCliProvider, parseModelList } from '../src/agents/providers/opencode-cli.ts'
 import type { AgentCaps, RunContext } from '../src/agents/types.ts'
 
 const fixture = (name: string): string =>
@@ -15,7 +15,7 @@ const CAPS: AgentCaps = {
   streaming: true,
   canPinSessionId: false,
   canResume: true,
-  canPickModel: true,
+  canPickModel: true, models: [],
   permissionTiers: ['standard', 'yolo'],
   help: parseHelp(fixture('opencode-run-help.txt')),
 }
@@ -219,5 +219,37 @@ describe('opencodeCliProvider 的能力矩阵', () => {
     expect(OPENCODE_PERMISSION_CAVEAT.label).toBe('无沙箱')
     expect(OPENCODE_PERMISSION_CAVEAT.detail).toContain('codex')
     expect(OPENCODE_PERMISSION_CAVEAT.detail).toContain('worktree')
+  })
+})
+
+describe('模型自动获取', () => {
+  it('把 opencode models 的输出解析成清单', () => {
+    const models = parseModelList([
+      'anthropic/claude-sonnet-4-5',
+      'openai/gpt-5',
+      'opencode/big-pickle',
+    ].join('\n'))
+    expect(models).toEqual(['anthropic/claude-sonnet-4-5', 'openai/gpt-5', 'opencode/big-pickle'])
+  })
+
+  it('转售商那种多段 id 也要收 —— 只认两段会整片丢掉', () => {
+    const models = parseModelList([
+      'siliconflow-cn/deepseek-ai/DeepSeek-R1',
+      'siliconflow-cn/Pro/deepseek-ai/DeepSeek-V3',
+    ].join('\n'))
+    expect(models).toHaveLength(2)
+  })
+
+  it('认不出的行一概丢掉 —— 宁可少给建议，也不要把噪音塞进下拉框', () => {
+    const models = parseModelList([
+      '',
+      'Available models:',
+      'anthropic/claude-sonnet-4-5',
+      '  openai/gpt-5  ',
+      'anthropic/claude-sonnet-4-5',
+      '这是一行提示',
+    ].join('\n'))
+    // 去重、去空白、只留 provider/model 那种行。
+    expect(models).toEqual(['anthropic/claude-sonnet-4-5', 'openai/gpt-5'])
   })
 })

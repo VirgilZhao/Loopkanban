@@ -39,7 +39,7 @@ function provider(id: string, lines: string[] = [JSON.stringify({ kind: 'finishe
 
 const caps = (id: string): AgentCaps => ({
   id, bin: '/fake', version: '1.0.0', streaming: true,
-  canPinSessionId: false, canResume: false, canPickModel: true,
+  canPinSessionId: false, canResume: false, canPickModel: true, models: [],
   permissionTiers: ['standard'], help: parseHelp(''),
 })
 

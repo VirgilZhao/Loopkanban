@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { parseHelp } from '../src/agents/help-parser.ts'
-import { claudeCliProvider, claudeUsage } from '../src/agents/providers/claude-cli.ts'
+import { claudeCliProvider, claudeUsage, modelsFromHelp } from '../src/agents/providers/claude-cli.ts'
 import type { AgentCaps, RunContext } from '../src/agents/types.ts'
 
 const fixture = (name: string): string =>
@@ -15,7 +15,7 @@ const CAPS: AgentCaps = {
   streaming: true,
   canPinSessionId: true,
   canResume: true,
-  canPickModel: true,
+  canPickModel: true, models: [],
   permissionTiers: ['strict', 'standard', 'yolo'],
   help: parseHelp(fixture('claude-help.txt')),
 }
@@ -154,5 +154,22 @@ describe('claudeCliProvider.parseLine（真实 stream-json 输出）', () => {
   it('从 result 行取出用量', () => {
     const usage = streamLines().map(claudeUsage).find((u) => u !== null)
     expect(usage).toMatchObject({ kind: 'usage', inputTokens: 0, outputTokens: 0, costUsd: 0 })
+  })
+})
+
+describe('模型自动获取', () => {
+  it('从 --model 的描述里捞出 CLI 自己给的别名', () => {
+    const help = parseHelp([
+      '  --model <model>       Model for the current session. Provide an alias',
+      "                        for the latest model (e.g. 'fable', 'opus', or",
+      "                        'sonnet') or a model's full name (e.g.",
+      "                        'claude-fable-5').",
+    ].join('\n'))
+    expect(modelsFromHelp(help)).toEqual(['fable', 'opus', 'sonnet', 'claude-fable-5'])
+  })
+
+  it('措辞变了就捞不到 —— 退回自由输入，而不是给出过期的错答案', () => {
+    expect(modelsFromHelp(parseHelp('  --model <model>   Model to use'))).toEqual([])
+    expect(modelsFromHelp(parseHelp('  --verbose  x'))).toEqual([])
   })
 })

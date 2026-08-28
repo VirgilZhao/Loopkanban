@@ -2,7 +2,7 @@
  * 数据库结构与迁移。
  *
  * 用 Node 内置的 `node:sqlite`，不引外部依赖 —— 少一个原生模块就少一份
- * 跨平台预编译的麻烦，而 `npx openkanban` 的分发正吃这个亏。
+ * 跨平台预编译的麻烦，而 `npx loopkanban` 的分发正吃这个亏。
  *
  * 迁移只增不改：每条 SQL 跑一次，版本号记在 `meta` 表里。
  */
@@ -106,7 +106,7 @@ export function migrate(db: DatabaseSync): void {
   if (current > MIGRATIONS.length) {
     throw new Error(
       `数据库结构版本 ${String(current)} 高于本程序支持的 ${String(MIGRATIONS.length)}，`
-      + '请升级 OpenKanban 而不是降级运行 —— 降级会静默损坏数据。',
+      + '请升级 LoopKanban 而不是降级运行 —— 降级会静默损坏数据。',
     )
   }
 

@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { capture } from '../agents/discover.ts'
 
 /** 服务标识。反写域名是 launchd 的惯例，systemd 只取文件名。 */
-export const SERVICE_LABEL = 'dev.openkanban.agent'
+export const SERVICE_LABEL = 'dev.loopkanban.agent'
 
 export interface ServicePlan {
   readonly platform: 'darwin' | 'linux'
@@ -28,7 +28,7 @@ export interface ServicePlan {
 }
 
 export interface ServiceContext {
-  /** `openkanban` 可执行文件的绝对路径。 */
+  /** `loopkanban` 可执行文件的绝对路径。 */
   readonly bin: string
   readonly nodePath: string
   readonly port?: number
@@ -46,7 +46,7 @@ function argv(context: ServiceContext): string[] {
 function darwinPlan(context: ServiceContext): ServicePlan {
   const unitPath = join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`)
   const args = argv(context)
-  const logDir = join(homedir(), 'Library', 'Logs', 'openkanban')
+  const logDir = join(homedir(), 'Library', 'Logs', 'loopkanban')
   const unitContent = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -75,10 +75,10 @@ ${args.map((a) => `    <string>${escapeXml(a)}</string>`).join('\n')}
 function linuxPlan(context: ServiceContext): ServicePlan {
   const unitPath = join(
     process.env['XDG_CONFIG_HOME'] ?? join(homedir(), '.config'),
-    'systemd', 'user', 'openkanban.service',
+    'systemd', 'user', 'loopkanban.service',
   )
   const unitContent = `[Unit]
-Description=OpenKanban agent dispatch
+Description=LoopKanban agent dispatch
 After=network.target
 
 [Service]
@@ -96,9 +96,9 @@ WantedBy=default.target
     unitContent,
     enableCommands: [
       ['systemctl', '--user', 'daemon-reload'],
-      ['systemctl', '--user', 'enable', '--now', 'openkanban.service'],
+      ['systemctl', '--user', 'enable', '--now', 'loopkanban.service'],
     ],
-    disableCommands: [['systemctl', '--user', 'disable', '--now', 'openkanban.service']],
+    disableCommands: [['systemctl', '--user', 'disable', '--now', 'loopkanban.service']],
   }
 }
 

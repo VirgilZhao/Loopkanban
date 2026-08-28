@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { planService, SERVICE_LABEL } from '../src/service/index.ts'
 
 const context = {
-  bin: '/opt/openkanban/dist/openkanban.js',
+  bin: '/opt/loopkanban/dist/loopkanban.js',
   nodePath: '/usr/local/bin/node',
 }
 
@@ -54,7 +54,7 @@ describe('planService', () => {
     expect(plan.unitPath).toContain('systemd/user')
     expect(plan.unitContent).toContain('Restart=on-failure')
     expect(plan.enableCommands.at(-1)).toEqual(
-      ['systemctl', '--user', 'enable', '--now', 'openkanban.service'],
+      ['systemctl', '--user', 'enable', '--now', 'loopkanban.service'],
     )
   })
 

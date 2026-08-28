@@ -58,6 +58,15 @@ export const api = {
       method: 'PATCH', body: JSON.stringify({ expectedRevision, ...edit }),
     }),
 
+  /**
+   * 删除任务。只有想法池与队列里的卡能删，连同它的执行历史与 worktree 一并抹掉。
+   * `unblocked` 是被摘掉这条依赖的下游任务。
+   */
+  remove: (taskId: string, expectedRevision: number) =>
+    call<{ deleted: boolean; unblocked: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'DELETE', body: JSON.stringify({ expectedRevision }),
+    }),
+
   /** 与该任务写入范围重叠、且正在运行的任务。 */
   overlaps: (taskId: string) =>
     call<{ overlaps: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}/overlaps`),

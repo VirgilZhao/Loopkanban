@@ -158,7 +158,7 @@ describe('spawnProcess', () => {
 
   it('可执行文件不存在时 spawn 直接 reject', async () => {
     await expect(spawnProcess({
-      argv: ['openkanban-definitely-not-a-real-binary'],
+      argv: ['loopkanban-definitely-not-a-real-binary'],
       cwd: process.cwd(),
     })).rejects.toThrow()
   })

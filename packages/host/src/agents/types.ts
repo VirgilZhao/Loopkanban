@@ -1,7 +1,7 @@
 import type { SpawnSpec } from '../subprocess/index.ts'
 import type { HelpSurface } from './help-parser.ts'
 
-/** OpenKanban 的三档权限，映射到各 CLI 自己的说法。 */
+/** LoopKanban 的三档权限，映射到各 CLI 自己的说法。 */
 export type PermissionTier = 'strict' | 'standard' | 'yolo'
 
 /**

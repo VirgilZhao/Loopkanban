@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
+import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
@@ -81,7 +81,7 @@ function runner(provider: AgentProvider, patch: Partial<ConstructorParameters<ty
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'openkanban-runner-'))
+  sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-runner-'))
   repo = join(sandbox, 'repo')
   await capture(['git', 'init', '-q', '-b', 'main', repo])
   for (const args of [['config', 'user.email', 't@t'], ['config', 'user.name', 'T']]) {

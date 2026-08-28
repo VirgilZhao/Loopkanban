@@ -6,7 +6,7 @@
  * 塞进 `--experimental-strip-types`，而要求每个用户自己带上这个 flag 是不现实的。
  *
  * 产物结构：
- *   dist/openkanban.js   单文件 ESM，core + host 全部内联
+ *   dist/loopkanban.js   单文件 ESM，core + host 全部内联
  *   dist/web/            前端静态资源
  */
 
@@ -24,8 +24,8 @@ await rm(OUT, { recursive: true, force: true })
 await mkdir(OUT, { recursive: true })
 
 const result = await build({
-  entryPoints: [join(ROOT, 'packages/host/src/bin/openkanban.ts')],
-  outfile: join(OUT, 'openkanban.js'),
+  entryPoints: [join(ROOT, 'packages/host/src/bin/loopkanban.ts')],
+  outfile: join(OUT, 'loopkanban.js'),
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -33,7 +33,7 @@ const result = await build({
   // 这样发布包不带任何运行时依赖，`npx` 冷启动只需下载一个文件。
   target: 'node22',
   banner: { js: '#!/usr/bin/env node' },
-  define: { 'process.env.OPENKANBAN_VERSION': JSON.stringify(pkg.version) },
+  define: { 'process.env.LOOPKANBAN_VERSION': JSON.stringify(pkg.version) },
   metafile: true,
   logLevel: 'warning',
 })
@@ -43,5 +43,5 @@ await cp(join(ROOT, 'packages/web/dist'), join(OUT, 'web'), { recursive: true })
 
 const bytes = Object.values(result.metafile.outputs).reduce((sum, o) => sum + o.bytes, 0)
 await writeFile(join(OUT, '.build-info'), `${pkg.version}\n${String(bytes)}\n`, 'utf8')
-console.log(`✓ dist/openkanban.js  ${(bytes / 1024).toFixed(0)} KB`)
+console.log(`✓ dist/loopkanban.js  ${(bytes / 1024).toFixed(0)} KB`)
 console.log(`✓ dist/web/`)

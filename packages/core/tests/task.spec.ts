@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  acquireLease, archiveTask, asBoardId, asRunId, asTaskId, canTransition, COLUMNS, editTask,
-  isLeaseExpired, moveTask, reclaimIfExpired, renewLease, requestChanges, unarchiveTask, type Task,
+  acquireLease, archiveTask, asBoardId, asRunId, asTaskId, canTransition, COLUMNS, deleteTask,
+  dropDependency, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease, requestChanges,
+  unarchiveTask, type Task,
 } from '../src/index.ts'
 
 const T0 = 1_000_000
@@ -316,6 +317,63 @@ describe('归档', () => {
   it('归档也走 CAS —— 并发下不会有人拿着旧 revision 把卡收走', () => {
     expect(archiveTask(task(), { expectedRevision: 99, now: T0 }))
       .toMatchObject({ ok: false, reason: 'revision-conflict' })
+  })
+})
+
+describe('删除', () => {
+  const remove = (t: Task) => deleteTask(t, { expectedRevision: t.revision })
+
+  it('想法池与队列里的卡可以删', () => {
+    for (const column of ['backlog', 'ready'] as const) {
+      expect(remove(task({ column }))).toMatchObject({ ok: true })
+    }
+  })
+
+  it('Agent 动过仓库之后就不许删了 —— 那会让发生过什么无从追溯', () => {
+    for (const column of ['running', 'review', 'done'] as const) {
+      expect(remove(task({ column }))).toMatchObject({ ok: false, reason: 'not-deletable' })
+    }
+  })
+
+  it('归档的卡可以直接删，不必先取出来 —— 两个动作指向同一个方向', () => {
+    const shelved = archiveTask(task({ column: 'backlog' }), { expectedRevision: 1, now: T0 })
+    if (!shelved.ok) throw new Error(shelved.detail)
+    expect(remove(shelved.value)).toMatchObject({ ok: true })
+  })
+
+  it('挂着租约的卡不能删 —— 否则会留下一个没有卡片对应、却还在改仓库的进程', () => {
+    const held = task({
+      column: 'ready',
+      lease: { runId: asRunId('r1'), provider: 'claude', acquiredAt: T0, expiresAt: T0 + 60_000 },
+    })
+    expect(remove(held)).toMatchObject({ ok: false, reason: 'lease-held' })
+  })
+
+  it('删除也走 CAS —— 拿着旧 revision 删不掉刚被人改过的卡', () => {
+    expect(deleteTask(task({ column: 'backlog' }), { expectedRevision: 99 }))
+      .toMatchObject({ ok: false, reason: 'revision-conflict' })
+  })
+})
+
+describe('dropDependency', () => {
+  const T2 = asTaskId('t2')
+
+  it('摘掉指向被删任务的依赖，其余依赖原样保留', () => {
+    const next = dropDependency(task({ blockedBy: [T2, asTaskId('t3')] }), T2, T0 + 100)
+    expect(next?.blockedBy).toEqual([asTaskId('t3')])
+    expect(next?.revision).toBe(2)
+    expect(next?.updatedAt).toBe(T0 + 100)
+  })
+
+  it('本来就没依赖它就返回 null —— 不该白白推高 revision 让别人的 CAS 落空', () => {
+    expect(dropDependency(task(), T2, T0)).toBeNull()
+  })
+
+  it('running 与归档的卡照样摘 —— 它们最不能留着悬空引用', () => {
+    const running = task({ column: 'running', blockedBy: [T2] })
+    expect(dropDependency(running, T2, T0)?.blockedBy).toEqual([])
+    const shelved = task({ column: 'ready', archivedAt: T0, blockedBy: [T2] })
+    expect(dropDependency(shelved, T2, T0)?.blockedBy).toEqual([])
   })
 })
 

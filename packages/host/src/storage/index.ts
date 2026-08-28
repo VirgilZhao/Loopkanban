@@ -11,8 +11,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@openkanban/core'
-import { asBoardId, asRunId, asTaskId } from '@openkanban/core'
+import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@loopkanban/core'
+import { asBoardId, asRunId, asTaskId } from '@loopkanban/core'
 import { migrate } from './schema.ts'
 
 export interface Board {
@@ -252,6 +252,48 @@ export class Storage {
       next.id, next.revision - 1,
     )
     return result.changes === 1
+  }
+
+  /**
+   * 删除任务，连同它的执行历史。
+   *
+   * **这是 `run_events` 只插不改不删的唯一例外**，而且不违反那条规则的用意：
+   * append-only 保的是"一次执行的过程不会被事后改写"，这里删掉的是整张卡 ——
+   * 连 Run 本身都不存在了，留着一串指向空 taskId 的事件只是垃圾。外键也不
+   * 允许它们留着。
+   *
+   * 整件事在一个事务里：卡片、Run、事件、以及下游摘掉依赖后的新值，要么
+   * 全成、要么全不动。中途失败留下"卡没了但依赖还悬着"是最糟的结果。
+   *
+   * @param id - 要删的任务。
+   * @param expectedRevision - 调用方读到的 revision，CAS 凭据。
+   * @param cascade - 摘掉这条依赖之后的下游任务新值（见 `dropDependency`）。
+   * @returns 是否删成功；false 表示期间已被他人改动，调用方应重读后重试。
+   */
+  deleteTask(id: TaskId, expectedRevision: number, cascade: readonly Task[] = []): boolean {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      // 顺序是外键定的：事件 → Run → 卡片。反过来第一步就会被 runs 的引用挡住。
+      this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
+      this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
+      const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)
+      if (removed.changes !== 1) {
+        this.db.exec('ROLLBACK')
+        return false
+      }
+      for (const next of cascade) {
+        // 下游也走 CAS：它们同样可能刚被别人改过。
+        if (!this.commitTask(next)) {
+          this.db.exec('ROLLBACK')
+          return false
+        }
+      }
+      this.db.exec('COMMIT')
+      return true
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   // ── Run ────────────────────────────────────────────────────────

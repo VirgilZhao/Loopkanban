@@ -8,14 +8,14 @@ import { cn } from '@/lib/utils'
  * 侧边栏骨架，形制取自 shadcn `sidebar` / tweakcn「Future Teal」的 dashboard 预览：
  * 独立的 `--sidebar-*` 令牌面、h-8 的圆角菜单项、12px 的分组标签、accent 高亮当前项。
  *
- * 这里只留了桌面这一路 —— OpenKanban 只监听 127.0.0.1，是台前工具，
+ * 这里只留了桌面这一路 —— LoopKanban 只监听 127.0.0.1，是台前工具，
  * 不需要 Sheet 抽屉那套移动端形态。收起时退成 3rem 的图标轨。
  */
 
 /** 两个宽度都含 p-2 的天沟：展开 240 + 8×2，收起 48（正好一颗 size-8 按钮）+ 8×2。 */
 const SIDEBAR_WIDTH = '16rem'
 const SIDEBAR_WIDTH_ICON = '4rem'
-const SIDEBAR_KEY = 'openkanban.sidebar'
+const SIDEBAR_KEY = 'loopkanban.sidebar'
 const SIDEBAR_SHORTCUT = 'b'
 
 interface SidebarContextValue {

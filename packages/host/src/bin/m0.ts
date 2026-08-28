@@ -25,7 +25,7 @@ const TASK = {
   subject: '加一个 greet 函数',
   prompt: [
     '请在仓库根目录创建 greet.js，导出一个 greet(name) 函数，返回 `Hello, ${name}!`。',
-    '同时创建 greet.test.js，用 node:test 和 node:assert 写一个断言 greet("openkanban") 的用例。',
+    '同时创建 greet.test.js，用 node:test 和 node:assert 写一个断言 greet("loopkanban") 的用例。',
     '只做这件事，不要改动其他文件。完成后简短说明你做了什么。',
   ].join('\n'),
 }
@@ -46,13 +46,13 @@ function log(label: string, detail = ''): void {
 
 /** 建一个临时 git 仓库当作被操作的目标项目。 */
 async function scratchRepo(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'openkanban-m0-'))
+  const dir = await mkdtemp(join(tmpdir(), 'loopkanban-m0-'))
   const repo = join(dir, 'repo')
   await mkdir(repo, { recursive: true })
   for (const args of [
     ['init', '-q', '-b', 'main'],
-    ['config', 'user.email', 'm0@openkanban.local'],
-    ['config', 'user.name', 'OpenKanban M0'],
+    ['config', 'user.email', 'm0@loopkanban.local'],
+    ['config', 'user.name', 'LoopKanban M0'],
   ]) {
     await capture(['git', '-C', repo, ...args])
   }
@@ -187,7 +187,7 @@ async function main(): Promise<void> {
         console.log(`${tag} ok=${String(event.ok)} ${event.summary?.slice(0, 300) ?? ''}`)
         if (event.diagnostic !== undefined) console.log(C.red(`          诊断: ${event.diagnostic}`))
         if (!event.ok && (event.summary ?? '').includes('OAuth')) {
-          console.log(C.yellow('          → 这是 CLI 侧的登录态过期，不是 OpenKanban 的问题。请先重新登录。'))
+          console.log(C.yellow('          → 这是 CLI 侧的登录态过期，不是 LoopKanban 的问题。请先重新登录。'))
         }
         const usage = provider.id === 'claude' ? claudeUsage(line) : null
         if (usage?.kind === 'usage') {

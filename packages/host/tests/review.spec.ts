@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
+import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { Review } from '../src/review/index.ts'
 import { Storage } from '../src/storage/index.ts'
@@ -43,7 +43,7 @@ async function reviewable(id = 't1'): Promise<{ worktreePath: string; branch: st
 }
 
 beforeEach(async () => {
-  sandbox = await mkdtemp(join(tmpdir(), 'openkanban-review-'))
+  sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-review-'))
   repo = join(sandbox, 'repo')
   await capture(['git', 'init', '-q', '-b', 'main', repo])
   for (const args of [['config', 'user.email', 't@t'], ['config', 'user.name', 'T']]) await git(repo, ...args)
@@ -201,6 +201,26 @@ describe('discard', () => {
     await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).rejects.toThrow()
     // 没有"记为失败"这个终点了：要么进 Done，要么回想法池重新想需求。
     expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
+  })
+})
+
+describe('purge', () => {
+  it('把卡留下的 worktree 与分支一并收拾掉', async () => {
+    const { branch, worktreePath } = await reviewable()
+    const card = store.getTask(asTaskId('t1'))
+    if (card === null) throw new Error('setup')
+
+    // 删卡的顺序是"先落库、再收拾场地"，所以 purge 拿到的是值而不是 id。
+    await review.purge(card, store.listRuns(asTaskId('t1')))
+
+    expect((await git(repo, 'branch', '--list', branch)).stdout.trim()).toBe('')
+    await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).rejects.toThrow()
+  })
+
+  it('没留下工作区也不抛 —— 卡都删了，收拾场地失败不该让这次删除变成一半成功', async () => {
+    const card = task({ id: 't9', column: 'backlog' })
+    store.createTask(card)
+    await expect(review.purge(card, [])).resolves.toBeUndefined()
   })
 })
 

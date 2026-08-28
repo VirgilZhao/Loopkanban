@@ -7,14 +7,17 @@
 
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import {
+  createServer as createHttpServer, request as httpRequest,
+  type IncomingMessage, type Server, type ServerResponse,
+} from 'node:http'
+import type { AddressInfo, Socket } from 'node:net'
 import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  archiveTask, asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
-  unarchiveTask, type Column, type Task, type TaskEdit,
-} from '@openkanban/core'
+  archiveTask, asBoardId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
+  overlappingWriteScopes, unarchiveTask, type Column, type Task, type TaskEdit,
+} from '@loopkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
@@ -52,6 +55,15 @@ export interface ServerOptions {
   readonly sseHeartbeatMs?: number
   /** 前端构建产物目录；不给则只提供 API。 */
   readonly staticDir?: string
+  /**
+   * 开发模式下 vite 的地址，例如 `http://127.0.0.1:5273`。给了就**优先于
+   * `staticDir`**：非 `/api` 的请求（含 HMR 的 WebSocket 升级）原样转发过去。
+   *
+   * 为什么要绕这一道，而不是让浏览器直接开 vite 的端口：token 是 httpOnly
+   * cookie，而 cookie 不区分端口但请求要同源才带得干净；走同一个 origin，
+   * 开发时的鉴权路径与发布后完全一致，不必为 dev 开后门。
+   */
+  readonly devServer?: string
 }
 
 export interface RunningServer {
@@ -131,6 +143,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const review = options.review
   const scheduler = options.scheduler
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
+  const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
 
   const server: Server = createHttpServer((req, res) => {
     void handle(req, res).catch((error: unknown) => {
@@ -140,7 +153,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       // 内部异常的原文可能带着文件路径等细节，只写进日志，不回给调用方。
-      console.error('[openkanban] 未处理的请求异常:', error)
+      console.error('[loopkanban] 未处理的请求异常:', error)
       sendJson(res, 500, { error: 'internal-error', detail: '服务端处理这次请求时出错，详情见运行日志' })
     })
   })
@@ -285,6 +298,48 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 200, { task: edited.value }, extraHeaders)
+      return
+    }
+
+    // ── 删除任务（CAS）──────────────────────────────────────
+    if (method === 'DELETE' && editId !== undefined) {
+      const taskId = asTaskId(decodeURIComponent(editId))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const body = await readJsonBody(req) as { expectedRevision?: number } | undefined
+      // DELETE 带请求体不是所有客户端都方便，查询串是等价的入口（curl 用得上）。
+      const fromQuery = Number.parseInt(url.searchParams.get('expectedRevision') ?? '', 10)
+      const expectedRevision = body?.expectedRevision ?? (Number.isFinite(fromQuery) ? fromQuery : undefined)
+      if (expectedRevision === undefined) {
+        sendJson(res, 400, { error: 'bad-request', detail: '需要 expectedRevision' })
+        return
+      }
+      const verdict = deleteTask(task, { expectedRevision })
+      if (!verdict.ok) {
+        sendJson(res, verdict.reason === 'revision-conflict' ? 409 : 422, {
+          error: verdict.reason, detail: verdict.detail,
+        })
+        return
+      }
+
+      // 下游对它的依赖要一并摘掉：留着一个查无此卡的 id，那些卡会永远停在
+      // "依赖未完成"，而界面上没有任何操作能解开它。
+      const now = Date.now()
+      const cascade = storage.listTasks(task.boardId)
+        .filter((other) => other.id !== task.id)
+        .map((other) => dropDependency(other, task.id, now))
+        .filter((next): next is Task => next !== null)
+      // Run 要在删库之前读出来 —— 删完就查不到该收拾哪些 worktree 了。
+      const runs = storage.listRuns(task.id)
+
+      if (!storage.deleteTask(task.id, expectedRevision, cascade)) {
+        sendJson(res, 409, { error: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' })
+        return
+      }
+      // 同 accept / discard：状态先落定，不可逆的删除在后。反过来的话一次
+      // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
+      if (review !== undefined) await review.purge(task, runs)
+      sendJson(res, 200, { deleted: true, unblocked: cascade.map((t) => t.id) }, extraHeaders)
       return
     }
 
@@ -437,12 +492,84 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
-    // ── 静态资源（前端产物）─────────────────────────────────
-    if (method === 'GET' && staticDir !== undefined && !pathname.startsWith('/api/')) {
-      if (await serveStatic(staticDir, pathname, res, extraHeaders)) return
+    // ── 前端：开发时转发给 vite，否则托管构建产物 ─────────────
+    if (!pathname.startsWith('/api/')) {
+      if (devServer !== undefined) { proxyToDev(devServer, req, res, extraHeaders); return }
+      if (method === 'GET' && staticDir !== undefined) {
+        if (await serveStatic(staticDir, pathname, res, extraHeaders)) return
+      }
     }
 
     sendJson(res, 404, { error: 'not-found', detail: pathname })
+  }
+
+  /**
+   * 把一个普通请求整个转给 vite。
+   *
+   * 刻意不改写 body、不缓存：dev server 自己会处理 304 与模块图，
+   * 这里多做一层只会让"改了文件页面没变"重新变得可能。
+   */
+  function proxyToDev(
+    target: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+    extraHeaders: Record<string, string>,
+  ): void {
+    const upstream = httpRequest({
+      host: target.hostname,
+      port: target.port,
+      path: req.url ?? '/',
+      method: req.method ?? 'GET',
+      headers: { ...req.headers, host: target.host },
+    }, (proxied) => {
+      res.writeHead(proxied.statusCode ?? 502, { ...proxied.headers, ...extraHeaders })
+      proxied.pipe(res)
+    })
+    upstream.on('error', (error: unknown) => {
+      if (res.headersSent) { res.destroy(); return }
+      // vite 还没起来或者已经退出。说清楚是哪一环，不然只看到一个白页。
+      sendJson(res, 502, {
+        error: 'dev-server-unreachable',
+        detail: `连不上前端 dev server ${target.origin}：${error instanceof Error ? error.message : String(error)}`,
+      })
+    })
+    req.pipe(upstream)
+  }
+
+  // HMR 的 WebSocket 也得从这个端口走 —— 少了它，页面能开但改代码不会刷新，
+  // 而浏览器控制台里只留下一句 vite 连不上的报错，很难往这边想。
+  if (devServer !== undefined) {
+    server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
+      const port = (server.address() as AddressInfo).port
+      if (!guardRequest(req, { token, port, cookieOnly: true }).ok) { socket.destroy(); return }
+
+      const upstream = httpRequest({
+        host: devServer.hostname,
+        port: devServer.port,
+        path: req.url ?? '/',
+        method: req.method ?? 'GET',
+        headers: { ...req.headers, host: devServer.host },
+      })
+      upstream.on('upgrade', (proxied, upSocket, upHead) => {
+        const headers = Object.entries(proxied.headers)
+          .flatMap(([key, value]) => (Array.isArray(value) ? value.map((v) => `${key}: ${v}`) : [`${key}: ${String(value)}`]))
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\n${headers.join('\r\n')}\r\n\r\n`)
+        if (upHead.length > 0) socket.write(upHead)
+        if (head.length > 0) upSocket.write(head)
+        upSocket.pipe(socket).pipe(upSocket)
+        upSocket.on('error', () => { socket.destroy() })
+        socket.on('error', () => { upSocket.destroy() })
+      })
+      // vite 拒绝握手时会回一个普通响应而不是 101。原样转回去，
+      // 让浏览器控制台看到真正的原因，而不是一个没有下文的挂起连接。
+      upstream.on('response', (proxied) => {
+        socket.write(`HTTP/1.1 ${String(proxied.statusCode ?? 502)} ${proxied.statusMessage ?? ''}\r\nconnection: close\r\n\r\n`)
+        proxied.resume()
+        proxied.on('end', () => { socket.end() })
+      })
+      upstream.on('error', () => { socket.destroy() })
+      upstream.end()
+    })
   }
 
   /**

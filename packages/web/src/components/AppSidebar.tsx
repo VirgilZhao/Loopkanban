@@ -53,14 +53,14 @@ export function AppSidebar({
                 'flex size-4 flex-none items-center justify-center rounded-[3px]',
                 'bg-sidebar-primary text-[9px] font-bold text-sidebar-primary-foreground',
               )}>
-                OK
+                LK
               </span>
               <div className="flex min-w-0 flex-col group-data-[state=collapsed]/sidebar:hidden">
                 <span
                   className="truncate text-[13px] font-semibold tracking-tight text-sidebar-foreground"
                   style={{ fontFamily: 'var(--font-chrome)' }}
                 >
-                  OPEN<span className="text-sodium">KANBAN</span>
+                  LOOP<span className="text-sodium">KANBAN</span>
                 </span>
                 <span className="chrome-label !text-[8px]">agent dispatch</span>
               </div>

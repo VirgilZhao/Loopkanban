@@ -9,7 +9,7 @@
 
 import { access, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { moveTask, requestChanges, type Task, type TaskId } from '@openkanban/core'
+import { moveTask, requestChanges, type Task, type TaskId } from '@loopkanban/core'
 import type { Run, Storage } from '../storage/index.ts'
 import { commitAll, mergeBranch, removeWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
 
@@ -195,6 +195,33 @@ export class Review {
       await rm(join(this.options.worktreeRoot, taskId), { recursive: true, force: true })
     }
     return { ok: true }
+  }
+
+  /**
+   * 删卡前的场地清理：把这张卡留下的 worktree 与分支全部删掉。
+   *
+   * 想法池和队列里的卡也可能留着工作区 —— 打回重做的卡就停在 ready，
+   * 而它上一次执行的 worktree 是**故意保留**的（下一次接着改）。删卡时
+   * 不收拾，那个目录和分支就再也没有任何东西指向它们了。
+   *
+   * 逐个 Run 地删而不是只删最后一次：卡片标题改过之后分支名会跟着变，
+   * 同一张卡可能留下不止一个分支。
+   *
+   * 取的是任务与 Run 的**值**而不是 id：调用方必须先把库里的行删掉
+   * （状态落定在前，不可逆的删除在后，同 accept 与 discard），到这一步
+   * 已经查不到它们了。
+   *
+   * 全程吞掉异常：卡已经删了，收拾场地失败不该把这次删除变成一半成功。
+   * 残留目录由下次启动的对账清理。
+   *
+   * @param task - 被删掉的任务。
+   * @param runs - 它的全部执行记录。
+   */
+  async purge(task: Task, runs: readonly Run[]): Promise<void> {
+    for (const run of runs) {
+      await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
+    }
+    await rm(join(this.options.worktreeRoot, task.id), { recursive: true, force: true }).catch(() => undefined)
   }
 }
 

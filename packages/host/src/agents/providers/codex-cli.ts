@@ -1,7 +1,7 @@
 /**
  * Codex CLI provider —— 起本机 `PATH` 上的 `codex exec`，不走 API。
  *
- * 认证交给 CLI 自身（`codex login`），OpenKanban 不接受、不存储、不传递任何 key。
+ * 认证交给 CLI 自身（`codex login`），LoopKanban 不接受、不存储、不传递任何 key。
  *
  * 与 claude 的两点结构性差异：
  *   1. 会话 id 由 codex 自己生成（`thread.started` 事件里的 `thread_id`），
@@ -16,7 +16,7 @@ import { scrubEnv } from '../env.ts'
 import { choicesOf, hasFlag, parseHelp, type HelpSurface } from '../help-parser.ts'
 import type { AgentCaps, AgentEvent, AgentProvider, PermissionTier, RunContext } from '../types.ts'
 
-/** OpenKanban 三档 → codex 的 `--sandbox` 取值。yolo 走独立的 bypass 参数。 */
+/** LoopKanban 三档 → codex 的 `--sandbox` 取值。yolo 走独立的 bypass 参数。 */
 const TIER_TO_SANDBOX: Record<Exclude<PermissionTier, 'yolo'>, string> = {
   strict: 'read-only',
   standard: 'workspace-write',

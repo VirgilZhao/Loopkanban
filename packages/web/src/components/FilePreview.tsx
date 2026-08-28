@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { FileText, X } from 'lucide-react'
 import { api, ApiError } from '@/api.ts'
 import { Button } from '@/components/ui/button.tsx'
@@ -18,12 +18,13 @@ function humanSize(bytes: number): string {
 }
 
 /**
- * 文档预览：盖在任务弹窗上的一层。
+ * 文档预览：任务弹窗右边的一栏。
  *
- * 为什么是盖一层而不是再开一个 Dialog：预览是**在读这条讨论的过程中**顺手
- * 打开的，退出去要回到原来那条讨论、原来那个滚动位置。嵌套弹窗会把焦点和
- * esc 的归属搅在一起 —— esc 该关的是预览，不是整张卡（这一下由
- * `RunPanel` 统一拦，它才同时看得见两层）。
+ * 为什么是并排一栏而不是盖上去、也不是再开一个 Dialog：文档和需求本来就要
+ * **对着看** —— 读方案读到一半想核对一下验收标准，盖上去的话得先把文档关掉。
+ * 并排还顺带省掉了两件麻烦事：底下那栏不必置 inert（它没被挡住），焦点也不必
+ * 抢过来（没有藏起来的东西）。esc 仍然先关预览而不是整张卡，那一下由
+ * `RunPanel` 统一拦，它才同时看得见两栏。
  */
 export function FilePreviewPane({ taskId, path, onOpen, onClose }: {
   taskId: string
@@ -36,12 +37,6 @@ export function FilePreviewPane({ taskId, path, onOpen, onClose }: {
   const t = useT()
   const [file, setFile] = useState<Preview | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
-  const paneRef = useRef<HTMLDivElement>(null)
-
-  // 焦点跟着预览走。刚点过的那个链接下一刻就随底下那块一起 inert 了，
-  // 不主动接手的话焦点会掉到 body 上，键盘一时无处可去。换一份文档同理。
-  useEffect(() => { paneRef.current?.focus() }, [path])
-
   useEffect(() => {
     let cancelled = false
     setFile(null)
@@ -60,7 +55,7 @@ export function FilePreviewPane({ taskId, path, onOpen, onClose }: {
   const markdown = file !== null && MARKDOWN.test(file.name)
 
   return (
-    <div ref={paneRef} tabIndex={-1} className="absolute inset-0 z-30 flex flex-col bg-panel outline-none">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col border-s border-hairline bg-panel">
       <header className="flex flex-none items-start gap-2 border-b border-hairline px-4 py-3">
         <FileText className="mt-[3px] size-4 flex-none text-sodium" />
         <div className="min-w-0 flex-1">

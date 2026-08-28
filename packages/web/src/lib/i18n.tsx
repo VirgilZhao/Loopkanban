@@ -69,6 +69,9 @@ const zh = {
   'term.truncated': '输出过长，这里只显示了前一部分。',
   'term.failed': '这条命令没能起来。',
   'term.historyHint': '↑ ↓ 翻历史',
+  'term.tabHint': '⇥ 补路径',
+  'term.noMatch': '这个前缀在当前目录下没有匹配的路径。',
+  'term.moreMatches': '还有 {n} 个没列出来 —— 多敲几个字符再补。',
 
   // ── 侧边栏 ─────────────────────────────────────────────
   'sidebar.tagline': 'agent dispatch',
@@ -370,6 +373,9 @@ const en: Record<MessageKey, string> = {
   'term.truncated': 'Output was too long; only the first part is here.',
   'term.failed': 'That command could not be started.',
   'term.historyHint': '\u2191 \u2193 for history',
+  'term.tabHint': '\u21e5 to complete',
+  'term.noMatch': 'No path in this directory starts with that.',
+  'term.moreMatches': '{n} more not listed \u2014 type a few more characters.',
 
   'sidebar.tagline': 'agent dispatch',
   'sidebar.newTask': 'New task',

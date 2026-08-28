@@ -1,12 +1,61 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, CornerDownLeft, Eraser, Terminal as TerminalIcon } from 'lucide-react'
 import { api, ApiError } from '@/api.ts'
+import {
+  commonPrefix, completable, literal, matching, splitPath, tokenAt, type Quote,
+} from '@/lib/complete.ts'
 import { maybe, useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { ExecResult } from '@/types.ts'
 
 /** 屏上最多留多少条。再往上翻的价值抵不过把一页 DOM 撑到几万个节点。 */
 const MAX_LINES = 200
+
+/**
+ * 候选最多摆出来多少个。
+ *
+ * 再多就不是「看一眼挑一个」而是「找一遍」了 —— 那件事上面的文件列表做得
+ * 比一条挤满名字的横条好。摆不下的会照实说还剩几个。
+ */
+const MAX_CANDIDATES = 120
+
+/**
+ * 修饰键自己也会发一个 keydown。
+ *
+ * 把它们当成「这一轮补全结束了」的话，Shift+Tab 里的那个 Shift 会先把候选
+ * 收掉，等 Tab 到达时菜单已经没了 —— 于是往回轮换永远走不通，每次都变成
+ * 重新补一次。
+ */
+const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph'])
+
+/** 一个补全候选。补全只关心名字，以及它是不是目录（目录后面要接斜杠）。 */
+interface Candidate {
+  readonly name: string
+  readonly kind: 'dir' | 'file'
+}
+
+/**
+ * 摊开的候选。
+ *
+ * 记着 `head` / `tail` 而不是每次重新分词：轮换候选时，输入框里那个词已经
+ * 被上一次轮换改写过了，再分一次词就会把补进去的内容当成用户自己敲的，
+ * 于是第二个 Tab 只能在第一个候选里打转。
+ */
+interface Menu {
+  /** 被补的那个词左边的原文。 */
+  readonly head: string
+  /** 光标右边原样留着的部分。 */
+  readonly tail: string
+  /** 词里目录那一截（带结尾斜杠），拼回去时要带上。 */
+  readonly dir: string
+  readonly quote: Quote
+  /** 摆出来的候选，最多 {@link MAX_CANDIDATES} 个。 */
+  readonly items: readonly Candidate[]
+  /** 匹配上的总数；比 `items` 多说明截断了。 */
+  readonly total: number
+  /** 选到第几个；-1 表示只是摆出来、还没选。 */
+  readonly index: number
+}
 
 interface Line {
   id: number
@@ -50,9 +99,28 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
   // 敲过的命令，最近的在后面。翻历史时 cursor 指向其中一条。
   const [history, setHistory] = useState<string[]>([])
   const [cursor, setCursor] = useState<number | null>(null)
+  // Tab 补出来的候选。null = 此刻没在补全。
+  const [menu, setMenu] = useState<Menu | null>(null)
   const screenRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const nextId = useRef(0)
+  /**
+   * 列过的目录，键是绝对路径。
+   *
+   * 补一次全要列一次目录，而 Tab 是连着按的 —— 每层都发一趟请求的话，补到
+   * 第三层时输入框已经在等网络了。命令跑完就作废：`mkdir` 之后补不出刚建的
+   * 目录，比慢一点更让人以为坏了。
+   */
+  const listings = useRef(new Map<string, Candidate[]>())
+  /** 上一次补全还在飞的时候忽略新的 Tab —— 两次插入叠在一起是没法解释的。 */
+  const completing = useRef(false)
+  /**
+   * 下一次渲染后把光标放到哪儿。
+   *
+   * 受控 input 被改写之后光标会掉到末尾，而补全经常发生在词中间
+   * （`cat pack<光标>ages/x`），掉到末尾就等于把后面那截送给了下一次输入。
+   */
+  const caretTo = useRef<number | null>(null)
   /**
    * 新输出到了要不要贴底。
    *
@@ -85,6 +153,134 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
     node.focus()
   }, [busy])
 
+  useEffect(() => {
+    const at = caretTo.current
+    if (at === null) return
+    caretTo.current = null
+    inputRef.current?.setSelectionRange(at, at)
+  }, [input])
+
+  /** 换了工作区，之前列过的目录跟这儿没关系了。 */
+  useEffect(() => {
+    listings.current.clear()
+    setMenu(null)
+  }, [root, cwd])
+
+  /** 改写输入框，并把光标停在补进去的那一段之后。 */
+  const put = useCallback((text: string, caret: number) => {
+    setInput(text)
+    caretTo.current = caret
+  }, [])
+
+  /**
+   * 列一个目录，给补全用。
+   *
+   * 走的是文件浏览那条接口，所以围栏是同一道：补不出工作区外面的路径。
+   * 目录不存在、或在围栏外时回 null —— 那是「没得补」，不是故障，不该在
+   * 屏幕上留一行红字。
+   */
+  const listOf = useCallback(async (dir: string): Promise<Candidate[] | null> => {
+    const at = dir.startsWith('/') ? dir : dir.length === 0 ? cwd : `${cwd}/${dir}`
+    const cached = listings.current.get(at)
+    if (cached !== undefined) return cached
+    const listing = await api.files(root, at).catch(() => null)
+    if (listing === null) return null
+    const items = listing.entries.map((entry) => ({ name: entry.name, kind: entry.kind }))
+    listings.current.set(at, items)
+    return items
+  }, [root, cwd])
+
+  /** 把第 `index` 个候选填进输入框。菜单留着 —— 下一个 Tab 接着往后轮。 */
+  const take = useCallback((list: Menu, index: number) => {
+    const item = list.items[index]
+    if (item === undefined) return
+    // 目录接一个斜杠而不是空格：多半还要继续往里走，下一个 Tab 就接着补。
+    const text = literal(list.dir + item.name + (item.kind === 'dir' ? '/' : ''), list.quote)
+    put(list.head + text + list.tail, list.head.length + text.length)
+    setMenu({ ...list, index })
+  }, [put])
+
+  /**
+   * Tab 补全。
+   *
+   * 三种结局，对应 shell 里那套人人都已经会了的手感：
+   *
+   * - **只有一个候选**：直接补完。目录接斜杠（还要往里走），文件接空格
+   *   （下一个参数接着敲）。
+   * - **多个候选**：先补到**无歧义**的那一段（最长公共前缀），再把分歧
+   *   摆出来。只补公共前缀是关键 —— 直接塞第一个候选，等于替用户做了他
+   *   还没做的选择。
+   * - **一个都没有**：把「没有匹配」说出来。Tab 按下去什么都不动，最像的
+   *   解释是这个功能坏了。
+   *
+   * 菜单已经开着时，这一按的意思是「换一个」：往后轮换候选，Shift 往前。
+   */
+  const complete = useCallback(async (step: 1 | -1) => {
+    if (busy || completing.current) return
+    if (menu !== null && menu.items.length > 0) {
+      const count = menu.items.length
+      take(menu, menu.index < 0
+        ? (step === 1 ? 0 : count - 1)
+        : (menu.index + step + count) % count)
+      return
+    }
+    const node = inputRef.current
+    if (node === null) return
+    const caret = node.selectionStart ?? input.length
+    const token = tokenAt(input, caret)
+    if (!completable(token)) { setMenu(null); return }
+    const { dir, prefix } = splitPath(token.value)
+
+    completing.current = true
+    const entries = await listOf(dir).finally(() => { completing.current = false })
+    // 列目录要等一趟请求，而人不会停下来等 —— 这会儿他可能又敲了几个字。
+    // 下面整行都是拿 await 之前那份快照重建的，照着写回去等于把新敲的悄悄
+    // 吞掉。宁可这次不补：Tab 再按一次就是了，敲进去的字找不回来。
+    if (node.value !== input) { setMenu(null); return }
+    if (entries === null) { setMenu(null); return }
+
+    const hits = matching(entries, prefix)
+    const head = input.slice(0, token.start)
+    // 闭引号已经敲上了就把它吃掉 —— literal() 补出来的那对引号是完整的，
+    // 留着只会得到 "packages/"" 这种谁也没打算要的东西。
+    const closed = token.quote !== null && input[caret] === token.quote
+    const tail = input.slice(caret + (closed ? 1 : 0))
+    const list: Menu = {
+      head,
+      tail,
+      dir,
+      quote: token.quote,
+      items: hits.slice(0, MAX_CANDIDATES),
+      total: hits.length,
+      index: -1,
+    }
+
+    // 空菜单就是那句「没有匹配」—— 让它占着屏幕上的位置，而不是悄无声息。
+    if (hits.length === 0) { setMenu(list); return }
+    const [only] = hits
+    if (hits.length === 1 && only !== undefined) {
+      const text = literal(dir + only.name + (only.kind === 'dir' ? '/' : ''), list.quote)
+      const insert = only.kind === 'dir' || tail.startsWith(' ') ? text : `${text} `
+      setMenu(null)
+      put(head + insert + tail, head.length + insert.length)
+      return
+    }
+
+    const common = commonPrefix(hits.map((hit) => hit.name))
+    // 补出来比已经敲的还短就别动它：大小写不敏感那条退路会同时挑出 README
+    // 与 ReadMe，它们的公共前缀是 'Read'，照着补等于把用户敲的削掉一截。
+    if (common.length > prefix.length) {
+      const text = literal(dir + common, list.quote)
+      put(head + text + tail, head.length + text.length)
+    }
+    setMenu(list)
+  }, [busy, menu, input, listOf, put, take])
+
+  /** 让选中的候选滚进视野 —— 轮到第三行上的那个时，看不见就等于没选。 */
+  const chosen = useCallback((node: HTMLLIElement | null) => {
+    node?.scrollIntoView({ block: 'nearest' })
+  }, [])
+
   const submit = useCallback(() => {
     const command = input.trim()
     if (command.length === 0 || busy) return
@@ -93,6 +289,7 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
     follow.current = true
     setInput('')
     setCursor(null)
+    setMenu(null)
     setHistory((prev) => (prev.at(-1) === command ? prev : [...prev, command]))
     setLines((prev) => [...prev, { id, command, where, result: null, error: null }].slice(-MAX_LINES))
     setBusy(true)
@@ -108,7 +305,11 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
           : t('term.failed')
         setLines((prev) => prev.map((line) => (line.id === id ? { ...line, error: detail } : line)))
       })
-      .finally(() => { setBusy(false) })
+      .finally(() => {
+        setBusy(false)
+        // 这条命令可能刚 mkdir 出一个目录 —— 补不出刚建的东西比慢一点更难解释。
+        listings.current.clear()
+      })
   }, [input, busy, root, cwd, where, t])
 
   /** 翻历史。到头了就停在那儿，往下翻到底则回到空行（还没敲的那条）。 */
@@ -194,6 +395,36 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
         ))}
       </div>
 
+      {menu === null ? null : (
+        <div className="flex-none border-t border-hairline px-3 py-1">
+          {menu.items.length === 0 ? (
+            <p className="cjk-label">{t('term.noMatch')}</p>
+          ) : (
+            <>
+              <ul className="flex max-h-14 flex-wrap gap-x-3 gap-y-0.5 overflow-y-auto">
+                {menu.items.map((item, at) => (
+                  <li
+                    key={item.name}
+                    ref={at === menu.index ? chosen : null}
+                    className={cn(
+                      'mono text-[11px]',
+                      at === menu.index ? 'rounded-sm bg-sodium/15 px-1 text-sodium' : 'text-ink-dim',
+                    )}
+                  >
+                    {item.name}{item.kind === 'dir' ? '/' : ''}
+                  </li>
+                ))}
+              </ul>
+              {menu.total > menu.items.length ? (
+                <p className="cjk-label mt-0.5">
+                  {t('term.moreMatches', { n: menu.total - menu.items.length })}
+                </p>
+              ) : null}
+            </>
+          )}
+        </div>
+      )}
+
       <form
         className="flex flex-none items-center gap-2 border-t border-hairline px-3 py-1.5"
         onSubmit={(event) => { event.preventDefault(); submit() }}
@@ -208,8 +439,27 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
           autoComplete="off"
           placeholder={t('term.placeholder')}
           aria-label={t('term.placeholder')}
-          onChange={(event) => { setInput(event.target.value) }}
+          onChange={(event) => { setInput(event.target.value); setMenu(null) }}
+          // 焦点走了这一轮补全就结束了 —— 候选说的是"你正在敲的那个词"。
+          onBlur={() => { setMenu(null) }}
           onKeyDown={(event) => {
+            // Tab 在浏览器里默认是「跳到下一个控件」。这是个终端，Tab 是补全。
+            if (event.key === 'Tab') {
+              event.preventDefault()
+              void complete(event.shiftKey ? -1 : 1)
+              return
+            }
+            // 摊开的候选先用 esc 收掉，别让这一下顺手关掉整个面板。
+            if (event.key === 'Escape' && menu !== null) {
+              event.preventDefault()
+              event.stopPropagation()
+              setMenu(null)
+              return
+            }
+            // 按下修饰键还不算动作，Shift+Tab 的前半下就是它。
+            if (MODIFIERS.has(event.key)) return
+            // 别的键都意味着这一轮补全结束了 —— 候选是对着刚才那个词说的。
+            setMenu(null)
             if (event.key === 'ArrowUp') { event.preventDefault(); stepHistory(-1) }
             if (event.key === 'ArrowDown') { event.preventDefault(); stepHistory(1) }
             // 回车自己提交，并挡掉表单的隐式提交（不挡就会跑两遍）。表单的
@@ -221,6 +471,7 @@ export function Terminal({ root, cwd, where, open, onToggle }: Props): React.JSX
             'placeholder:text-ink-faint disabled:opacity-50',
           )}
         />
+        <span className="chrome-label !text-[8px] flex-none">{t('term.tabHint')}</span>
         <span className="chrome-label !text-[8px] flex-none">{t('term.historyHint')}</span>
         <button
           type="submit"

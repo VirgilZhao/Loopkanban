@@ -79,6 +79,7 @@ const zh = {
   // ── 卡片 ───────────────────────────────────────────────
   'card.empty': '还没写内容',
   'card.leaseExpired': '租约已过期 · 待回收',
+  'card.draftCleanupFailed': '那张没写内容的新卡没能删掉，它还留在想法池里，请手动删一下。',
 
   // ── 调度器为什么没派它 ─────────────────────────────────
   'skip.blocked-by-dependency': '依赖未完成: {0}',
@@ -299,6 +300,7 @@ const en: Record<MessageKey, string> = {
 
   'card.empty': 'Nothing written yet',
   'card.leaseExpired': 'Lease expired · to be reclaimed',
+  'card.draftCleanupFailed': 'That blank new card could not be removed — it is still in the idea pool, so delete it by hand.',
 
   'skip.blocked-by-dependency': 'Unfinished dependencies: {0}',
   'skip.provider-unavailable': 'No agent CLI detected on this machine',

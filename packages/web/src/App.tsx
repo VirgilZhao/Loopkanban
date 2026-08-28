@@ -42,6 +42,8 @@ const ERROR_HINT: Record<string, string> = {
   'task-archived': '这张卡已归档。要动它先取消归档 —— 归档的卡是冻结的，不会被自动认领。',
   'already-archived': '这张卡已经归档了。',
   'not-archived': '这张卡没有归档。',
+  'not-deletable': '只有 Backlog 与 Ready 的卡能删 —— 再往后 Agent 已经动过仓库了。要删就先废弃回想法池。',
+  'task-not-found': '这张卡已经不在了，可能刚被删掉。',
 }
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */

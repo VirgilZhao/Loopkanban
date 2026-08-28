@@ -181,6 +181,50 @@ describe('Run', () => {
   })
 })
 
+describe('deleteTask', () => {
+  beforeEach(() => { store.createTask(task({ id: 't1', column: 'backlog' })) })
+
+  it('连同 Run 与事件一起抹掉 —— 留一串指向空 taskId 的事件只是垃圾', () => {
+    store.createRun(run())
+    store.appendEvent(asRunId('run-1'), 'text', { hi: 1 }, T0)
+    expect(store.deleteTask(asTaskId('t1'), 1)).toBe(true)
+    expect(store.getTask(asTaskId('t1'))).toBeNull()
+    expect(store.getRun(asRunId('run-1'))).toBeNull()
+    expect(store.readEvents(asRunId('run-1'))).toEqual([])
+  })
+
+  it('revision 对不上就不删，库里原样不动', () => {
+    expect(store.deleteTask(asTaskId('t1'), 99)).toBe(false)
+    expect(store.getTask(asTaskId('t1'))).not.toBeNull()
+  })
+
+  it('同一个事务里摘掉下游的依赖', () => {
+    store.createTask(task({ id: 't2', blockedBy: [asTaskId('t1')] }))
+    const downstream = store.getTask(asTaskId('t2'))
+    if (downstream === null) throw new Error('setup')
+    const patched = { ...downstream, blockedBy: [], revision: downstream.revision + 1 }
+
+    expect(store.deleteTask(asTaskId('t1'), 1, [patched])).toBe(true)
+    expect(store.getTask(asTaskId('t2'))?.blockedBy).toEqual([])
+  })
+
+  it('下游的 CAS 失败就整体回滚 —— 不留下"卡没了但依赖还悬着"', () => {
+    store.createTask(task({ id: 't2', blockedBy: [asTaskId('t1')] }))
+    const stale = store.getTask(asTaskId('t2'))
+    if (stale === null) throw new Error('setup')
+    // revision 从 5 起跳，库里是 1 —— 这条 CAS 必然打不中。
+    expect(store.deleteTask(asTaskId('t1'), 1, [{ ...stale, revision: 5 }])).toBe(false)
+    expect(store.getTask(asTaskId('t1'))).not.toBeNull()
+    expect(store.getTask(asTaskId('t2'))?.blockedBy).toEqual([asTaskId('t1')])
+  })
+
+  it('删完之后同一个 id 可以重新建，不会被残留的外键卡住', () => {
+    store.createRun(run())
+    store.deleteTask(asTaskId('t1'), 1)
+    expect(() => { store.createTask(task({ id: 't1' })) }).not.toThrow()
+  })
+})
+
 describe('事件日志（append-only）', () => {
   beforeEach(() => {
     store.createTask(task({ id: 't1' }))

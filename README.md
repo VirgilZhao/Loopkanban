@@ -44,7 +44,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 284 个测试
+pnpm test            # 305 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/openkanban.js 与 dist/web/
 

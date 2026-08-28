@@ -251,6 +251,67 @@ describe('POST /api/tasks/:id/archive · unarchive', () => {
   })
 })
 
+describe('DELETE /api/tasks/:id', () => {
+  const del = (id: string, body?: unknown, query = '') =>
+    api(`/api/tasks/${id}${query}`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+  it('删掉想法池里的卡，连它的执行历史一起', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createRun({
+      id: asRunId('run-1'), taskId: asTaskId('t1'), provider: 'claude', cliVersion: '2.1.247',
+      worktreePath: '/wt', branch: 'task/t1', status: 'failed', exitCode: 1, startedAt: T0,
+    })
+    store.appendEvent(asRunId('run-1'), 'text', { text: 'hi' }, T0)
+
+    const res = await del('t1', { expectedRevision: 1 })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ deleted: true, unblocked: [] })
+    expect(store.getTask(asTaskId('t1'))).toBeNull()
+    expect(store.getRun(asRunId('run-1'))).toBeNull()
+  })
+
+  it('队列里的卡也能删', async () => {
+    store.createTask(task({ id: 't1', column: 'ready' }))
+    expect((await del('t1', { expectedRevision: 1 })).status).toBe(200)
+  })
+
+  it('Agent 动过仓库的卡返回 422，库里原样不动', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const res = await del('t1', { expectedRevision: 1 })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'not-deletable' })
+    expect(store.getTask(asTaskId('t1'))).not.toBeNull()
+  })
+
+  it('下游对它的依赖被一并摘掉 —— 否则那张卡会永远停在"依赖未完成"', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 't2', blockedBy: [asTaskId('t1')] }))
+
+    const res = await del('t1', { expectedRevision: 1 })
+    expect(await res.json()).toMatchObject({ unblocked: ['t2'] })
+    const downstream = store.getTask(asTaskId('t2'))
+    expect(downstream?.blockedBy).toEqual([])
+    // 摘依赖也是一次变更，revision 必须跟着走，否则别人的 CAS 会打在陈旧的值上。
+    expect(downstream?.revision).toBe(2)
+  })
+
+  it('查询串里的 expectedRevision 与请求体等价', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    expect((await del('t1', undefined, '?expectedRevision=1')).status).toBe(200)
+  })
+
+  it('revision 过期返回 409，缺参数 400，卡不存在 404', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    expect((await del('t1', { expectedRevision: 99 })).status).toBe(409)
+    expect((await del('t1', {})).status).toBe(400)
+    expect((await del('ghost', { expectedRevision: 1 })).status).toBe(404)
+  })
+})
+
 describe('SSE 事件流', () => {
   const RUN = asRunId('run-1')
 

@@ -30,6 +30,8 @@ loopkanban service install   # 确认无误再装
 - **不绑定 CLI 版本**。启动时解析 `--help` 得出能力矩阵，装的是什么版本就用
   什么版本；不支持的能力在界面上直接灰掉，不会等到运行时才失败。
 - **worktree 隔离**。Agent 不碰你的主工作区，跑飞了删掉分支即可。
+- **卡片可以带附件**。截图、PDF、Word 拖进卡里，派活时它们会被拷进工作区并在
+  TASK.md 里点名交给 CLI —— 说不清楚的需求，给它看。
 - **只监听 `127.0.0.1`**。远程访问走 SSH 端口转发。
 - **文件浏览与命令行**。顶栏可以从看板切到「文件浏览」：逛项目仓库、切到某张卡
   的 worktree 看 Agent 到底改了什么，底下还挂着一个命令行，命令就跑在你正看着的
@@ -49,7 +51,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 312 个测试
+pnpm test            # 433 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

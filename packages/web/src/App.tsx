@@ -16,7 +16,7 @@ import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { maybe, useT, type MessageKey, type Translate } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
-import { taskTitle } from '@/lib/task.ts'
+import { isUntouchedDraft, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunStats,
@@ -73,6 +73,8 @@ export default function App(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // 运行中卡片的最后一条事件，跟着看板轮询一起来 —— 详情弹窗关着也看得见。
   const [live, setLive] = useState<Record<string, LiveLine>>({})
+  // 每张卡挂了几个附件，跟着看板轮询一起来 —— 卡上那枚回形针靠它。
+  const [attachments, setAttachments] = useState<Record<string, number>>({})
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -85,9 +87,14 @@ export default function App(): React.JSX.Element {
   const [showArchived, setShowArchived] = useState(false)
   // 上一次看到的列，用来判断"刚刚有卡进了 Review/Failed"，据此发通知。
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
+  // 刚建出来、还一次没存过的那张卡。叉掉弹窗时它得跟着消失。
+  const draftId = useRef<string | null>(null)
+  // 建卡的请求还在路上。双击"新建任务"不该建出两张卡 —— 多出来的那张
+  // 没人认领（draftId 只记得住一张），会一直空着躺在想法池里。
+  const creating = useRef(false)
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded, projects: known, live: lines }, state, summary] = await Promise.all([
+    const [{ tasks: loaded, projects: known, live: lines, attachments: clips }, state, summary] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
       api.stats().catch(() => null),
@@ -95,6 +102,7 @@ export default function App(): React.JSX.Element {
     setTasks(loaded)
     setProjects(known)
     setLive(lines)
+    setAttachments(clips)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -238,18 +246,52 @@ export default function App(): React.JSX.Element {
 
   /** 建一张空白卡并立刻选中它，用户接着在弹窗里填内容。 */
   const createTask = useCallback(() => {
-    if (activeProject === null) return
+    if (activeProject === null || creating.current) return
+    creating.current = true
     void (async () => {
       try {
         // 建一张空白卡，内容在弹窗里写 —— 先落地，再动笔。
         const { task } = await api.createTask({ projectId: activeProject.id })
+        // 记下它是"新建的"：一次没存就关掉的话，这张空卡要收回去。
+        draftId.current = task.id
         await refresh()
         setSelectedId(task.id)
       } catch (error) {
         if (error instanceof ApiError) setNotice({ text: explain(t, error.code, error.message), tone: 'warn' })
+      } finally {
+        creating.current = false
       }
     })()
   }, [refresh, activeProject, t])
+
+  /**
+   * 关掉任务弹窗。
+   *
+   * 新卡是先落地再动笔的，所以"没点保存就叉掉"应当等于"没建过"：那张空白卡
+   * 跟着收走，想法池里不该留下一排只有 id 的卡片。只收自己刚建的那一张，且
+   * 它确实一个字都没写 —— 别的卡关窗就只是关窗。
+   *
+   * 卡已经不在了不算失败 —— 它可能刚被面板里的删除按钮带走，那正是我们
+   * 想要的结果。别的失败要说出来：那张空卡还留在想法池里，不吭声的话用户
+   * 只会以为这个功能坏了。
+   */
+  const closeTask = useCallback((task: Task | null) => {
+    setSelectedId(null)
+    if (task === null || draftId.current !== task.id) return
+    draftId.current = null
+    if (!isUntouchedDraft(task)) return
+    void api.remove(task.id, task.revision)
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.code === 'task-not-found') return
+        setNotice({
+          text: error instanceof ApiError
+            ? explain(t, error.code, error.message)
+            : t('card.draftCleanupFailed'),
+          tone: 'warn',
+        })
+      })
+      .finally(() => { void refresh() })
+  }, [refresh, t])
 
   /**
    * 换项目的基线分支。
@@ -461,6 +503,7 @@ export default function App(): React.JSX.Element {
                 now={now}
                 selectedId={selectedId}
                 live={live}
+                attachments={attachments}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
                 // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
@@ -490,11 +533,17 @@ export default function App(): React.JSX.Element {
             task={selected}
             project={projectById.get(selected.projectId) ?? null}
             agents={agents}
-            onChanged={() => { void refresh() }}
+            onChanged={() => {
+              // 动过一次（保存、派活、留言、归档……）就不再是"没写过的新卡"，
+              // 之后叉掉弹窗就只是叉掉弹窗。看板状态是异步刷的，这个标记不能
+              // 等它 —— 否则刚保存的卡会被当成空白草稿收走。
+              draftId.current = null
+              void refresh()
+            }}
             onError={(code, detail) => {
               setNotice({ text: explain(t, code, detail), tone: 'warn' })
             }}
-            onClose={() => { setSelectedId(null) }}
+            onClose={() => { closeTask(selected) }}
           />
         )}
 

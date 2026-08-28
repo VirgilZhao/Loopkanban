@@ -6,7 +6,7 @@
  */
 
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
 import {
   createServer as createHttpServer, request as httpRequest,
   type IncomingMessage, type Server, type ServerResponse,
@@ -19,13 +19,18 @@ import {
   unarchiveTask, type Column, type Task, type TaskEdit,
 } from '@loopkanban/core'
 import { AgentPool, type DetectedAgent } from '../agents/index.ts'
+import {
+  canInline, mimeOf, safeFilename, AttachmentStore,
+  MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
+} from '../attachments/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
-import type { Storage } from '../storage/index.ts'
+import type { Attachment, Storage } from '../storage/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
+import { readFilePreview } from './preview.ts'
 import { RunBus } from './bus.ts'
 import { runCommand } from './exec.ts'
 import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
@@ -53,6 +58,11 @@ export interface ServerOptions {
   readonly runner?: Runner
   /** 验收器。不给则不能通过/打回/废弃。 */
   readonly review?: Review
+  /**
+   * 附件的磁盘侧。不给则附件接口一律 503 —— 库里能记元数据，但没有
+   * 落字节的地方，让上传"看起来成功"是最糟的结果。
+   */
+  readonly attachments?: AttachmentStore
   /** 自动认领调度器。不给则界面上没有自动驾驶开关。 */
   readonly scheduler?: Scheduler
   readonly bus?: RunBus
@@ -155,6 +165,43 @@ async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000): Promi
   }
 }
 
+/**
+ * 整块读请求体。上传附件用 —— 二进制不走 JSON。
+ *
+ * 刻意不流式落盘：本地工具，单文件上限 25 MB，先收全再写能让"超限"和
+ * "写坏"两种失败都在落盘之前发生，磁盘上不会留下半个文件。
+ *
+ * @param req - 进来的请求。
+ * @param limitBytes - 超过就拒收。
+ */
+async function readRawBody(req: IncomingMessage, limitBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length
+    if (size > limitBytes) throw new BadRequestError(`文件超过 ${String(Math.round(limitBytes / 1024 / 1024))} MB 上限`)
+    chunks.push(chunk as Buffer)
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
+ * 附件对外的样子：**不含磁盘路径**。
+ *
+ * 路径是服务端的内部事实，前端拿它没有任何用处，漏出去只是白白告诉页面
+ * 数据目录在哪儿。要拿内容走 `GET /api/attachments/<id>`。
+ */
+function describeAttachment(attachment: Attachment): Record<string, unknown> {
+  return {
+    id: attachment.id,
+    taskId: attachment.taskId,
+    filename: attachment.filename,
+    mime: attachment.mime,
+    size: attachment.size,
+    at: attachment.at,
+  }
+}
+
 /** 从路径里取出形如 `/api/runs/<id>/events` 的片段。 */
 function matchPath(pathname: string, pattern: RegExp): string | null {
   return pattern.exec(pathname)?.[1] ?? null
@@ -174,6 +221,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const runner = options.runner
   const review = options.review
   const scheduler = options.scheduler
+  const attachmentStore = options.attachments
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
   const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
 
@@ -213,13 +261,18 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 运行中的卡各捎一条最新事件，看板据此在卡上显示一行日志预览 ——
       // 不然关着详情弹窗就完全看不出 Agent 正在干什么。
       const live: Record<string, { kind: string; payload: unknown; at: number }> = {}
+      // 带了几个附件也捎上：看板上那枚回形针得知道自己该不该出现，而为它
+      // 单独开一轮请求（每张卡一次）就太贵了。只给数量，内容按需再取。
+      const attachments: Record<string, number> = {}
       for (const task of tasks) {
+        const count = storage.listAttachments(task.id).length
+        if (count > 0) attachments[task.id] = count
         const runId = task.lease?.runId
         if (task.column !== 'running' || runId === undefined) continue
         const event = storage.lastEvent(runId)
         if (event !== null) live[task.id] = { kind: event.kind, payload: event.payload, at: event.at }
       }
-      sendJson(res, 200, { projects: storage.listProjects(), tasks, live }, extraHeaders)
+      sendJson(res, 200, { projects: storage.listProjects(), tasks, live, attachments }, extraHeaders)
       return
     }
 
@@ -530,6 +583,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
       // Run 要在删库之前读出来 —— 删完就查不到该收拾哪些 worktree 了。
       const runsOfTask = new Map(tasks.map((task) => [task.id, storage.listRuns(task.id)]))
+      // 附件同理：库里的记录跟着项目一起没，磁盘上的字节不会自己消失。
+      const hadAttachments = storage.listProjectAttachments(target).length > 0
       if (!storage.deleteProject(target)) {
         sendJson(res, 404, { error: 'project-not-found' })
         return
@@ -538,6 +593,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 收拾的只是我们自己建的 worktree 与任务分支，仓库本身一个字不动。
       if (review !== undefined) {
         for (const task of tasks) await review.purge(task, runsOfTask.get(task.id) ?? [])
+      }
+      if (hadAttachments && attachmentStore !== undefined) {
+        for (const task of tasks) await attachmentStore.removeTask(task.id)
       }
       sendJson(res, 200, { deleted: true, tasks: tasks.length }, extraHeaders)
       return
@@ -613,6 +671,187 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           if (next.ok) moved = storage.commitTask(next.value)
         }
         sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)
+        return
+      }
+    }
+
+    /*
+     * ── 附件：列出 / 上传 ────────────────────────────────────
+     *
+     * 上传是**裸的请求体**，不是 multipart：一次一个文件，文件名走
+     * `x-filename` 头（URI 编码，非 ASCII 的文件名只有这样才能安全过头部）。
+     * 自己写一个 multipart 解析器是这个项目最不值得的那种代码 —— 而"零运行时
+     * 依赖"这条线又不允许引一个库进来。前端本来就一个一个地传。
+     */
+    const attachmentsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/attachments$/)
+    if (attachmentsOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(attachmentsOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, { attachments: storage.listAttachments(taskId).map(describeAttachment) }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        /*
+         * 早退之前先**把请求体读完**。这些拒绝多半发生在几 MB 的文件正在路上
+         * 的时候；不读完就应答，socket 会被连接层直接掐掉，客户端拿到的是一条
+         * 网络错误而不是我们精心写的那句"这张卡正在执行"。
+         */
+        const refuse = (status: number, body: unknown): void => {
+          req.resume()
+          sendJson(res, status, body)
+        }
+        if (attachmentStore === undefined) {
+          refuse(503, { error: 'no-attachments', detail: '当前实例没有配置附件存储' })
+          return
+        }
+        // 与「正在执行的卡不能改需求」同一条规矩：附件就是需求的一部分，
+        // Agent 已经拿着 TASK.md 在干活了，此刻加一份材料只会让人和机器
+        // 对着两份规格。归档的卡是冻结的，同理。
+        if (task.column === 'running') {
+          refuse(422, { error: 'task-running', detail: '正在执行的卡片不能加附件，先终止执行' })
+          return
+        }
+        if (task.archivedAt !== undefined) {
+          refuse(422, { error: 'task-archived', detail: '这张卡已归档。要动它先取消归档' })
+          return
+        }
+        const existing = storage.listAttachments(taskId)
+        if (existing.length >= MAX_ATTACHMENTS_PER_TASK) {
+          refuse(422, {
+            error: 'too-many-attachments',
+            detail: `一张卡最多 ${String(MAX_ATTACHMENTS_PER_TASK)} 个附件`,
+          })
+          return
+        }
+
+        const header = req.headers['x-filename']
+        const raw = typeof header === 'string' ? header : ''
+        if (raw.trim().length === 0) {
+          refuse(400, { error: 'bad-request', detail: '缺少 x-filename 头' })
+          return
+        }
+        let declaredName: string
+        try {
+          declaredName = decodeURIComponent(raw)
+        } catch {
+          // 头部没编码好（或者根本不是 URI 编码）就按原文用，别为此拒收整个文件。
+          declaredName = raw
+        }
+        const filename = safeFilename(declaredName)
+
+        const bytes = await readRawBody(req, MAX_ATTACHMENT_BYTES)
+        if (bytes.length === 0) {
+          sendJson(res, 400, { error: 'bad-request', detail: '空文件' })
+          return
+        }
+
+        const id = `a-${randomUUID().slice(0, 8)}`
+        const mime = mimeOf(filename, req.headers['content-type'])
+        // 先落字节再记库：反过来的话，写文件失败会留下一条指向空气的记录，
+        // 而界面上它看起来和正常附件一模一样。
+        const stored = await attachmentStore.save(taskId, id, filename, bytes)
+        const attachment: Attachment = {
+          id,
+          taskId,
+          // 库里记的是**用户原来的文件名**，落盘用的是压过的安全名 ——
+          // 界面上该显示他自己起的那个名字。
+          filename: declaredName.split(/[/\\]/).pop() ?? filename,
+          mime,
+          size: stored.size,
+          path: stored.path,
+          at: Date.now(),
+        }
+        storage.addAttachment(attachment)
+        sendJson(res, 201, { attachment: describeAttachment(attachment) }, extraHeaders)
+        return
+      }
+    }
+
+    // ── 附件：取内容 / 删除 ──────────────────────────────────
+    const attachmentId = matchPath(pathname, /^\/api\/attachments\/([^/]+)$/)
+    if (attachmentId !== null) {
+      const attachment = storage.getAttachment(decodeURIComponent(attachmentId))
+      if (attachment === null) { sendJson(res, 404, { error: 'attachment-not-found' }); return }
+
+      if (method === 'GET') {
+        /*
+         * **先拿到 fd，再决定状态码。**
+         *
+         * 换成 `stat` 之后再 `createReadStream` 有两个毛病，而且都是真会发生的：
+         *
+         * 1. 两步之间有一道缝。同一时刻另一个请求走 DELETE 把文件删掉（看板
+         *    上的 `<img>` 请求和人点的删除按钮完全可能撞上），或者文件根本
+         *    打不开（权限被改过），`createReadStream` 就会**异步**抛出一个
+         *    没人接的 `'error'` 事件 —— `pipe()` 不转发源端错误，外面的
+         *    try/catch 也接不到，结果是整个进程被 uncaughtException 带走，
+         *    看板没了，正在跑的 Agent 全部失去托管。
+         * 2. 那时头已经发出去了，想改成 410 也来不及。
+         *
+         * 拿着 fd 就没有这道缝：POSIX 下文件即使随后被 unlink，这个 fd 仍然
+         *读得到完整内容；打不开则在写任何响应头之前就知道了。
+         */
+        const handle = await open(attachment.path, 'r').catch(() => null)
+        if (handle === null) {
+          // 文件被外力删了，或者读不了。说清楚是哪一种缺失，
+          // 比让浏览器拿到一个空响应强。
+          sendJson(res, 410, { error: 'attachment-gone', detail: '这个附件的文件已经读不出来了' })
+          return
+        }
+        const file = await handle.stat().catch(() => null)
+        if (file?.isFile() !== true) {
+          // 目录也能 open 成功，所以这一步仍要问一句它到底是不是文件。
+          await handle.close().catch(() => undefined)
+          sendJson(res, 410, { error: 'attachment-gone', detail: '这个附件的文件已经读不出来了' })
+          return
+        }
+        res.writeHead(200, {
+          'content-type': attachment.mime,
+          // 长度来自这个 fd 自己的 stat，和接下来读到的字节必然一致。
+          'content-length': file.size,
+          // 只有图片和 PDF 内联；别的一律下载。附件和看板同源，一个能在
+          // 页面里跑起来的附件就能拿着 cookie 调本机的执行接口。
+          'content-disposition': `${canInline(attachment.mime) ? 'inline' : 'attachment'}; `
+            + `filename*=UTF-8''${encodeURIComponent(attachment.filename)}`,
+          // 不许浏览器自作主张改判类型 —— 上面那条允许清单就白设了。
+          'x-content-type-options': 'nosniff',
+          'cache-control': 'no-store',
+          ...extraHeaders,
+        })
+        const stream = handle.createReadStream()
+        // 读到一半的 I/O 错误仍然可能发生（坏扇区、网络盘掉线）。此刻头
+        // 已经发出去了，改不了状态码，只能掐断连接让客户端知道这次没传完
+        // —— 但**这个监听必须在**：少了它，一个读错误就是一次进程退出。
+        stream.on('error', (error: unknown) => {
+          console.error(`[loopkanban] 附件读取中断 ${attachment.id}:`, error)
+          res.destroy()
+        })
+        // 客户端提前断开（关标签页、取消下载）时把读流也收掉，
+        // 否则它会攥着一个 fd 把整个文件读完再扔掉。
+        res.on('close', () => { stream.destroy() })
+        stream.pipe(res)
+        return
+      }
+
+      if (method === 'DELETE') {
+        const owner = storage.getTask(attachment.taskId)
+        if (owner?.column === 'running') {
+          sendJson(res, 422, { error: 'task-running', detail: '正在执行的卡片不能删附件，先终止执行' })
+          return
+        }
+        // 归档的卡是冻结的，删附件和加附件同属"改需求"，两边必须同一套规矩
+        // —— 上传拒了、删除放行，等于让归档这个动作只挡住一半。
+        if (owner?.archivedAt !== undefined) {
+          sendJson(res, 422, { error: 'task-archived', detail: '这张卡已归档。要动它先取消归档' })
+          return
+        }
+        // 库先删：记录没了，界面上它就不在了；磁盘上的字节即使删不掉，
+        // 也只是一个没人再引用的文件，不会让人对着一个点不开的附件发懵。
+        const removed = storage.deleteAttachment(attachment.id)
+        if (removed && attachmentStore !== undefined) await attachmentStore.remove(attachment.path)
+        sendJson(res, removed ? 200 : 404, { deleted: removed }, extraHeaders)
         return
       }
     }
@@ -694,6 +933,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 同 accept / discard：状态先落定，不可逆的删除在后。反过来的话一次
       // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
       if (review !== undefined) await review.purge(task, runs)
+      // 附件的字节也跟着卡一起走。库里的记录已经在事务里删掉了。
+      if (attachmentStore !== undefined) await attachmentStore.removeTask(task.id)
       sendJson(res, 200, { deleted: true, unblocked: cascade.map((t) => t.id) }, extraHeaders)
       return
     }
@@ -785,6 +1026,38 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const view = await review.diff(asTaskId(decodeURIComponent(diffOf)))
       if (view === null) { sendJson(res, 404, { error: 'no-run', detail: '这张卡还没有执行记录' }); return }
       sendJson(res, 200, { diff: view }, extraHeaders)
+      return
+    }
+
+    /*
+     * 预览工作区里的一个文件。
+     *
+     * Agent 常常把方案写成一份文档再在讨论里给出路径 —— 那条路径指向的是它
+     * 自己的 worktree，浏览器打不开。够得着的范围只有这张卡历次执行的
+     * worktree 与项目仓库，越界一律拒绝（细则见 `preview.ts`）。
+     */
+    const fileOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file$/)
+    if (method === 'GET' && fileOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(fileOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      const roots = [...new Set([
+        ...storage.listRuns(taskId).map((run) => run.worktreePath),
+        task.repoPath,
+      ])]
+      const found = await readFilePreview(url.searchParams.get('path') ?? '', roots)
+      if (!found.ok) {
+        // 越界是「这个请求本身不成立」，不是「东西不在」——分开报，不然
+        // 界面只能笼统地说一句打不开。
+        const status = found.reason === 'path-outside-workspace' ? 422
+          : found.reason === 'not-text' ? 415
+          : found.reason === 'unreadable' ? 403
+          : 404
+        sendJson(res, status, { error: found.reason, detail: found.detail })
+        return
+      }
+      sendJson(res, 200, { file: found.file }, extraHeaders)
       return
     }
 

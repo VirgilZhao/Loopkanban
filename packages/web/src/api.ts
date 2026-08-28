@@ -7,9 +7,9 @@
  */
 
 import type {
-  Agent, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing, LiveLine,
-  Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task, TaskComment,
-  TaskEdit, Workspace,
+  Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
+  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent,
+  Task, TaskComment, TaskEdit, Workspace,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -44,7 +44,13 @@ function clearable(edit: TaskEdit): Record<string, unknown> {
 }
 
 export const api = {
-  state: () => call<{ projects: Project[]; tasks: Task[]; live: Record<string, LiveLine> }>('/api/state'),
+  state: () => call<{
+    projects: Project[]
+    tasks: Task[]
+    live: Record<string, LiveLine>
+    /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
+    attachments: Record<string, number>
+  }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
 
@@ -172,6 +178,15 @@ export const api = {
 
   diff: (taskId: string) => call<{ diff: DiffView }>(`/api/tasks/${encodeURIComponent(taskId)}/diff`),
 
+  /**
+   * 读一个文件用于预览：Agent 写的方案文档就在它的 worktree 里，浏览器
+   * 打不开那条路径。够得着的只有这张卡的 worktree 与项目仓库。
+   */
+  file: (taskId: string, path: string) =>
+    call<{ file: FilePreview }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/file?path=${encodeURIComponent(path)}`,
+    ),
+
   /** 验收通过。merge 为真才会动主工作区，且前置条件不满足会被明确拒绝。 */
   accept: (taskId: string, merge = false) =>
     call<{ commit: string | null; merged: boolean }>(
@@ -192,6 +207,41 @@ export const api = {
       `/api/tasks/${encodeURIComponent(taskId)}/comments`,
       { method: 'POST', body: JSON.stringify({ body }) },
     ),
+
+  /** 一张卡的附件，按上传顺序。 */
+  attachments: (taskId: string) =>
+    call<{ attachments: Attachment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/attachments`),
+
+  /**
+   * 传一个附件。
+   *
+   * 一次一个文件、裸的请求体、文件名走 `x-filename` 头 —— 服务端没有
+   * multipart 解析器（那是"零运行时依赖"下最不值得手写的一段代码）。
+   * 文件名要 URI 编码：中文文件名直接塞进 HTTP 头是发不出去的。
+   *
+   * `content-type` 显式给 file.type，且**必须绕开 `call`** —— 它会给所有
+   * 请求都盖上 `application/json`，那样服务端看到的类型全是错的。
+   */
+  upload: async (taskId: string, file: File): Promise<Attachment> => {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/attachments`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'content-type': file.type.length > 0 ? file.type : 'application/octet-stream',
+        'x-filename': encodeURIComponent(file.name),
+      },
+      body: file,
+    })
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>
+    if (!res.ok) {
+      throw new ApiError(res.status, String(body['error'] ?? 'unknown'), String(body['detail'] ?? res.statusText))
+    }
+    return (body as { attachment: Attachment }).attachment
+  },
+
+  /** 删一个附件，连同磁盘上的字节。 */
+  removeAttachment: (attachmentId: string) =>
+    call<{ deleted: boolean }>(`/api/attachments/${encodeURIComponent(attachmentId)}`, { method: 'DELETE' }),
 
   /** 废弃这次成果：删掉分支与 worktree，卡片回想法池。 */
   discard: (taskId: string) =>
@@ -215,6 +265,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ expectedRevision, to, position }),
     }),
+}
+
+/**
+ * 附件内容的地址。`<img src>`、下载链接都用它。
+ *
+ * 同源，token 在 httpOnly cookie 里，浏览器自己会带上 —— 不必也不该把
+ * token 拼进 URL。
+ */
+export function attachmentUrl(attachmentId: string): string {
+  return `/api/attachments/${encodeURIComponent(attachmentId)}`
 }
 
 /**

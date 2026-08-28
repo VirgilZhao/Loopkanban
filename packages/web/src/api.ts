@@ -7,8 +7,9 @@
  */
 
 import type {
-  Agent, Attachment, BranchListing, DiffView, DirListing, FilePreview, LiveLine, Project, Run,
-  RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task, TaskComment, TaskEdit,
+  Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
+  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent,
+  Task, TaskComment, TaskEdit, Workspace,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -85,6 +86,40 @@ export const api = {
    */
   createProject: (input: { name: string; path: string; baseBranch?: string }) =>
     call<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
+
+  /**
+   * 一个项目能逛哪些工作区：主仓库，加上卡片留下的 worktree。
+   *
+   * worktree 才是 Agent 干活的地方 —— 能切过去看，「它到底改了什么」就不必
+   * 只靠 diff 猜。
+   */
+  workspaces: (projectId: string) =>
+    call<{ workspaces: Workspace[] }>(`/api/workspaces?projectId=${encodeURIComponent(projectId)}`),
+
+  /**
+   * 列一个目录。`root` 是工作区根，服务端据此重新校验围栏 —— 逛不出已登记
+   * 项目的仓库。不给 `path` 就列根本身。
+   */
+  files: (root: string, path?: string) =>
+    call<FileListing>(`/api/files?root=${encodeURIComponent(root)}${
+      path === undefined ? '' : `&path=${encodeURIComponent(path)}`}`),
+
+  /** 读一个文件的正文。太大会截断，二进制不回正文 —— 两种情况都会如实标出来。 */
+  fileContent: (root: string, path: string) =>
+    call<FileContent>(
+      `/api/files/content?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`,
+    ),
+
+  /**
+   * 在工作区里跑一条命令。
+   *
+   * **命令自己失败不会抛** —— 非零退出是它的输出而不是我们的故障，界面要
+   * 照实显示退出码。只有围栏拒绝、空命令这类才是 4xx。
+   */
+  exec: (root: string, cwd: string, command: string) =>
+    call<ExecResult>('/api/exec', {
+      method: 'POST', body: JSON.stringify({ root, cwd, command }),
+    }),
 
   agents: () => call<{ agents: Agent[] }>('/api/agents'),
 

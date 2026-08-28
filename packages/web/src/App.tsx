@@ -8,12 +8,13 @@ import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { BaseBranchPicker } from '@/components/BaseBranchPicker.tsx'
 import { Column } from '@/components/Column.tsx'
 import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
+import { FileBrowser } from '@/components/FileBrowser.tsx'
 import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
-import { maybe, useT, type Translate } from '@/lib/i18n.tsx'
+import { maybe, useT, type MessageKey, type Translate } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
 import { isUntouchedDraft, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
@@ -24,6 +25,19 @@ import {
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
 const CLOCK_MS = 5_000
+
+/**
+ * 顶栏上那对页签：看板，还是这个项目的文件。
+ *
+ * 文件浏览挂在**项目**上而不是全局：它要逛的是某个仓库，概览里没有"某个"。
+ */
+type Page = 'tasks' | 'files'
+
+/** 页签的顺序与文案。任务在前 —— 那是这个工具的本业。 */
+const PAGES: readonly { key: Page; label: MessageKey }[] = [
+  { key: 'tasks', label: 'header.tabTasks' },
+  { key: 'files', label: 'header.tabFiles' },
+]
 
 /**
  * 领域错误码 → 用户能照做的说明。
@@ -52,6 +66,7 @@ export default function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([])
   // 看哪一堆卡：概览（全部）或某个项目。
   const [view, setView] = useState<View>({ kind: 'overview' })
+  const [page, setPage] = useState<Page>('tasks')
   const [newProject, setNewProject] = useState(false)
   const [deleting, setDeleting] = useState<Project | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
@@ -410,6 +425,32 @@ export default function App(): React.JSX.Element {
             </>
           )}
           <span className="flex-1" />
+
+          {/* 看板 / 文件。文件浏览要逛的是某个仓库，概览里没有"某个"，
+              所以没选定项目时它是灰的 —— 点了才被拒绝更难受。 */}
+          <div className="flex flex-none items-center gap-0.5 rounded-md border border-hairline p-0.5">
+            {PAGES.map(({ key, label }) => {
+              const blocked = key === 'files' && activeProject === null
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  disabled={blocked}
+                  aria-current={page === key}
+                  title={blocked ? t('header.tabFilesBlocked') : undefined}
+                  onClick={() => { setPage(key) }}
+                  className={cn(
+                    'rounded-sm px-2 py-0.5 text-[11px] transition-colors',
+                    page === key ? 'bg-raised text-ink' : 'text-ink-faint hover:text-ink',
+                    blocked && 'opacity-40 hover:text-ink-faint',
+                  )}
+                >
+                  {t(label)}
+                </button>
+              )
+            })}
+          </div>
+
           <ThemeToggle />
         </header>
 
@@ -433,7 +474,19 @@ export default function App(): React.JSX.Element {
           </div>
         )}
 
+        {/* ── 文件浏览 ───────────────────────────────────────── */}
+        {page !== 'files' ? null : activeProject === null ? (
+          <p className="flex flex-1 items-center justify-center px-6 text-center text-ink-faint">
+            {projects.length === 0 ? t('files.noProject') : t('header.tabFilesBlocked')}
+          </p>
+        ) : (
+          // key 让换项目时整个重挂：工作区、目录、打开的文件、终端里跑过的
+          // 命令，没有一样该跟着漂到另一个仓库上去。
+          <FileBrowser key={activeProject.id} project={activeProject} />
+        )}
+
         {/* ── 看板 ───────────────────────────────────────────── */}
+        {page === 'files' ? null : (
         <DndContext
           sensors={sensors}
           onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
@@ -472,6 +525,7 @@ export default function App(): React.JSX.Element {
             )}
           </DragOverlay>
         </DndContext>
+        )}
 
         {/* ── 任务详情：弹窗 ─────────────────────────────────── */}
         {selected === null ? null : (
@@ -522,7 +576,9 @@ export default function App(): React.JSX.Element {
           />
         ) : null}
 
-        {stats === null ? null : <StatsBar stats={stats} />}
+        {/* 统计条只在看板下面。文件页的底边归命令行 —— 两条都贴着，
+            界面下沿会变成一层叠一层的东西。 */}
+        {stats === null || page === 'files' ? null : <StatsBar stats={stats} />}
       </SidebarInset>
     </SidebarProvider>
   )

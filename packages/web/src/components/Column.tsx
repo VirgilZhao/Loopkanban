@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button.tsx'
 import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMN_META, type Column as ColumnKey, type LiveLine, type RunFailure, type Skip, type Task,
+  COLUMN_META, type Column as ColumnKey, type LiveLine, type PullRequest, type RunFailure,
+  type Skip, type Task,
 } from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
 
@@ -27,6 +28,8 @@ interface Props {
   live: Record<string, LiveLine>
   /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
   attachments: Record<string, number>
+  /** 每张卡开过哪些 PR；一条都没有的卡不在里面。 */
+  prs: Record<string, PullRequest[]>
   /** 上一轮没跑成的卡的收场。只有 Review 那一列会有。 */
   failures: Record<string, RunFailure>
   skips: Map<string, Skip>
@@ -38,7 +41,7 @@ interface Props {
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, live, attachments, failures, skips,
+  column, tasks, now, index, selectedId, live, attachments, prs, failures, skips,
   onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const t = useT()
@@ -120,6 +123,7 @@ export function Column({
             selected={selectedId === task.id}
             live={live[task.id]}
             attachments={attachments[task.id]}
+            prs={prs[task.id]}
             failure={failures[task.id]}
             skip={skips.get(task.id)}
             projectName={projectName?.(task.projectId)}

@@ -12,7 +12,7 @@ import {
   type IncomingMessage, type Server, type ServerResponse,
 } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
-import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
+import { basename, extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
@@ -27,10 +27,11 @@ import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
 import type { Attachment, Storage } from '../storage/index.ts'
+import type { TestEnvs } from '../testenv/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
-import { readFilePreview } from './preview.ts'
+import { readFilePreview, resolvePreviewTarget } from './preview.ts'
 import { RunBus } from './bus.ts'
 import { runCommand } from './exec.ts'
 import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
@@ -65,6 +66,11 @@ export interface ServerOptions {
   readonly attachments?: AttachmentStore
   /** 自动认领调度器。不给则界面上没有自动驾驶开关。 */
   readonly scheduler?: Scheduler
+  /**
+   * 一键测试环境。不给则那几条接口一律 503 —— 界面据此把按钮收起来，
+   * 而不是给一个按下去永远失败的按钮。
+   */
+  readonly testEnvs?: TestEnvs
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -221,6 +227,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const runner = options.runner
   const review = options.review
   const scheduler = options.scheduler
+  const testEnvs = options.testEnvs
   const attachmentStore = options.attachments
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
   const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
@@ -297,8 +304,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         const event = storage.lastEvent(runId)
         if (event !== null) live[task.id] = { kind: event.kind, payload: event.payload, at: event.at }
       }
+      // 卡面上要标出"这张卡合过哪几条 PR"，所以一次读完全部 —— 一张卡问
+      // 一次的话，Done 列有多少张卡就是多少个请求。
+      const prs: Record<string, unknown[]> = {}
+      for (const pr of storage.listAllPullRequests()) {
+        (prs[pr.taskId] ??= []).push(pr)
+      }
       sendJson(res, 200, {
-        projects: storage.listProjects(), tasks, live, attachments, failures,
+        projects: storage.listProjects(), tasks, live, attachments, prs, failures,
       }, extraHeaders)
       return
     }
@@ -353,7 +366,69 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * 自己的路径拼接写错 —— 那种 bug 在「只列目录名」时是噪音，在「读文件正文」
      * 和「跑命令」时就是把整台机器摊开。
      */
+    /**
+     * 把一个文件的原始字节直接流给浏览器。
+     *
+     * PDF 与图片是这样出去的，而不是 base64 进 JSON：浏览器自带 PDF 阅读器，
+     * 图片更是给个 URL 就完事，绕一圈 base64 只是凭空胖三分之一再让前端解回来。
+     *
+     * **类型是一份允许清单，不是猜测**：只有图片和 PDF 会内联，别的一律拒绝。
+     * 这些字节和看板同源 —— 一个能内联渲染的 `.html` 就能拿着 cookie 调本机的
+     * 执行接口，那是把「看一眼文件」变成「在你机器上跑任意命令」。`.svg` 同样
+     * 不在清单里，它是能跑脚本的。
+     *
+     * @param path - 已经过围栏校验的绝对路径。
+     * @param name - 下载/内联时报的文件名。
+     */
+    const streamRaw = async (path: string, name: string): Promise<void> => {
+      const mime = mimeOf(name)
+      if (!canInline(mime)) {
+        sendJson(res, 415, { error: 'not-inlineable', detail: `${name} 不是能直接在浏览器里打开的类型` })
+        return
+      }
+      // 先拿 fd 再决定状态码：stat 与 open 之间那道缝里文件可能被删掉，而那时
+      // 头已经发出去了就改不成 404 了。（同附件那条路由，理由见其注释。）
+      const handle = await open(path, 'r').catch(() => null)
+      if (handle === null) {
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${path}` })
+        return
+      }
+      const info = await handle.stat().catch(() => null)
+      if (info?.isFile() !== true) {
+        await handle.close().catch(() => undefined)
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${path}` })
+        return
+      }
+      res.writeHead(200, {
+        'content-type': mime,
+        'content-length': info.size,
+        'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(name)}`,
+        // 不许浏览器自作主张改判类型 —— 上面那份允许清单就白设了。
+        'x-content-type-options': 'nosniff',
+        // 文件随时在被 Agent 改写，缓存住只会让人看到上一版。
+        'cache-control': 'no-store',
+        ...extraHeaders,
+      })
+      const stream = handle.createReadStream()
+      // 读到一半的 I/O 错误改不了状态码，只能掐断连接 —— 但这个监听必须在：
+      // 少了它，一个读错误就是一次 uncaughtException，整个看板跟着没。
+      stream.on('error', (error: unknown) => {
+        console.error(`[loopkanban] 文件读取中断 ${path}:`, error)
+        res.destroy()
+      })
+      res.on('close', () => { stream.destroy() })
+      stream.pipe(res)
+    }
+
     const projectRoots = (): string[] => storage.listProjects().map((project) => project.repoPath)
+
+    /**
+     * 一张卡够得着的目录：它历次执行的 worktree，加上项目仓库。
+     *
+     * 预览与取原始字节两条路由共用它 —— 围栏只算一遍，才不会有一天走岔。
+     */
+    const reachableRoots = (task: Task): string[] =>
+      [...new Set([...storage.listRuns(task.id).map((run) => run.worktreePath), task.repoPath])]
 
     /**
      * 围栏没放行时的应答。
@@ -384,6 +459,23 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 200, { workspaces: await listWorkspaces(project.repoPath) }, extraHeaders)
+      return
+    }
+
+    /**
+     * 某个文件的原始字节。PDF 与图片走这里 —— 正文接口只回文本。
+     *
+     * 围栏与正文接口完全一样，一个字都不放松：能读到正文的地方才能读到字节。
+     */
+    if (method === 'GET' && pathname === '/api/files/raw') {
+      const roots = projectRoots()
+      const askedRoot = url.searchParams.get('root')?.trim() ?? ''
+      const askedPath = url.searchParams.get('path')?.trim() ?? ''
+      const root = await confine(roots, askedRoot)
+      if (root === null) { await refuse(roots, askedRoot, '只能看已登记项目仓库里的文件'); return }
+      const target = await confine([root], askedPath)
+      if (target === null) { await refuse([root], askedPath, '只能看已登记项目仓库里的文件'); return }
+      await streamRaw(target, basename(target))
       return
     }
 
@@ -557,9 +649,16 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const project = storage.getProject(target)
       if (project === null) { sendJson(res, 404, { error: 'project-not-found' }); return }
 
-      const body = await readJsonBody(req) as Partial<{ name: string; baseBranch: string }> | undefined
+      const body = await readJsonBody(req) as
+        (Partial<{ name: string; baseBranch: string; testCommand: string | null }> & Record<string, unknown>)
+        | undefined
       const name = body?.name?.trim()
       const baseBranch = body?.baseBranch?.trim()
+      // 同 PATCH 卡片：缺席是"这次没提到"，显式 null / 空串才是"清空"。
+      // 两者必须分得开，否则改个项目名就会顺手把启动命令抹掉。
+      const testCommand = body !== undefined && 'testCommand' in body
+        ? (body['testCommand'] as string | null) ?? ''
+        : undefined
       if (name !== undefined && name.length === 0) {
         sendJson(res, 400, { error: 'bad-request', detail: '项目名不能为空' })
         return
@@ -582,6 +681,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!storage.updateProject(target, {
         ...(name === undefined ? {} : { name }),
         ...(baseBranch === undefined ? {} : { baseBranch }),
+        ...(testCommand === undefined ? {} : { testCommand }),
       })) {
         sendJson(res, 404, { error: 'project-not-found' })
         return
@@ -618,6 +718,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       // 同 accept / discard / 删卡：状态先落定，不可逆的删除在后。
       // 收拾的只是我们自己建的 worktree 与任务分支，仓库本身一个字不动。
+      for (const task of tasks) await testEnvs?.stop(task.id, 'verdict')
       if (review !== undefined) {
         for (const task of tasks) await review.purge(task, runsOfTask.get(task.id) ?? [])
       }
@@ -720,14 +821,20 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           body: text,
           at: Date.now(),
         })
-        // 在 Review 里留言就是"再改一版"：卡自动回队列，下一次执行带着
-        // 整条讨论走。别的列只是留个话，不动卡的位置。
+        // 在 Review **或 Done** 里留言就是"再改一版"：卡自动回队列，下一次
+        // 执行带着整条讨论走。Done 也算，是因为"合上去才发现还差一条"本来
+        // 就是这张卡的下一轮 —— 另开一张新卡会把讨论、worktree、已经合过的
+        // PR 全丢掉，而那些正是接着干最需要的东西。别的列只是留个话，
+        // 不动卡的位置。
         let moved = false
-        if (current.column === 'review') {
+        if (current.column === 'review' || current.column === 'done') {
           const next = moveTask(current, {
             expectedRevision: current.revision, to: 'ready', now: Date.now(),
           })
           if (next.ok) moved = storage.commitTask(next.value)
+          // 打回就是"这一版不要了，接着改"。那个还开着的测试环境跑的是上一版，
+          // 留着它只会让人对着一个马上就要被改掉的页面继续验。
+          if (moved) await testEnvs?.stop(taskId, 'verdict')
         }
         sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)
         return
@@ -991,6 +1098,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       // 同 accept / discard：状态先落定，不可逆的删除在后。反过来的话一次
       // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
+      // purge 会删掉 worktree，所以跑在里面的测试环境必须先停。
+      await testEnvs?.stop(task.id, 'verdict')
       if (review !== undefined) await review.purge(task, runs)
       // 附件的字节也跟着卡一起走。库里的记录已经在事务里删掉了。
       if (attachmentStore !== undefined) await attachmentStore.removeTask(task.id)
@@ -1026,6 +1135,11 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!storage.commitTask(moved.value)) {
         sendJson(res, 409, { error: 'revision-conflict', detail: '提交时已被他人改动，请重读后重试' })
         return
+      }
+      // 用拖的把卡挪出 Review，跟按下验收按钮是同一个意思：这张卡判完了。
+      // 只认"离开 Review"，列内换位置不动它 —— 那只是在排序。
+      if (task.column === 'review' && moved.value.column !== 'review') {
+        await testEnvs?.stop(task.id, 'verdict')
       }
       sendJson(res, 200, { task: moved.value }, extraHeaders)
       return
@@ -1095,28 +1209,170 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * 自己的 worktree，浏览器打不开。够得着的范围只有这张卡历次执行的
      * worktree 与项目仓库，越界一律拒绝（细则见 `preview.ts`）。
      */
+    /**
+     * 同一份文件的原始字节。PDF 与图片走这里 —— 预览接口只回文本与文档树。
+     *
+     * 围栏跟预览接口共用 `resolvePreviewTarget`，不是各写一遍：这两条路
+     * 只要有一天走岔，其中一条就是个能读任意文件的洞。
+     */
+    const rawOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file\/raw$/)
+    if (method === 'GET' && rawOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(rawOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      const found = await resolvePreviewTarget(url.searchParams.get('path') ?? '', reachableRoots(task))
+      if (!found.ok) {
+        sendJson(res, found.reason === 'path-outside-workspace' ? 422 : 404, {
+          error: found.reason, detail: found.detail,
+        })
+        return
+      }
+      // 读的是解完符号链接那条（真正的文件），报的名字用原路径的末段。
+      await streamRaw(found.target.real, basename(found.target.path))
+      return
+    }
+
     const fileOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file$/)
     if (method === 'GET' && fileOf !== null) {
       const taskId = asTaskId(decodeURIComponent(fileOf))
       const task = storage.getTask(taskId)
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
 
-      const roots = [...new Set([
-        ...storage.listRuns(taskId).map((run) => run.worktreePath),
-        task.repoPath,
-      ])]
-      const found = await readFilePreview(url.searchParams.get('path') ?? '', roots)
+      const found = await readFilePreview(url.searchParams.get('path') ?? '', reachableRoots(task))
       if (!found.ok) {
         // 越界是「这个请求本身不成立」，不是「东西不在」——分开报，不然
         // 界面只能笼统地说一句打不开。
         const status = found.reason === 'path-outside-workspace' ? 422
           : found.reason === 'not-text' ? 415
+          // 「这是份 Word 但读不出来」跟「这个格式看不了」不是一回事，
+          // 混成同一个码，界面就只能笼统地说一句打不开。
+          : found.reason === 'bad-document' ? 422
+          : found.reason === 'too-large' ? 413
           : found.reason === 'unreadable' ? 403
           : 404
         sendJson(res, status, { error: found.reason, detail: found.detail })
         return
       }
       sendJson(res, 200, { file: found.file }, extraHeaders)
+      return
+    }
+
+    /*
+     * ── Pull Request ────────────────────────────────────────
+     *
+     * GET  列出这张卡的 PR，外加"这个仓库能不能开 PR"。
+     * POST 开一条：提交 → 跟上基线 → 推 → gh pr create。合不合由人在 GitHub
+     *      上决定，我们只在它真的合上之后把卡收进 Done。
+     * POST …/sync 问一遍现在怎么样了，顺带做那次收尾。
+     */
+    const prSync = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/prs\/sync$/)
+    if (method === 'POST' && prSync !== null) {
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+      const taskId = asTaskId(decodeURIComponent(prSync))
+      if (storage.getTask(taskId) === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const result = await review.syncPullRequests(taskId)
+      sendJson(res, 200, {
+        prs: storage.listPullRequests(taskId),
+        collected: result.collected,
+        task: storage.getTask(taskId),
+      }, extraHeaders)
+      return
+    }
+
+    const prsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/prs$/)
+    if (prsOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(prsOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, {
+          prs: storage.listPullRequests(taskId),
+          capability: await review.pullRequestCapability(task.repoPath),
+        }, extraHeaders)
+        return
+      }
+
+      if (method === 'POST') {
+        const result = await review.openPullRequest(taskId)
+        if (!result.ok) {
+          /*
+           * 冲突是**有下一步**的失败：改动已经提交在分支上，冲突原样留在
+           * 工作区里，卡也已经回了队列。既然本机就有 Agent，直接把这一轮派
+           * 出去 —— 让用户回看板再点一次"派活"，只是把一个我们已经知道该做
+           * 的动作推给他。派不出去（没装 CLI、卡刚被人动过）也不改变结论：
+           * 冲突这件事本身已经如实报了。
+           */
+          let dispatched: string | undefined
+          if (result.reason === 'merge-conflict' && result.requeued === true && runner !== undefined) {
+            const started = await runner.start(taskId)
+            if (started.ok) dispatched = started.run.id
+          }
+          sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {
+            error: result.reason,
+            detail: result.detail,
+            ...(result.files === undefined ? {} : { files: result.files }),
+            ...(result.requeued === undefined ? {} : { requeued: result.requeued }),
+            ...(dispatched === undefined ? {} : { dispatched }),
+          })
+          return
+        }
+        sendJson(res, 201, {
+          pr: result.pr,
+          created: result.created,
+          commit: result.commit,
+          prs: storage.listPullRequests(taskId),
+          task: storage.getTask(taskId),
+        }, extraHeaders)
+        return
+      }
+    }
+
+    /*
+     * ── 一键测试环境：起 / 看 / 停 ───────────────────────────
+     *
+     * 起在这张卡自己的 worktree 里，端口由 host 分配。**事件流那条连接就是
+     * 心跳** —— 关掉面板、关掉标签页之后没人再订阅，环境会自己被收掉，
+     * 不必让人记得回来按停止。
+     */
+    const envOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/testenv$/)
+    if (envOf !== null) {
+      if (testEnvs === undefined) { sendJson(res, 503, { error: 'no-testenv' }); return }
+      const taskId = asTaskId(decodeURIComponent(envOf))
+
+      if (method === 'GET') {
+        // 没有环境不是错：界面据此显示"未启动"。给 404 会逼前端把正常状态
+        // 当成异常来处理。
+        sendJson(res, 200, { env: testEnvs.view(taskId) }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const started = await testEnvs.start(taskId)
+        if (!started.ok) {
+          sendJson(res, started.reason === 'task-not-found' ? 404 : 422, {
+            error: started.reason, detail: started.detail,
+          })
+          return
+        }
+        sendJson(res, 201, { env: started.env }, extraHeaders)
+        return
+      }
+      if (method === 'DELETE') {
+        // 本来就没有环境也是 200：那是"它已经停了"这个完全正常的结果，同上面的
+        // GET。回 404 的话前端只能把它当异常抛出来，而 404 的响应体里没有
+        // `error` 字段，界面最后显示的是一句没有对应文案的 "unknown"。
+        const stopped = await testEnvs.stop(taskId, 'manual')
+        sendJson(res, 200, { stopped, env: testEnvs.view(taskId) }, extraHeaders)
+        return
+      }
+    }
+
+    const envStream = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/testenv\/events$/)
+    if (method === 'GET' && envStream !== null) {
+      if (testEnvs === undefined) { sendJson(res, 503, { error: 'no-testenv' }); return }
+      streamTestEnv(req, res, asTaskId(decodeURIComponent(envStream)), testEnvs)
       return
     }
 
@@ -1127,6 +1383,12 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const taskId = asTaskId(decodeURIComponent(verdict[1] as string))
       const body = await readJsonBody(req) as { merge?: boolean } | undefined
 
+      /*
+       * 测试环境由 Review 自己在动 worktree 之前收掉（`ReviewOptions.beforeMutate`）。
+       * **不在这儿先斩后奏**：验收会因为主工作区脏、卡被人改过这些原因被拒，
+       * 而在门口就把环境杀掉的话，一次被拒的验收会顺手弄没人正在用的试跑环境，
+       * 让他重新装一遍依赖 —— 明明这张卡一个字都没动过。
+       */
       const result = verdict[2] === 'accept'
         ? await review.accept(taskId, body?.merge === true)
         : await review.discard(taskId)
@@ -1283,6 +1545,44 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     return true
   }
 
+  /**
+   * 测试环境的事件流：状态变化与日志。
+   *
+   * 与 Run 的事件流有一处根本不同：**这条连接是有副作用的**。它是"还有人在看"
+   * 的唯一凭据，断开即开始收尸倒计时（见 `TestEnvs.subscribe`）。所以这里
+   * 一定要把 `close` 接好 —— 漏掉的话，那个环境会一直以为有人看着。
+   */
+  function streamTestEnv(
+    req: IncomingMessage,
+    res: ServerResponse,
+    taskId: ReturnType<typeof asTaskId>,
+    envs: TestEnvs,
+  ): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+
+    const lastHeader = req.headers['last-event-id']
+    const lastSeq = typeof lastHeader === 'string' ? Number.parseInt(lastHeader, 10) : 0
+    const from = Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0
+
+    const unsubscribe = envs.subscribe(taskId, from, (event) => {
+      res.write(`id: ${String(event.seq)}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`)
+    })
+
+    const heartbeat = setInterval(() => { res.write(': ping\n\n') }, heartbeatMs)
+    heartbeat.unref()
+    const cleanup = (): void => {
+      clearInterval(heartbeat)
+      unsubscribe()
+    }
+    req.on('close', cleanup)
+    res.on('close', cleanup)
+  }
+
   function streamRunEvents(req: IncomingMessage, res: ServerResponse, id: ReturnType<typeof asRunId>): void {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -1328,10 +1628,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     token,
     port,
     bus,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => { error === undefined ? resolve() : reject(error) })
-      server.closeAllConnections()
-    }),
+    close: async () => {
+      // 端口是全局资源，进程树是真金白银的 CPU。server 一关就没有任何界面能
+      // 再找到这些环境了，留着它们等于制造孤儿。
+      await testEnvs?.stopAll('shutdown')
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { error === undefined ? resolve() : reject(error) })
+        server.closeAllConnections()
+      })
+    },
   }
 }
 

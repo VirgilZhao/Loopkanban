@@ -44,12 +44,15 @@ describe('canTransition', () => {
     expect(canTransition('review', 'ready')).toBe(true)
     // 废弃成果、回想法池重新想需求：无租约状态之间的整理，该放行。
     expect(canTransition('review', 'backlog')).toBe(true)
+    // Done 里再说一句就是"再改一版"：卡回队列重跑，成果与 PR 记录都留着。
+    expect(canTransition('done', 'ready')).toBe(true)
   })
 
   it('拦住乱跳 —— 否则「租约属于谁」无法推理', () => {
     expect(canTransition('backlog', 'running')).toBe(false)
     expect(canTransition('ready', 'done')).toBe(false)
-    expect(canTransition('done', 'ready')).toBe(false)
+    // done 只开去 ready 那一个口子 —— 倒回想法池等于把做完的事说成没做过。
+    expect(canTransition('done', 'backlog')).toBe(false)
     expect(canTransition('running', 'done')).toBe(false)
     // running → ready 是系统回收租约的专属通道，人不能走。
     expect(canTransition('running', 'ready')).toBe(false)
@@ -88,6 +91,22 @@ describe('moveTask', () => {
     })
     const result = moveTask(running, { expectedRevision: 1, to: 'review', now: T0 })
     expect(result.ok && result.value.lease).toBeUndefined()
+  })
+
+  it('进 Done 时盖上完成时间 —— Done 列按它从新到旧排', () => {
+    const result = moveTask(task({ column: 'review' }), { expectedRevision: 1, to: 'done', now: T0 + 7 })
+    expect(result.ok && result.value.doneAt).toBe(T0 + 7)
+  })
+
+  it('没进 Done 的卡不带完成时间', () => {
+    const result = moveTask(task({ column: 'running' }), { expectedRevision: 1, to: 'review', now: T0 })
+    expect(result.ok && result.value.doneAt).toBeUndefined()
+  })
+
+  it('done → done 是列内重排，不重写完成时间', () => {
+    const done = task({ column: 'done', doneAt: T0 })
+    const result = moveTask(done, { expectedRevision: 1, to: 'done', position: 9, now: T0 + 100_000 })
+    expect(result.ok && result.value.doneAt).toBe(T0)
   })
 })
 

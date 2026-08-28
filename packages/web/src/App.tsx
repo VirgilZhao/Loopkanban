@@ -16,10 +16,11 @@ import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { explain, useT, type MessageKey } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
-import { isUntouchedDraft, taskTitle } from '@/lib/task.ts'
+import { doneOrder, isUntouchedDraft, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunFailure,
+  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type PullRequest,
+  type RunFailure,
   type RunStats, type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
@@ -64,6 +65,9 @@ export default function App(): React.JSX.Element {
   const [live, setLive] = useState<Record<string, LiveLine>>({})
   // 每张卡挂了几个附件，跟着看板轮询一起来 —— 卡上那枚回形针靠它。
   const [attachments, setAttachments] = useState<Record<string, number>>({})
+  // 每张卡开过哪些 PR，同样跟着轮询来 —— Done 的卡要在卡面上标出它是靠
+  // 哪几条 PR 进主干的，不必点开。
+  const [prs, setPrs] = useState<Record<string, PullRequest[]>>({})
   // Review 里上一轮没跑成的卡。那一列成败同处，不标出来就得一张张点开看。
   const [failures, setFailures] = useState<Record<string, RunFailure>>({})
   // 看板自己的那条通知：拖拽被拒、改项目、探测 CLI。**任务弹窗里的错误不走
@@ -88,7 +92,7 @@ export default function App(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     const [
-      { tasks: loaded, projects: known, live: lines, attachments: clips, failures: broken },
+      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls, failures: broken },
       state, summary,
     ] = await Promise.all([
       api.state(),
@@ -99,6 +103,7 @@ export default function App(): React.JSX.Element {
     setProjects(known)
     setLive(lines)
     setAttachments(clips)
+    setPrs(pulls)
     setFailures(broken)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
@@ -192,6 +197,10 @@ export default function App(): React.JSX.Element {
       grouped[task.column].push(task)
     }
     for (const list of Object.values(grouped)) list.sort((a, b) => a.position - b.position)
+    // Done 是唯一不按 position 排的列：那里的 position 是这张卡在 Review 里
+    // 留下的残值，只反映当初排队的先后，作为"完成清单"的顺序毫无意义。
+    // 按完成时间从新到旧 —— 刚做完的在最上面，往下就是越来越旧的历史。
+    grouped.done.sort((a, b) => doneOrder(b) - doneOrder(a))
     return grouped
   }, [tasks, showArchived, view])
 
@@ -501,6 +510,7 @@ export default function App(): React.JSX.Element {
                 selectedId={selectedId}
                 live={live}
                 attachments={attachments}
+                prs={prs}
                 failures={failures}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}

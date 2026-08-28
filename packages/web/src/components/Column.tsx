@@ -40,6 +40,10 @@ export function Column({
   const { setNodeRef, isOver } = useDroppable({ id: column })
   const meta = COLUMN_META[column]
   const Icon = COLUMN_ICON[column]
+  // 真有 Agent 在跑时，Running 的图标才转。租约过期的卡是"待回收"，不是在跑 ——
+  // 让它转下去就是在演一个已经死掉的进程。空列同理：一个空转的转圈是假信号。
+  const spinning = column === 'running'
+    && tasks.some((task) => task.lease !== undefined && task.lease.expiresAt > now)
 
   return (
     <section
@@ -54,7 +58,12 @@ export function Column({
     >
       {/* 列头：图标 + 列名 + 一句说明；右侧是新建入口与计数章。 */}
       <header className="flex flex-none items-start gap-2 px-3.5 pb-3 pt-3.5">
-        <Icon className={cn('mt-px size-4 flex-none text-ink-faint', column === 'running' && 'text-sodium')} />
+        <Icon className={cn(
+          'mt-px size-4 flex-none text-ink-faint',
+          column === 'running' && 'text-sodium',
+          // 比默认的一圈一秒慢一半 —— 这块界面上唯二恒动的东西，急不得。
+          spinning && 'animate-spin [animation-duration:2s] motion-reduce:animate-none',
+        )} />
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-semibold leading-none text-ink">{meta.label}</h2>
           <p className="mt-1.5 truncate text-xs text-ink-faint">{t(`column.${column}.hint`)}</p>

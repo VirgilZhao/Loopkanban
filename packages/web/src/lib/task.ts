@@ -32,3 +32,18 @@ export function isUntouchedDraft(task: Pick<Task, 'revision' | 'description' | '
     && task.description.trim().length === 0
     && task.acceptance.every((item) => item.trim().length === 0)
 }
+
+/**
+ * 卡片右下角那个计时从哪一刻起算。
+ *
+ * running 的卡从**拿到租约那一刻**起算，其余的卡看 `updatedAt`。
+ *
+ * 不能一律用 `updatedAt`：长任务每 30 秒续一次租，续租是一次真实的行更新，
+ * `updatedAt` 会跟着往前走 —— 于是跑了一小时的卡在看板上永远显示"11s"，
+ * 那个数字看着像在跑，其实只是在数心跳。`acquiredAt` 在整个 Run 里不变，
+ * 打回重做换来新租约时才重新起算，那正是"这一轮跑了多久"。
+ */
+export function taskClockFrom(task: Pick<Task, 'column' | 'lease' | 'updatedAt'>): number {
+  if (task.column === 'running' && task.lease !== undefined) return task.lease.acquiredAt
+  return task.updatedAt
+}

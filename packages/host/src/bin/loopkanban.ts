@@ -23,6 +23,7 @@ import { Runner } from '../runner/index.ts'
 import { Scheduler } from '../scheduler/index.ts'
 import { installService, planService, uninstallService, type ServicePlan } from '../service/index.ts'
 import { Storage } from '../storage/index.ts'
+import { loadModelCatalog, mergeModels } from '../agents/models-dev.ts'
 import { detectBaseBranch } from '../worktree/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -234,7 +235,22 @@ async function main(): Promise<void> {
   console.log(C.bold('\n  LOOPKANBAN') + C.dim('  agent dispatch\n'))
 
   // ── 探测本机 CLI ─────────────────────────────────────────
-  const agents = await detectAgents()
+  const detected = await detectAgents()
+
+  /*
+   * 给 claude 与 codex 补上模型清单。
+   *
+   * 这是整个程序**唯一**的对外请求（别处只连 127.0.0.1），所以：一天最多一次、
+   * 结果落盘、`--no-models` 可以彻底关掉，取不到就当没这回事继续跑。
+   * opencode 不在此列 —— 它自己的 `models` 子命令比任何目录都准。
+   */
+  const catalog = process.argv.includes('--no-models')
+    ? {}
+    : await loadModelCatalog({ cachePath: join(dir, 'models-dev.json') })
+  const agents = detected.map((agent) => ({
+    ...agent,
+    caps: { ...agent.caps, models: mergeModels(agent.caps.models, catalog[agent.provider.id] ?? []) },
+  }))
   if (agents.length === 0) {
     console.log(`  ${C.red('✗')} 未探测到任何 Agent CLI（claude / codex / opencode）`)
     console.log(C.dim('    装好其中之一再来，任务需要它们来执行。\n'))
@@ -249,6 +265,7 @@ async function main(): Promise<void> {
     console.log(
       `  ${C.green('●')} ${C.bold(provider.id.padEnd(8))} ${caps.version.padEnd(24)}`
       + C.dim(caps.bin)
+      + (caps.models.length > 0 ? C.dim(`  ${String(caps.models.length)} 个模型`) : '')
       + (missing.length > 0 ? ` ${C.amber(missing.join(' '))}` : ''),
     )
   }

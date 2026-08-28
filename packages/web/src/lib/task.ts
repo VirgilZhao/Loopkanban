@@ -70,3 +70,42 @@ export function taskClockFrom(task: Pick<Task, 'column' | 'lease' | 'doneAt' | '
 export function doneOrder(task: Pick<Task, 'doneAt' | 'updatedAt'>): number {
   return task.doneAt ?? task.updatedAt
 }
+
+/**
+ * 一个项目当下的动静。
+ *
+ * 归档的卡一概不算 —— 归档就是从视野里拿走，边栏上的计数、灯和角标都跟着
+ * 这条规矩走。
+ */
+export interface ProjectActivity {
+  /** 未归档的卡总数，也就是项目行右边那个计数。 */
+  total: number
+  /** 排着队等执行位的。 */
+  ready: number
+  /** 此刻真的有 Agent 在跑的。 */
+  running: number
+  /** 跑完了、等人看一眼的。 */
+  review: number
+}
+
+/**
+ * 按项目数一遍卡都停在哪儿。
+ *
+ * 边栏要在一行里同时回答三件事："这个项目有多少卡"、"它现在动着吗"、
+ * "有没有东西在等我"。三个数一趟数完，省得为每个问题各扫一遍任务表。
+ */
+export function projectActivity(
+  tasks: readonly Pick<Task, 'projectId' | 'column' | 'archivedAt'>[],
+): Record<string, ProjectActivity> {
+  const byProject: Record<string, ProjectActivity> = {}
+  for (const task of tasks) {
+    if (task.archivedAt !== undefined) continue
+    const entry = byProject[task.projectId] ?? { total: 0, ready: 0, running: 0, review: 0 }
+    entry.total += 1
+    if (task.column === 'ready' || task.column === 'running' || task.column === 'review') {
+      entry[task.column] += 1
+    }
+    byProject[task.projectId] = entry
+  }
+  return byProject
+}

@@ -258,15 +258,27 @@ export const api = {
    * 没变就别提它，免得白白顶掉一个 revision。**这个口子只认这两个字段**，
    * 所以类型也只开这两个：写成整个 TaskEdit 的话，多送的描述会被静静吃掉。
    */
-  comment: (taskId: string, body: string, next: NextRound = {}) =>
+  comment: (taskId: string, body: string, next: NextRound = {}, attachmentIds: readonly string[] = []) =>
     call<{ comments: TaskComment[]; requeued: boolean }>(
       `/api/tasks/${encodeURIComponent(taskId)}/comments`,
-      { method: 'POST', body: JSON.stringify({ body, ...clearable(next) }) },
+      {
+        method: 'POST',
+        // 附件是先传好的（见 `upload` 的 `draft`），这里只把它们认领给这句话。
+        body: JSON.stringify({ body, ...clearable(next), ...(attachmentIds.length === 0 ? {} : { attachmentIds }) }),
+      },
     ),
 
-  /** 一张卡的附件，按上传顺序。 */
-  attachments: (taskId: string) =>
-    call<{ attachments: Attachment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/attachments`),
+  /**
+   * 一张卡的附件，按上传顺序。
+   *
+   * @param scope - `spec` 是需求带的；`draft` 是讨论里传上来、还没跟着
+   *   留言发出去的那些 —— 重新打开面板时要拿它把草稿摆回去，否则人只会
+   *   以为传丢了然后再传一遍。
+   */
+  attachments: (taskId: string, scope: 'spec' | 'draft' = 'spec') =>
+    call<{ attachments: Attachment[] }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/attachments${scope === 'draft' ? '?scope=draft' : ''}`,
+    ),
 
   /**
    * 传一个附件。
@@ -278,8 +290,9 @@ export const api = {
    * `content-type` 显式给 file.type，且**必须绕开 `call`** —— 它会给所有
    * 请求都盖上 `application/json`，那样服务端看到的类型全是错的。
    */
-  upload: async (taskId: string, file: File): Promise<Attachment> => {
-    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/attachments`, {
+  upload: async (taskId: string, file: File, scope: 'spec' | 'draft' = 'spec'): Promise<Attachment> => {
+    const path = `/api/tasks/${encodeURIComponent(taskId)}/attachments${scope === 'draft' ? '?scope=draft' : ''}`
+    const res = await fetch(path, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {

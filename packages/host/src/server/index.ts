@@ -12,8 +12,8 @@ import type { AddressInfo } from 'node:net'
 import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
-  type Column, type Task, type TaskEdit,
+  archiveTask, asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
+  unarchiveTask, type Column, type Task, type TaskEdit,
 } from '@openkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
@@ -331,6 +331,33 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    // ── 归档 / 取消归档（CAS）───────────────────────────────
+    const shelf = /^\/api\/tasks\/([^/]+)\/(archive|unarchive)$/.exec(pathname)
+    if (method === 'POST' && shelf !== null) {
+      const task = storage.getTask(asTaskId(decodeURIComponent(shelf[1] as string)))
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const body = await readJsonBody(req) as { expectedRevision?: number } | undefined
+      if (body?.expectedRevision === undefined) {
+        sendJson(res, 400, { error: 'bad-request', detail: '需要 expectedRevision' })
+        return
+      }
+
+      const apply = shelf[2] === 'archive' ? archiveTask : unarchiveTask
+      const next = apply(task, { expectedRevision: body.expectedRevision, now: Date.now() })
+      if (!next.ok) {
+        sendJson(res, next.reason === 'revision-conflict' ? 409 : 422, {
+          error: next.reason, detail: next.detail,
+        })
+        return
+      }
+      if (!storage.commitTask(next.value)) {
+        sendJson(res, 409, { error: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' })
+        return
+      }
+      sendJson(res, 200, { task: next.value }, extraHeaders)
+      return
+    }
+
     // ── 派活 ────────────────────────────────────────────────
     const runTarget = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/run$/)
     if (method === 'POST' && runTarget !== null) {
@@ -367,13 +394,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
       const taskId = asTaskId(decodeURIComponent(verdict[1] as string))
       const body = await readJsonBody(req) as
-        { merge?: boolean; feedback?: string; to?: 'backlog' | 'failed' } | undefined
+        { merge?: boolean; feedback?: string } | undefined
 
       const result = verdict[2] === 'accept'
         ? await review.accept(taskId, body?.merge === true)
         : verdict[2] === 'request-changes'
           ? review.requestChanges(taskId, body?.feedback ?? '')
-          : await review.discard(taskId, body?.to ?? 'failed')
+          : await review.discard(taskId)
 
       if (!result.ok) {
         sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {

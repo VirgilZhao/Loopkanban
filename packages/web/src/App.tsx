@@ -3,6 +3,7 @@ import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors,
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
+import { Archive } from 'lucide-react'
 import { api, ApiError } from '@/api.ts'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import { Column } from '@/components/Column.tsx'
@@ -37,6 +38,10 @@ const ERROR_HINT: Record<string, string> = {
   'dirty-worktree': '你的主工作区有未提交改动，先处理干净再合并。改动已经提交在任务分支上，不会丢。',
   'wrong-branch': '你的主工作区不在基线分支上。改动已经提交在任务分支上，切回去再合并即可。',
   'no-run': '这张卡还没有执行记录。',
+  'no-worktree': '这次执行没留下工作区（多半是起进程就失败了），没有东西可验收 —— 打回重跑或废弃。',
+  'task-archived': '这张卡已归档。要动它先取消归档 —— 归档的卡是冻结的，不会被自动认领。',
+  'already-archived': '这张卡已经归档了。',
+  'not-archived': '这张卡没有归档。',
 }
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
@@ -60,6 +65,8 @@ export default function App(): React.JSX.Element {
   const [scheduler, setScheduler] = useState<SchedulerState | null>(null)
   const [stats, setStats] = useState<RunStats | null>(null)
   const [schedulerBusy, setSchedulerBusy] = useState(false)
+  // 归档默认不显示 —— 归档的意义就是从视野里拿走。
+  const [showArchived, setShowArchived] = useState(false)
   // 上一次看到的列，用来判断"刚刚有卡进了 Review/Failed"，据此发通知。
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
@@ -84,7 +91,7 @@ export default function App(): React.JSX.Element {
     return () => { clearInterval(timer) }
   }, [])
 
-  // Run 结束时卡片会自己换列（running → review/failed），界面必须跟上。
+  // Run 结束时卡片会自己换列（running → review），界面必须跟上。
   // 有 Agent 在跑时盯紧一点，闲着时放慢，别白烧 CPU。
   useEffect(() => {
     const busy = tasks.some((t) => t.column === 'running')
@@ -100,8 +107,9 @@ export default function App(): React.JSX.Element {
     return () => { clearTimeout(timer) }
   }, [notice])
 
-  // 无人值守的意义就在于你不用盯着。卡片进 Review 或 Failed 时推一条桌面通知,
+  // 无人值守的意义就在于你不用盯着。卡片进 Review 时推一条桌面通知，
   // 否则"关掉浏览器去睡觉"这件事就落不了地。
+  // 成功和失败都走这一条 —— 两种结果都要人回来看一眼。
   useEffect(() => {
     const previous = seenColumns.current
     const first = previous.size === 0
@@ -109,11 +117,8 @@ export default function App(): React.JSX.Element {
       const before = previous.get(task.id)
       previous.set(task.id, task.column)
       if (first || before === undefined || before === task.column) continue
-      if (task.column !== 'review' && task.column !== 'failed') continue
-      notify(
-        task.column === 'review' ? '待验收' : '执行失败',
-        task.subject,
-      )
+      if (task.column !== 'review' || task.archivedAt !== undefined) continue
+      notify('待验收', task.subject)
     }
   }, [tasks])
 
@@ -125,12 +130,17 @@ export default function App(): React.JSX.Element {
     return () => { window.removeEventListener('keydown', onKey) }
   }, [])
 
+  const archivedCount = useMemo(() => tasks.filter((t) => t.archivedAt !== undefined).length, [tasks])
+
   const byColumn = useMemo(() => {
     const grouped = Object.fromEntries(COLUMNS.map((c) => [c, [] as Task[]])) as Record<ColumnKey, Task[]>
-    for (const task of tasks) grouped[task.column].push(task)
+    for (const task of tasks) {
+      if (task.archivedAt !== undefined && !showArchived) continue
+      grouped[task.column].push(task)
+    }
     for (const list of Object.values(grouped)) list.sort((a, b) => a.position - b.position)
     return grouped
-  }, [tasks])
+  }, [tasks, showArchived])
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null
   const dragged = tasks.find((t) => t.id === draggingId) ?? null
@@ -181,6 +191,8 @@ export default function App(): React.JSX.Element {
     if (overId === event.active.id) return
     const task = tasks.find((t) => t.id === event.active.id)
     if (task === undefined) return
+    // 归档的卡是冻结的。让它乐观地飞过去再被服务端弹回来只会让人以为是 bug。
+    if (task.archivedAt !== undefined) return
 
     // 落点可能是一张卡（列内插到它前面）或一整列（放到列尾）。
     const overTask = tasks.find((t) => t.id === overId)
@@ -262,6 +274,21 @@ export default function App(): React.JSX.Element {
         </div>
 
         <span className="flex-1" />
+
+        {/* 归档开关。计数常驻 —— 不然被收走的卡就真的无迹可寻了。 */}
+        <button
+          onClick={() => { setShowArchived((on) => !on) }}
+          title={showArchived ? '隐藏归档的卡' : '显示归档的卡'}
+          className={cn(
+            'chrome-label flex items-center gap-1.5 rounded-md border px-2 py-1 transition-colors',
+            showArchived
+              ? 'border-sodium-deep !text-sodium'
+              : 'border-hairline !text-ink-faint hover:border-sodium hover:!text-sodium',
+          )}
+        >
+          <Archive className="size-2.5" />归档
+          <span className="mono text-[10px]">{archivedCount}</span>
+        </button>
 
         <ThemeToggle />
 

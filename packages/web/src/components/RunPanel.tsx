@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
-import { Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert } from 'lucide-react'
+import {
+  Archive, ArchiveRestore, Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert,
+} from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
@@ -64,6 +66,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
   const [events, setEvents] = useState<StreamEvent[]>([])
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
+  const archived = task.archivedAt !== undefined
 
   // 依赖 revision 而不只是 id：派活之后卡片 id 不变，只有 revision 会动。
   // 只看 id 的话，刚派出去的 Run 永远不会被拉到，事件流会一直空着。
@@ -150,7 +153,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="tag">{task.id}</span>
-              <span className="lamp" data-state={task.column} />
+              <span className="lamp" data-state={archived ? 'idle' : task.column} />
               <span className="chrome-label !text-[9px]">{task.column}</span>
             </div>
             <DialogTitle asChild>
@@ -159,6 +162,24 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
             <DialogDescription className="sr-only">任务详情与执行面板</DialogDescription>
           </div>
           <button
+            disabled={busy || task.column === 'running'}
+            title={task.column === 'running' ? '正在执行的卡片不能归档，先终止执行' : undefined}
+            onClick={() => {
+              void act(() => (archived
+                ? api.unarchive(task.id, task.revision)
+                : api.archive(task.id, task.revision)))
+            }}
+            className={cn(
+              'chrome-label flex items-center gap-1 rounded-md border border-hairline px-1.5 py-0.5',
+              'transition-colors hover:border-sodium hover:text-sodium',
+              'disabled:cursor-not-allowed disabled:opacity-40',
+            )}
+          >
+            {archived
+              ? <><ArchiveRestore className="size-2.5" />取出</>
+              : <><Archive className="size-2.5" />归档</>}
+          </button>
+          <button
             onClick={onClose}
             className="chrome-label rounded-md border border-hairline px-1.5 py-0.5 transition-colors hover:border-hairline-bright hover:text-ink"
           >
@@ -166,8 +187,21 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
           </button>
         </header>
 
+        {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"这一个动作。
+            与其把按钮摆在那儿等服务端拒绝，不如直接换成一条说明。 */}
+        {archived ? (
+          <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-3 py-2">
+            <Archive className="mt-[2px] size-3 flex-none text-ink-faint" />
+            <p className="min-w-0 text-[11px] leading-snug text-ink-faint">
+              已归档{task.archivedAt === undefined ? '' : ` · ${new Date(task.archivedAt).toLocaleString()}`}。
+              它留在 {task.column} 列但不出现在看板上，也不会被自动认领。
+              取出后回到原位。
+            </p>
+          </div>
+        ) : null}
+
         {/* 派活 / 取消。只有 ready 的卡能派，running 的能停。 */}
-        {task.column === 'ready' || task.column === 'running' ? (
+        {!archived && (task.column === 'ready' || task.column === 'running') ? (
           <div className="flex items-center gap-1.5 border-b border-hairline px-3 py-2">
             {task.column === 'ready' ? (
               <>
@@ -232,8 +266,23 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
         )}
 
         {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
-        {task.column === 'review' ? (
+        {!archived && task.column === 'review' ? (
           <div className="border-b border-hairline px-3 py-2">
+            {/* 失败的执行也停在这一列，所以必须一眼看出这次是成是败 ——
+                否则"通过"按钮会摆在一堆没跑完的活旁边。 */}
+            {latest !== undefined && latest.status !== 'completed' ? (
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-2 py-1.5">
+                <TriangleAlert className="mt-[2px] size-3 flex-none text-lamp-fail" />
+                <p className="min-w-0 text-[11px] leading-snug text-lamp-fail">
+                  这次执行{latest.status === 'aborted' ? '被终止' : '失败'}了。
+                  {latest.diagnostic === undefined ? null : (
+                    <span className="mono block break-words">{latest.diagnostic}</span>
+                  )}
+                  看完日志后打回重跑，或者废弃。
+                </p>
+              </div>
+            ) : null}
+
             <div className="flex flex-wrap items-center gap-1.5">
               <Action
                 icon={<Check className="size-2.5" />} label="通过" tone="ok" busy={busy}
@@ -246,7 +295,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               <span className="flex-1" />
               <Action
                 icon={<Trash2 className="size-2.5" />} label="废弃" tone="fail" busy={busy}
-                onClick={() => { void act(() => api.discard(task.id, 'failed')) }}
+                onClick={() => { void act(() => api.discard(task.id)) }}
               />
             </div>
 
@@ -273,7 +322,8 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               />
             </div>
             <p className="cjk-label mt-1.5 !text-[10px] !text-ink-faint/70">
-              通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区。
+              通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区；
+              废弃会删掉分支并把卡退回 Backlog。
             </p>
           </div>
         ) : null}

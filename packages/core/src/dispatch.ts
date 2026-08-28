@@ -71,6 +71,8 @@ function pickProvider(task: Task, available: readonly string[]): string | null {
 export function planDispatch(input: DispatchInput): DispatchPlan {
   const { tasks, availableProviders, limits, now } = input
 
+  // 归档的 done 卡照样算"依赖已完成"：把做完的东西收进架子，不该让它的
+  // 下游重新被卡住。
   const completed = new Set<TaskId>(tasks.filter((t) => t.column === 'done').map((t) => t.id))
 
   const reclaimable: TaskId[] = []
@@ -92,8 +94,10 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
   const dispatches: Dispatch[] = []
   const skipped: Skip[] = []
 
+  // 归档的卡直接排除，也不进 skipped —— skipped 是拿来回答"我看得见的卡
+  // 为什么不动"的，而归档的卡本来就不在看板上，没有什么要解释。
   const candidates = tasks
-    .filter((t) => t.column === 'ready')
+    .filter((t) => t.column === 'ready' && t.archivedAt === undefined)
     .slice()
     .sort((a, b) => a.position - b.position)
 

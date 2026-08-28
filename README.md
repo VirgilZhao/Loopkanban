@@ -44,7 +44,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 260 个测试
+pnpm test            # 284 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/openkanban.js 与 dist/web/
 
@@ -71,7 +71,7 @@ strip-only 模式不支持参数属性（`constructor(private x)`）、`enum`、
 
 同理，**不支持的档位要拒绝，不能降级**。别家「不传参数就交给 CLI 默认值」的
 降级对 opencode 不成立：少了 `--auto` 它会挂住，所以「照跑」就等于把最严的
-`strict` 跑成最松的。这种情况直接抛错让卡片进 Failed，诊断里写清楚该改派给谁。
+`strict` 跑成最松的。这种情况直接抛错，卡片回到 Review 等人判读，诊断里写清楚该改派给谁。
 
 还有一条：**档位名字一样，关得住的东西未必一样**。同为 `standard`，codex 在
 workspace-write 沙箱里、claude 走权限分类器，opencode 两者都没有。所以

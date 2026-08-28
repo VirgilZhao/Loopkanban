@@ -32,7 +32,7 @@
 | 3 | **Fail loud, no silent degradation**：需要某能力而提供方没有 → 直接报错，绝不「接受了但静默忽略」 | 不支持的权限档位在 UI 上就是灰的，不能等运行时才失败 |
 | 4 | **Append-only 事件日志 + 投影**：日志是唯一真相，UI 从投影渲染，重启靠回放恢复 | `run_event` 表；SSE 用 `seq` 做 `Last-Event-ID` 续传；崩溃后 UI 能完整重建 |
 | 5 | **单调 `revision` 做 compare-and-set**（来自 `agentTeams` 的 task board） | 看板任务的每次变更；租约的原子取得与释放 |
-| 6 | **结构化安全失败诊断**：阶段名（`spawn`/`run`/`teardown`）+ 退出码 + 信号，长度有界，原始错误只留内部 | Failed 卡片上显示人能看懂的失败原因，而不是一坨 stack trace |
+| 6 | **结构化安全失败诊断**：阶段名（`spawn`/`run`/`teardown`）+ 退出码 + 信号，长度有界，原始错误只留内部 | 卡片进 Review 后显示人能看懂的失败原因，而不是一坨 stack trace |
 
 另外**技术手法**上照抄一处：**进程树持有 + 分级终止升级**（见 §3.4）—— 这是 dsh 写得最扎实、也最容易自己写错的地方。
 
@@ -120,7 +120,7 @@ interface Task {
   id: TaskId
   revision: number                 // CAS，每次变更 +1
   boardId: BoardId
-  column: 'backlog' | 'ready' | 'running' | 'review' | 'done' | 'failed'
+  column: 'backlog' | 'ready' | 'running' | 'review' | 'done'
   position: number
   subject: string
   description: string              // Markdown
@@ -131,6 +131,7 @@ interface Task {
   blockedBy: TaskId[]
   writeScopes: string[]            // 建议性路径前缀，用于并发冲突预警
   lease?: { runId: RunId; provider: string; acquiredAt: string; expiresAt: string }
+  archivedAt?: string              // 归档标记，正交于 column
 }
 
 interface Run {
@@ -155,13 +156,18 @@ interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; 
 
 ```
 Backlog ──▶ Ready ──▶ Running ──▶ Review ──▶ Done
-   │        (可认领)   (CLI执行中)  (人工验收)
-   │                       │            │
-   └───────────────────────┴── Failed ◀─┘
+   ▲        (可认领)   (CLI执行中)  (人工验收)  (通过)
+   │                                 │  │
+   │            打回 · 带评审意见 ◀────┘  │
+   └──────────────── 废弃 · 删分支 ◀─────┘
+
+   归档 ⇄ 取出：任意列（running 除外）上的开关，不改变所在列
 ```
 
 - **Ready** 是队列，进入要求验收标准非空
 - **Ready → Running** 必须 CAS 取得租约（`runId` + `expiresAt`），防重复认领；崩溃后租约超时自动回退
+- **归档是标记，不是列**。`archivedAt` 与 `column` 正交：归档不改变卡在哪一列，取出就回到原位。做成第六列的话，它既要能从每一列进来、又要能回到原来那一列，状态机会被这一个动作撑破；而且列是可见的，归档的意义恰恰是不可见。归档的卡**冻结**：移不动、改不了、不会被自动认领（否则用户看不见的地方有 Agent 在改仓库）；正在执行的卡不能归档，要搁置先终止。归档一张已完成的卡不影响它作为依赖的效力
+- **没有 Failed 列**。`Running` 的唯一出口是 `Review` —— 成功和失败都过人眼。失败的那次执行同样有分支、日志和结构化诊断要判读，判读完的动作（打回重跑 / 废弃回想法池）和验收完全一样；单开一列只会攒下一堆没人再看的死卡。失败仍然记在 `Run.status` 上，成功率统计照旧
 
 ---
 
@@ -281,7 +287,7 @@ stdout 逐行解析成统一的 `AgentEvent`（`Text` / `ToolUse` / `Usage` / `F
 > **档位不支持时怎么办，opencode 逼出了一条新规矩。** 另外两家的降级方式是「探测不到就不传这个参数，交给 CLI 自己的默认值」——
 > 对它们成立，因为默认值只会更严。opencode 不行：少了 `--auto` 不是变严格，而是**永远挂住**。于是只剩两条路，要么按
 > `--auto` 跑（`strict` 就成了它的反面，而且没人知道），要么明确失败。**悄悄升权比一次看得见的失败糟糕得多**，所以
-> `buildStart` / `buildResume` 在档位不受支持时直接抛错：卡片进 Failed，诊断里写清楚为什么、该改派给谁。
+> `buildStart` / `buildResume` 在档位不受支持时直接抛错：卡片回到 Review 等人判读，诊断里写清楚为什么、该改派给谁。
 >
 > **「支持某档」和「这档到底关不关得住」是两件事。** 同样是 `standard`，codex 被关进 workspace-write 沙箱、claude 走权限
 > 分类器，而 opencode 两者都没有 —— 只报档位名字，用户就会按别家的经验去理解它。为此 `AgentCaps` 多了一个

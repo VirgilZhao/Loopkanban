@@ -164,3 +164,23 @@ describe('overlappingWriteScopes', () => {
     expect(overlappingWriteScopes(target, [target, running('b', { writeScopes: ['src/'] })])).toEqual([])
   })
 })
+
+describe('归档与调度', () => {
+  it('归档的卡不派，也不进 skipped —— 它本来就不在看板上，没什么要解释', () => {
+    const result = plan([
+      task({ id: 'shelved', archivedAt: T0 - 1 }),
+      task({ id: 'live', position: 1 }),
+    ])
+    expect(result.dispatches.map((d) => d.taskId)).toEqual(['live'])
+    expect(result.skipped).toEqual([])
+  })
+
+  it('归档一张已完成的卡，不该把它的下游重新卡住', () => {
+    const result = plan([
+      task({ id: 'dep', column: 'done', archivedAt: T0 - 1 }),
+      task({ id: 'next', blockedBy: [asTaskId('dep')] }),
+    ])
+    expect(result.dispatches.map((d) => d.taskId)).toEqual(['next'])
+    expect(result.skipped).toEqual([])
+  })
+})

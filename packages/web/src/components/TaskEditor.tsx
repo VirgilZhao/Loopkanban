@@ -32,7 +32,11 @@ function draftOf(task: Task): Draft {
 
 export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Element {
   const [draft, setDraft] = useState(() => draftOf(task))
-  const locked = task.column === 'running'
+  // 两种冻结，同一套只读：正在执行的、以及归档的。字段上的 disabled 全靠它。
+  const locked = task.column === 'running' || task.archivedAt !== undefined
+  const lockReason = task.column === 'running'
+    ? '正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。'
+    : '已归档，内容冻结。要改先从归档里取出。'
 
   // 卡片被外部改动（打回、执行完成）后重置表单，避免拿着旧值去覆盖新状态。
   useEffect(() => { setDraft(draftOf(task)) }, [task.id, task.revision])
@@ -48,7 +52,7 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {locked ? (
           <p className="cjk-label mb-3 rounded-md border border-sodium-deep/40 bg-sodium/[0.06] p-2 !text-sodium">
-            正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。
+            {lockReason}
           </p>
         ) : null}
 

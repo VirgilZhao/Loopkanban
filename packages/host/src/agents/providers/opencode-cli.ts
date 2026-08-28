@@ -67,7 +67,7 @@ function supportedTiers(help: HelpSurface): PermissionTier[] {
  * opencode 少了 `--auto` 不是变严格，而是**永远挂住**（见文件头）。于是只剩
  * 两条路 —— 要么按 `--auto` 跑（strict 就成了它的反面，还没人知道），要么
  * 明确失败。悄悄升权比一次看得见的失败糟糕得多，所以选后者：
- * 卡片进 Failed，诊断里写清楚为什么。
+ * 卡片照常回到 Review 让人判读，诊断里写清楚为什么。
  */
 function permissionArgs(run: RunContext, caps: AgentCaps): string[] {
   if (!caps.permissionTiers.includes(run.permission)) {

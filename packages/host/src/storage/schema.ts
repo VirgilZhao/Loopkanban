@@ -9,8 +9,14 @@
 
 import type { DatabaseSync } from 'node:sqlite'
 
-/** 按顺序执行的迁移。**只许在末尾追加，不许修改已发布的条目。** */
-const MIGRATIONS: readonly string[] = [
+/**
+ * 按顺序执行的迁移。**只许在末尾追加，不许修改已发布的条目。**
+ *
+ * 导出是为了让迁移测试能"造一个旧库"：跑前 N 条建出历史上真实存在过的
+ * 结构，再打开 Storage 走完剩下的。测试因此不必抄一份旧 schema，也不会
+ * 在新增迁移后悄悄失效。
+ */
+export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE boards (
     id           TEXT PRIMARY KEY,
@@ -71,6 +77,12 @@ const MIGRATIONS: readonly string[] = [
   `,
   // 打回时留下的评审意见，跟着卡片走。
   `ALTER TABLE tasks ADD COLUMN feedback TEXT;`,
+  // 取消 Failed 列，并入 Review：失败的执行同样要过人眼，判读完的动作
+  // （打回重跑 / 废弃回想法池）和验收一模一样。旧库里的卡就地搬过去，
+  // 否则它们会停在一个界面上已经不存在的列里，再也拖不动。
+  `UPDATE tasks SET column_name = 'review' WHERE column_name = 'failed';`,
+  // 归档标记。正交于 column：归档不改变卡在哪一列，取消归档就回到原位。
+  `ALTER TABLE tasks ADD COLUMN archived_at INTEGER;`,
 ]
 
 /** 当前代码期望的结构版本。 */

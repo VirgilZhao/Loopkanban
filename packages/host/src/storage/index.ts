@@ -128,6 +128,7 @@ interface TaskRow {
   blocked_by_json: string
   lease_json: string | null
   archived_at: number | null
+  done_at: number | null
   created_at: number
   updated_at: number
 }
@@ -175,6 +176,7 @@ function toTask(row: TaskRow): Task {
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
+    ...(row.done_at === null ? {} : { doneAt: row.done_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -417,16 +419,16 @@ export class Storage {
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
         acceptance_json, repo_path, base_branch, preferred_provider, model,
-        blocked_by_json, lease_json, archived_at,
+        blocked_by_json, lease_json, archived_at, done_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
       JSON.stringify(task.blockedBy),
       task.lease === undefined ? null : JSON.stringify(task.lease),
-      task.archivedAt ?? null,
+      task.archivedAt ?? null, task.doneAt ?? null,
       task.createdAt, task.updatedAt,
     )
   }
@@ -459,7 +461,7 @@ export class Storage {
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
         blocked_by_json = ?, lease_json = ?,
-        archived_at = ?, updated_at = ?
+        archived_at = ?, done_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.description,
@@ -467,7 +469,7 @@ export class Storage {
       next.preferredProvider ?? null, next.model ?? null,
       JSON.stringify(next.blockedBy),
       next.lease === undefined ? null : JSON.stringify(next.lease),
-      next.archivedAt ?? null,
+      next.archivedAt ?? null, next.doneAt ?? null,
       next.updatedAt,
       next.id, next.revision - 1,
     )

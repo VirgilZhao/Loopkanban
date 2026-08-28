@@ -90,7 +90,10 @@ describe('accept', () => {
     expect(await isClean(repo)).toBe(true)
     // 分支保留，用户可以自己合并或开 PR。
     expect((await git(repo, 'branch', '--list', branch)).stdout.trim()).not.toBe('')
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('done')
+    const accepted = store.getTask(asTaskId('t1'))
+    expect(accepted?.column).toBe('done')
+    // 验收通过的那一刻要落进卡里 —— Done 列按它从新到旧排。
+    expect(accepted?.doneAt).toBeTypeOf('number')
   })
 
   it('显式要求时才合并回基线', async () => {

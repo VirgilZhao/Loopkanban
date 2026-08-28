@@ -669,6 +669,43 @@ describe('讨论', () => {
     expect(body.comments.map((c) => c.author)).toEqual(['human', 'agent'])
   })
 
+  it('留言可以顺带换下一轮的执行器与模型', async () => {
+    store.createTask(task({ id: 't1', column: 'review', preferredProvider: 'claude', model: 'opus' }))
+    const res = await say('t1', { body: '换个人再来一版', preferredProvider: 'codex', model: 'gpt-5' })
+    expect(res.status).toBe(201)
+    // 换人与回队列是同一次留言的两半，两边都得落地。
+    expect(await res.json()).toMatchObject({ requeued: true })
+    const after = store.getTask(asTaskId('t1'))
+    expect(after?.preferredProvider).toBe('codex')
+    expect(after?.model).toBe('gpt-5')
+    expect(after?.column).toBe('ready')
+  })
+
+  it('字段缺席只是"这次没提到"，显式 null 才是"清空"', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog', preferredProvider: 'claude', model: 'opus' }))
+    await say('t1', { body: '只是留个话' })
+    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+
+    await say('t1', { body: '这次谁都行', preferredProvider: null, model: null })
+    const cleared = store.getTask(asTaskId('t1'))
+    expect(cleared?.preferredProvider).toBeUndefined()
+    expect(cleared?.model).toBeUndefined()
+  })
+
+  it('执行中的卡换不了人，那条话也不该留下', async () => {
+    store.createTask(task({ id: 't1', column: 'running', preferredProvider: 'claude' }))
+    const res = await say('t1', { body: '换 codex', preferredProvider: 'codex' })
+    expect(res.status).toBe(422)
+    expect(store.getTask(asTaskId('t1'))?.preferredProvider).toBe('claude')
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(0)
+  })
+
+  it('执行中的卡仍然可以只留个话', async () => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    expect((await say('t1', { body: '跑完看看这里' })).status).toBe(201)
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(1)
+  })
+
   it('卡不存在 404', async () => {
     expect((await say('nope', { body: 'x' })).status).toBe(404)
   })

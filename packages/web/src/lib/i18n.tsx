@@ -124,12 +124,13 @@ const zh = {
   'panel.inProgress': '进行中',
 
   // ── 讨论 ───────────────────────────────────────────────
-  'talk.empty': '还没有讨论。跑完一轮 Agent 会把它做了什么写在这儿，你也可以先留个话',
   'talk.you': '你',
   'talk.placeholderRequeue': '要它再改什么？发出去这张卡就回队列',
   'talk.placeholder': '留一条话，下次执行会带上它',
   'talk.noteRequeue': '发出去这张卡回到 Ready，下一次执行会带着整条讨论走。',
   'talk.note': '下一次执行会带着整条讨论走。',
+  'talk.nextRound': '下一轮交给',
+  'talk.sendFailed': '发不出去，稍后再试',
   'talk.send': '发送',
 
   // ── 规格表单 ───────────────────────────────────────────
@@ -338,12 +339,13 @@ const en: Record<MessageKey, string> = {
   'panel.noRuns': 'No runs yet',
   'panel.inProgress': 'running',
 
-  'talk.empty': 'No discussion yet. After a run the agent writes what it did here — you can also leave a note first',
   'talk.you': 'You',
   'talk.placeholderRequeue': 'What should it change? Sending this puts the card back in the queue',
   'talk.placeholder': 'Leave a note; the next run will carry it',
   'talk.noteRequeue': 'Sending puts this card back in Ready, and the next run carries the whole thread.',
   'talk.note': 'The next run carries the whole thread.',
+  'talk.nextRound': 'Next round goes to',
+  'talk.sendFailed': 'Could not send — try again',
   'talk.send': 'Send',
 
   'editor.lockedRunning': 'A run is in progress, so the spec is frozen — otherwise you and the agent would be reading two different ones. Stop the run to edit.',

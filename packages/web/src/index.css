@@ -3,118 +3,118 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ─────────────────────────────────────────────────────────────
-   LoopKanban — Future Teal
-   配色取自 tweakcn「Future Teal」，令牌值与 shadcn 安装产物逐字一致。
+   LoopKanban — Steel Blue
+   配色取自 tweakcn，令牌值与 shadcn 安装产物逐字一致。
    工业调度台的骨架（发丝线、状态灯、扫描轨、高信息密度）保留，
    底下第二段把调度台自己的语义色接到这套主题令牌上。
    ───────────────────────────────────────────────────────────── */
 
 :root {
-  --background: #f9fdff;
-  --foreground: #031a1e;
+  --background: #f7f7f8;
+  --foreground: #1a2530;
   --card: #ffffff;
-  --card-foreground: #031a1e;
+  --card-foreground: #1a2530;
   --popover: #ffffff;
-  --popover-foreground: #1c1c34;
-  --primary: #00bba7;
-  --primary-foreground: #fcfcfc;
-  --secondary: #e4f2f2;
-  --secondary-foreground: #2d4e54;
-  --muted: #ebf4f4;
-  --muted-foreground: #50686d;
-  --accent: #c3ecdf;
-  --accent-foreground: #006363;
-  --destructive: #ce514d;
+  --popover-foreground: #1a2530;
+  --primary: #1a6289;
+  --primary-foreground: #ffffff;
+  --secondary: #ebeef2;
+  --secondary-foreground: #1a2530;
+  --muted: #ebeef2;
+  --muted-foreground: #5a6573;
+  --accent: #d9e6ee;
+  --accent-foreground: #0f4866;
+  --destructive: #b8413c;
   --destructive-foreground: #ffffff;
-  --border: #dae3e4;
-  --input: #dae3e4;
-  --ring: #00bba7;
-  --chart-1: #00bba7;
-  --chart-2: #00a3d7;
-  --chart-3: #b18cfe;
-  --chart-4: #ffc677;
-  --chart-5: #cce8b5;
-  --sidebar: #f5f9fa;
-  --sidebar-foreground: #0e262a;
-  --sidebar-primary: #00bba7;
-  --sidebar-primary-foreground: #fafafd;
-  --sidebar-accent: #c3ecdf;
-  --sidebar-accent-foreground: #1c1c34;
-  --sidebar-border: #d6e9ea;
-  --sidebar-ring: #735fce;
-  --font-sans: Inter, sans-serif;
-  --font-serif: Georgia, serif;
-  --font-mono: JetBrains Mono, monospace;
-  --radius: 0.5rem;
+  --border: #dbe0e6;
+  --input: #dbe0e6;
+  --ring: #1d6c96;
+  --chart-1: #1d6c96;
+  --chart-2: #83c4e7;
+  --chart-3: #144a67;
+  --chart-4: #2f7a5c;
+  --chart-5: #d9a24c;
+  --sidebar: #f1f3f6;
+  --sidebar-foreground: #1a2530;
+  --sidebar-primary: #1a6289;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #d9e6ee;
+  --sidebar-accent-foreground: #0f4866;
+  --sidebar-border: #dbe0e6;
+  --sidebar-ring: #1d6c96;
+  --font-sans: Geist, ui-sans-serif, system-ui, sans-serif;
+  --font-serif: 'Instrument Serif', ui-serif, Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --radius: 0.625rem;
   --shadow-x: 0px;
-  --shadow-y: 4px;
-  --shadow-blur: 10px;
-  --shadow-spread: 0px;
-  --shadow-opacity: 0.12;
-  --shadow-color: #2d2d53;
-  --shadow-2xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
-  --shadow-xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
-  --shadow-sm: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-md: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 2px 4px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-lg: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 4px 6px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 8px 10px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-2xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.30);
+  --shadow-y: 1px;
+  --shadow-blur: 4px;
+  --shadow-spread: -1px;
+  --shadow-opacity: 0.05;
+  --shadow-color: #1a2530;
+  --shadow-2xs: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.03);
+  --shadow-xs: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.03);
+  --shadow-sm: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.05), 0px 1px 2px -2px hsl(210 29.7297% 14.5098% / 0.05);
+  --shadow: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.05), 0px 1px 2px -2px hsl(210 29.7297% 14.5098% / 0.05);
+  --shadow-md: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.05), 0px 2px 4px -2px hsl(210 29.7297% 14.5098% / 0.05);
+  --shadow-lg: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.05), 0px 4px 6px -2px hsl(210 29.7297% 14.5098% / 0.05);
+  --shadow-xl: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.05), 0px 8px 10px -2px hsl(210 29.7297% 14.5098% / 0.05);
+  --shadow-2xl: 0px 1px 4px -1px hsl(210 29.7297% 14.5098% / 0.13);
   --tracking-normal: 0em;
   --spacing: 0.25rem;
 }
 
 .dark {
-  --background: #030b0b;
-  --foreground: #e4edee;
-  --card: #061415;
-  --card-foreground: #e4edee;
-  --popover: #161724;
-  --popover-foreground: #e6e6f5;
-  --primary: #00bba7;
-  --primary-foreground: #ffffff;
-  --secondary: #0b2425;
-  --secondary-foreground: #b8d4d5;
-  --muted: #0f1d1e;
-  --muted-foreground: #7a9596;
-  --accent: #005f5a;
-  --accent-foreground: #90caca;
-  --destructive: #f84b4b;
-  --destructive-foreground: #fafafd;
-  --border: #142223;
-  --input: #142223;
-  --ring: #00bba7;
-  --chart-1: #00bba7;
-  --chart-2: #00a3d7;
-  --chart-3: #b18cfe;
-  --chart-4: #ffc677;
-  --chart-5: #cce8b5;
-  --sidebar: #031011;
-  --sidebar-foreground: #e4edee;
-  --sidebar-primary: #00bba7;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #005f5a;
-  --sidebar-accent-foreground: #e6e6f5;
-  --sidebar-border: #2b2c3f;
-  --sidebar-ring: #a190ff;
-  --font-sans: Inter, sans-serif;
-  --font-serif: Georgia, serif;
-  --font-mono: JetBrains Mono, monospace;
-  --radius: 0.5rem;
+  --background: #0f1419;
+  --foreground: #e5e9ee;
+  --card: #161c24;
+  --card-foreground: #e5e9ee;
+  --popover: #1c232d;
+  --popover-foreground: #e5e9ee;
+  --primary: #7ab0d0;
+  --primary-foreground: #0f1419;
+  --secondary: #1e2630;
+  --secondary-foreground: #e5e9ee;
+  --muted: #1e2630;
+  --muted-foreground: #8590a0;
+  --accent: #1e2630;
+  --accent-foreground: #a8cfe3;
+  --destructive: #dc6e69;
+  --destructive-foreground: #160807;
+  --border: #28313d;
+  --input: #28313d;
+  --ring: #7ab0d0;
+  --chart-1: #7ab0d0;
+  --chart-2: #a8cfe3;
+  --chart-3: #5ba3cc;
+  --chart-4: #56ad84;
+  --chart-5: #e8b25c;
+  --sidebar: #0b0f14;
+  --sidebar-foreground: #e5e9ee;
+  --sidebar-primary: #7ab0d0;
+  --sidebar-primary-foreground: #0f1419;
+  --sidebar-accent: #1e2630;
+  --sidebar-accent-foreground: #a8cfe3;
+  --sidebar-border: #1e2630;
+  --sidebar-ring: #7ab0d0;
+  --font-sans: Geist, ui-sans-serif, system-ui, sans-serif;
+  --font-serif: 'Instrument Serif', ui-serif, Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --radius: 0.625rem;
   --shadow-x: 0px;
-  --shadow-y: 4px;
-  --shadow-blur: 10px;
+  --shadow-y: 1px;
+  --shadow-blur: 3px;
   --shadow-spread: 0px;
-  --shadow-opacity: 0.12;
-  --shadow-color: #2d2d53;
-  --shadow-2xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
-  --shadow-xs: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.06);
-  --shadow-sm: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 1px 2px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-md: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 2px 4px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-lg: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 4px 6px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.12), 0px 8px 10px -1px hsl(240 29.6875% 25.0980% / 0.12);
-  --shadow-2xl: 0px 4px 10px 0px hsl(240 29.6875% 25.0980% / 0.30);
+  --shadow-opacity: 0.3;
+  --shadow-color: #000000;
+  --shadow-2xs: 0px 1px 3px 0px hsl(0 0% 0% / 0.15);
+  --shadow-xs: 0px 1px 3px 0px hsl(0 0% 0% / 0.15);
+  --shadow-sm: 0px 1px 3px 0px hsl(0 0% 0% / 0.30), 0px 1px 2px -1px hsl(0 0% 0% / 0.30);
+  --shadow: 0px 1px 3px 0px hsl(0 0% 0% / 0.30), 0px 1px 2px -1px hsl(0 0% 0% / 0.30);
+  --shadow-md: 0px 1px 3px 0px hsl(0 0% 0% / 0.30), 0px 2px 4px -1px hsl(0 0% 0% / 0.30);
+  --shadow-lg: 0px 1px 3px 0px hsl(0 0% 0% / 0.30), 0px 4px 6px -1px hsl(0 0% 0% / 0.30);
+  --shadow-xl: 0px 1px 3px 0px hsl(0 0% 0% / 0.30), 0px 8px 10px -1px hsl(0 0% 0% / 0.30);
+  --shadow-2xl: 0px 1px 3px 0px hsl(0 0% 0% / 0.75);
 }
 
 @theme inline {
@@ -184,23 +184,26 @@
   /* 卡片槽：比面板沉一档，卡片才浮得出来。 */
   --sunken: var(--muted);
   --hairline: var(--border);
-  --hairline-bright: #c2d2d4;
+  --hairline-bright: #c1c8d2;
 
+  /* 三档字色。主题把 secondary-foreground 定成了和 foreground 同一个值，
+     直接接过来中间这档就没了，所以 ink-dim 自己取 ink 与 ink-faint 之间。 */
   --ink: var(--foreground);
-  --ink-dim: var(--secondary-foreground);
+  --ink-dim: #3b4653;
   --ink-faint: var(--muted-foreground);
 
   /* 强调色。在白底上它要能当正文颜色用，所以取 accent-foreground
-     这一档深青（#00bba7 在白底上只有 2.3:1，做 11px 中文太虚）。 */
+     这一档深蓝，11px 中文也压得住。 */
   --sodium: var(--accent-foreground);
   --sodium-deep: var(--primary);
 
-  /* 状态灯，只用在小圆点和细轨上，绝不铺面积。 */
-  --lamp-idle: #9aacae;
+  /* 状态灯，只用在小圆点和细轨上，绝不铺面积。
+     live 已经是主色蓝，review 就换成琥珀，两盏灯不能同色。 */
+  --lamp-idle: #98a2ae;
   --lamp-live: var(--primary);
-  --lamp-ok: #1f8f5f;
+  --lamp-ok: var(--chart-4);
   --lamp-fail: var(--destructive);
-  --lamp-review: #0a7fa8;
+  --lamp-review: #b0771d;
 }
 
 .dark {
@@ -209,20 +212,21 @@
   --raised: var(--secondary);
   --sunken: var(--muted);
   --hairline: var(--border);
-  --hairline-bright: #23383a;
+  --hairline-bright: #38434f;
 
   --ink: var(--foreground);
-  --ink-dim: var(--secondary-foreground);
+  --ink-dim: #b6bec9;
   --ink-faint: var(--muted-foreground);
 
+  /* 暗色下 accent 是中性灰面板色，当不了强调，深一档改走 chart-3。 */
   --sodium: var(--primary);
-  --sodium-deep: var(--accent);
+  --sodium-deep: var(--chart-3);
 
-  --lamp-idle: #3d5556;
+  --lamp-idle: #47525f;
   --lamp-live: var(--primary);
-  --lamp-ok: #6fdc9e;
+  --lamp-ok: var(--chart-4);
   --lamp-fail: var(--destructive);
-  --lamp-review: var(--chart-2);
+  --lamp-review: var(--chart-5);
 }
 
 @theme inline {
@@ -249,9 +253,9 @@
 
 /* 界面里三种角色的字：骨架微标签 / 正文 / 代码。 */
 @theme {
-  --font-chrome: Inter, sans-serif;
-  --font-body:   Inter, sans-serif;
-  --font-code:   JetBrains Mono, monospace;
+  --font-chrome: var(--font-sans);
+  --font-body:   var(--font-sans);
+  --font-code:   var(--font-mono);
 }
 
 @layer base {

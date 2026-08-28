@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { request as httpRequest } from 'node:http'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
-import { connect } from 'node:net'
+import { connect, type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
@@ -398,6 +398,108 @@ describe('错误处理（回归）', () => {
     const body = await res.text()
     expect(body).not.toContain('id_rsa')
     expect(body).toContain('internal-error')
+  })
+})
+
+describe('开发模式：把前端转发给 vite', () => {
+  let upstream: ReturnType<typeof createHttpServer>
+  let upstreamPort: number
+  let dev: RunningServer
+  /** upstream 收到的请求，用来断言转发的忠实程度。 */
+  let seen: { url: string; host: string | undefined }[]
+
+  beforeEach(async () => {
+    seen = []
+    upstream = createHttpServer((req, res) => {
+      seen.push({ url: req.url ?? '', host: req.headers.host })
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(`<!doctype html>vite:${req.url ?? ''}`)
+    })
+    // 假装自己是 vite 的 HMR ws server：认下升级，回一句能被断言的内容。
+    upstream.on('upgrade', (req, socket) => {
+      seen.push({ url: req.url ?? '', host: req.headers.host })
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
+        + `Connection: Upgrade\r\nx-echo-url: ${req.url ?? ''}\r\n\r\n`,
+      )
+      socket.end()
+    })
+    await new Promise<void>((resolve) => { upstream.listen(0, '127.0.0.1', resolve) })
+    upstreamPort = (upstream.address() as AddressInfo).port
+
+    dev = await startServer({
+      storage: store, token: TOKEN, sseHeartbeatMs: 50,
+      devServer: `http://127.0.0.1:${String(upstreamPort)}`,
+    })
+  })
+
+  afterEach(async () => {
+    await dev.close()
+    await new Promise<void>((resolve) => { upstream.close(() => { resolve() }) })
+  })
+
+  const get = (path: string): Promise<Response> =>
+    fetch(`http://127.0.0.1:${String(dev.port)}${path}`, {
+      headers: { cookie: `openkanban_token=${TOKEN}` },
+    })
+
+  it('非 /api 的请求原样转给 vite', async () => {
+    const res = await get('/src/main.tsx')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('vite:/src/main.tsx')
+    expect(seen[0]?.host).toBe(`127.0.0.1:${String(upstreamPort)}`)
+  })
+
+  it('/api 仍由 host 自己处理，不会被转走', async () => {
+    const res = await get('/api/state')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toHaveProperty('boards')
+    expect(seen).toHaveLength(0)
+  })
+
+  it('vite 挂了时说清楚是哪一环，而不是给一个白页', async () => {
+    await new Promise<void>((resolve) => { upstream.close(() => { resolve() }) })
+    const res = await get('/')
+    expect(res.status).toBe(502)
+    expect(await res.json()).toMatchObject({ error: 'dev-server-unreachable' })
+  })
+
+  /**
+   * 发一个 WebSocket 升级请求，返回 upstream 回声出来的路径。
+   * @param cookie - 是否带上 token cookie。
+   */
+  function upgrade(cookie: boolean): Promise<string | undefined> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1', port: dev.port,
+        // vite 的 HMR 会往 ws URL 上挂它自己的同名 token，这里一并复现。
+        path: '/?token=vite-hmr-handshake',
+        headers: {
+          ...(cookie ? { cookie: `openkanban_token=${TOKEN}` } : {}),
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'sec-websocket-version': '13',
+          'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        },
+      })
+      req.on('upgrade', (res, socket) => {
+        socket.destroy()
+        resolve(res.headers['x-echo-url'] as string | undefined)
+      })
+      // 被 guard 挡下时 host 直接 destroy socket，这里体现为连接被掐断。
+      req.on('error', () => { resolve(undefined) })
+      req.on('response', (res) => { res.resume(); reject(new Error(`没有升级，返回 ${String(res.statusCode)}`)) })
+      req.end()
+    })
+  }
+
+  it('WebSocket 升级也照转 —— 少了它 HMR 连不上，改代码不刷新', async () => {
+    // 连 vite 自己的那个 ?token= 都要原样带过去，否则它会拒绝握手。
+    expect(await upgrade(true)).toBe('/?token=vite-hmr-handshake')
+  })
+
+  it('升级请求同样要过 token 关，没 cookie 一律掐断', async () => {
+    expect(await upgrade(false)).toBeUndefined()
   })
 })
 

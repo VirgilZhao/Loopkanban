@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isUntouchedDraft, taskClockFrom } from '../src/lib/task.ts'
+import { doneOrder, isUntouchedDraft, taskClockFrom } from '../src/lib/task.ts'
 
 describe('isUntouchedDraft', () => {
   it('刚建出来的空白卡是草稿', () => {
@@ -38,5 +38,30 @@ describe('taskClockFrom', () => {
 
   it('running 却没有租约时退回 updatedAt，而不是显示一个空数字', () => {
     expect(taskClockFrom({ column: 'running', lease: undefined, updatedAt: 42 })).toBe(42)
+  })
+
+  it('done 的卡从完成那一刻起算 —— 事后归档不该把这个数字拨回今天', () => {
+    expect(taskClockFrom({ column: 'done', lease: undefined, doneAt: 1_000, updatedAt: 1_800_000 }))
+      .toBe(1_000)
+  })
+})
+
+describe('doneOrder', () => {
+  it('就是完成时间', () => {
+    expect(doneOrder({ doneAt: 1_000, updatedAt: 1_800_000 })).toBe(1_000)
+  })
+
+  it('迁移之前完成的卡没有 doneAt，退回 updatedAt', () => {
+    expect(doneOrder({ updatedAt: 1_800_000 })).toBe(1_800_000)
+  })
+
+  it('拿它排出来的就是从新到旧', () => {
+    const cards = [
+      { id: 'old', doneAt: 1_000, updatedAt: 9_000 },
+      { id: 'new', doneAt: 3_000, updatedAt: 3_000 },
+      { id: 'mid', doneAt: 2_000, updatedAt: 2_000 },
+    ]
+    expect([...cards].sort((a, b) => doneOrder(b) - doneOrder(a)).map((c) => c.id))
+      .toEqual(['new', 'mid', 'old'])
   })
 })

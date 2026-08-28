@@ -146,6 +146,13 @@ export const MIGRATIONS: readonly string[] = [
   // 仓库的事实，不是某张卡的；每张卡各配一遍，等于让人在验收前先做一次配置。
   // 留空表示这个项目没配，界面上那个按钮会引导他填一条。
   `ALTER TABLE projects ADD COLUMN test_command TEXT;`,
+  // 完成时间。Done 列按它从新到旧排，所以不能拿 updated_at 顶替 —— 归档、
+  // 事后补一句描述都会把它推到今天。旧库里已经在 Done 的卡没有这个时刻可考，
+  // 用 updated_at 回填：它们不会再被改动，那一刻通常就是验收通过的那一刻。
+  `
+  ALTER TABLE tasks ADD COLUMN done_at INTEGER;
+  UPDATE tasks SET done_at = updated_at WHERE column_name = 'done';
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

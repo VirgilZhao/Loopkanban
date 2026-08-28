@@ -16,7 +16,7 @@ import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { maybe, useT, type MessageKey, type Translate } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
-import { isUntouchedDraft, taskTitle } from '@/lib/task.ts'
+import { doneOrder, isUntouchedDraft, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
   COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunStats,
@@ -195,6 +195,10 @@ export default function App(): React.JSX.Element {
       grouped[task.column].push(task)
     }
     for (const list of Object.values(grouped)) list.sort((a, b) => a.position - b.position)
+    // Done 是唯一不按 position 排的列：那里的 position 是这张卡在 Review 里
+    // 留下的残值，只反映当初排队的先后，作为"完成清单"的顺序毫无意义。
+    // 按完成时间从新到旧 —— 刚做完的在最上面，往下就是越来越旧的历史。
+    grouped.done.sort((a, b) => doneOrder(b) - doneOrder(a))
     return grouped
   }, [tasks, showArchived, view])
 

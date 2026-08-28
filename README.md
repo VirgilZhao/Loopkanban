@@ -10,7 +10,7 @@ npx loopkanban
 启动后自动打开浏览器。规划文档见 [docs/PRD.md](docs/PRD.md)。
 
 需要 Node ≥ 22.5（用到内置的 `node:sqlite`），以及本机已装 `claude`、`codex`、
-`opencode` 其中之一。发布包 216 KB、**零运行时依赖**。
+`opencode` 其中之一。发布包 283 KB、**零运行时依赖**。
 
 想让它一直活着（自动认领的意义就在于你不用盯着）：
 
@@ -30,8 +30,23 @@ loopkanban service install   # 确认无误再装
 - **不绑定 CLI 版本**。启动时解析 `--help` 得出能力矩阵，装的是什么版本就用
   什么版本；不支持的能力在界面上直接灰掉，不会等到运行时才失败。
 - **worktree 隔离**。Agent 不碰你的主工作区，跑飞了删掉分支即可。
+- **一键测试环境**。Review 里的卡上有个按钮：把这次改动在**它自己的 worktree
+  里跑起来**，端口由看板分配（命令里写 `{{port}}` 或读 `PORT`），起来了就给你
+  一条 `127.0.0.1` 的链接，日志实时贴在下面。验完关掉面板就行 —— 一分钟后它
+  自己收掉整棵进程树；验收、打回、废弃时立刻收（那一刻 worktree 正要被删）；
+  最长跑 30 分钟。启动命令配在项目上，比如 `pnpm install && pnpm dev` ——
+  worktree 是一份干净的源码副本，装依赖也归这条命令管。
 - **卡片可以带附件**。截图、PDF、Word 拖进卡里，派活时它们会被拷进工作区并在
   TASK.md 里点名交给 CLI —— 说不清楚的需求，给它看。
+- **验收走 PR**。仓库有 GitHub 远端、本机装了 `gh`（用你自己的登录态，同样零
+  API Key）时，「通过并合并」会提交改动、把基线合进任务分支、推上去并开一条 PR。
+  **合不合始终是你在 GitHub 上的决定** —— 我们只在它真的合上之后把卡收进 Done，
+  卡上列着它合过的每一条 PR（一张卡可以有好几条）。合基线时撞上冲突，冲突就留在
+  这张卡自己的工作区里，卡自动回队列并派一轮去解 —— 那是 Agent 干的活，不是你的。
+  没有远端或没装 `gh` 时这颗按钮退回本地合并，并把原因写在按钮下面。
+- **做完了还能接着改**。Review 与 Done 的卡都能在讨论里再说一句，说完就回队列跑
+  下一轮 —— 合完才发现还差一条，本来就是同一张卡的事，不必另开一张把讨论、工作区
+  和已经合过的 PR 全丢掉。
 - **卡片可以互相关联**。在规格里挑几张同项目的卡，派活时它们的正文会被整段写进
   TASK.md 的「关联任务」一节 —— 接口是上一张定的、命名沿用那次改造，Agent 照着
   已经定下来的东西做。关联是**引用不是依赖**：它不拦这张卡的执行（那是
@@ -73,7 +88,7 @@ Review 等人判读。
 
 ```
 packages/core   纯领域逻辑，无 IO，时间由参数传入 —— 状态机、CAS、租约、调度决策
-packages/host   Node 侧：CLI 探测与执行、worktree、SQLite、HTTP + SSE、验收
+packages/host   Node 侧：CLI 探测与执行、worktree、SQLite、HTTP + SSE、验收与 PR
 packages/web    React + Vite + shadcn/ui，产物由 host 托管
 ```
 
@@ -81,7 +96,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 589 个测试
+pnpm test            # 725 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

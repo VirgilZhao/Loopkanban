@@ -27,6 +27,7 @@ interface TaskBrief {
   relatedTo: readonly string[]
   preferredProvider?: string
   model?: string
+  doneAt?: number
   revision: number
   updatedAt: number
 }
@@ -37,6 +38,8 @@ interface StateResponse {
   }[]
   tasks: Task[]
   attachments: Record<string, number>
+  /** 每张卡开过哪些 PR，新的在前；一条都没有的卡不在里面。 */
+  prs?: Record<string, unknown[]>
 }
 
 function brief(task: Task): TaskBrief {
@@ -50,6 +53,9 @@ function brief(task: Task): TaskBrief {
     relatedTo: task.relatedTo.map(String),
     ...(task.preferredProvider === undefined ? {} : { preferredProvider: task.preferredProvider }),
     ...(task.model === undefined ? {} : { model: task.model }),
+    // 完成时刻只在跨进 Done 的那一次写入 —— Agent 扫 Done 列时要的是"什么时候
+    // 做完的"，而 updatedAt 会被归档、事后补一句描述推到今天。
+    ...(task.doneAt === undefined ? {} : { doneAt: task.doneAt }),
     revision: task.revision,
     updatedAt: task.updatedAt,
   }
@@ -178,8 +184,8 @@ export const TOOLS: readonly ToolSpec[] = [
     name: 'get_task',
     title: '看一张卡的全部内容',
     description:
-      '一张卡的完整需求：描述、验收标准、关联的卡（**连正文一起展开**）、讨论线程、附件与执行历史。'
-      + '关联卡是参考资料，不是这次要做的活。',
+      '一张卡的完整需求：描述、验收标准、关联的卡（**连正文一起展开**）、讨论线程、附件、'
+      + '执行历史与开过的 PR。关联卡是参考资料，不是这次要做的活。',
     inputSchema: {
       type: 'object',
       properties: { taskId: TASK_ID },
@@ -188,7 +194,7 @@ export const TOOLS: readonly ToolSpec[] = [
     },
     run: async (client, args) => {
       const taskId = str(args, 'taskId')
-      const { tasks, projects, attachments } = await client.get<StateResponse>('/api/state')
+      const { tasks, projects, attachments, prs } = await client.get<StateResponse>('/api/state')
       const task = tasks.find((item) => String(item.id) === taskId)
       if (task === undefined) throw new ToolInputError(`没有这张卡：${taskId}`)
 
@@ -213,6 +219,9 @@ export const TOOLS: readonly ToolSpec[] = [
         comments,
         attachmentCount: attachments[taskId] ?? 0,
         runs,
+        // 这张卡开过的 PR（可能不止一条）。**合不合是人在 GitHub 上的决定**，
+        // 这里给的是最后一次问到的状态，Agent 据此知道自己那轮改动走到哪儿了。
+        prs: prs?.[taskId] ?? [],
       }
     },
   },

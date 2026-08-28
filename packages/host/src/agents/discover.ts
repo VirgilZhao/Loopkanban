@@ -85,14 +85,18 @@ export interface CaptureResult {
  * 跑一条短命令并收集全部输出，用于 `--version` / `--help` 探测。
  * @param argv - 完整命令行。
  * @param timeoutMs - 超时，默认 {@link PROBE_TIMEOUT_MS}。
+ * @param cwd - 工作目录，默认本进程的。`git` 一律用 `-C` 指目录，但 `gh`
+ *   只认"当前在哪个仓库里"，那条路径没法写进参数。
  */
-export async function capture(argv: readonly string[], timeoutMs = PROBE_TIMEOUT_MS): Promise<CaptureResult> {
+export async function capture(
+  argv: readonly string[], timeoutMs = PROBE_TIMEOUT_MS, cwd = process.cwd(),
+): Promise<CaptureResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => { controller.abort() }, timeoutMs)
   try {
     const handle = await spawnProcess({
       argv,
-      cwd: process.cwd(),
+      cwd,
       graceMs: 500,
       signal: controller.signal,
     })

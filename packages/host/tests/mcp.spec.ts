@@ -180,6 +180,17 @@ describe('查询', () => {
     expect(detail.related[0]?.description).toContain('走 errors.ts')
   })
 
+  it('get_task 带上这张卡开过的 PR —— Agent 得知道自己那轮改动走到哪儿了', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    store.upsertPullRequest({
+      id: 'pr-1', taskId: asTaskId('t1'), number: 7, url: 'https://example.invalid/pull/7',
+      branch: 'task/t1', baseBranch: 'main', state: 'open', mergeable: 'mergeable',
+      createdAt: T0, updatedAt: T0,
+    })
+    const { data } = await callTool('get_task', { taskId: 't1' })
+    expect((data as { prs: { number: number }[] }).prs.map((pr) => pr.number)).toEqual([7])
+  })
+
   it('没有这张卡时说清是哪一张，而不是回一个空对象', async () => {
     const result = await callTool('get_task', { taskId: 't-nope' })
     expect(result.isError).toBe(true)

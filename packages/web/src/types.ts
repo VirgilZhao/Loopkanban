@@ -65,6 +65,15 @@ export interface DirListing {
   entries: DirEntry[]
 }
 
+/** 一个仓库有哪些本地分支，以及推荐当基线的那条。 */
+export interface BranchListing {
+  path: string
+  /** 本地分支，最近提交的排在前面。新仓库（还没有提交）是空的。 */
+  branches: string[]
+  /** 推荐值：main / master 优先，都没有才退回当前分支。 */
+  base: string
+}
+
 /** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
 export interface Project {
   id: string

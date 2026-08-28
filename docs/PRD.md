@@ -129,7 +129,7 @@ interface Project {
   id: ProjectId
   name: string                     // 用户认得出的名字
   repoPath: string                 // 本机上的 git 仓库目录
-  baseBranch: string               // 建项目时取仓库当时所在的分支
+  baseBranch: string               // 建项目时选定，默认 main / master；可后改，只影响新卡
 }
 
 interface Task {

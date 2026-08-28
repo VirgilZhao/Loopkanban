@@ -1,30 +1,27 @@
-import { Archive, Bot, CircleCheck, CircleDashed, Eye, Inbox, LoaderCircle, Plus } from 'lucide-react'
+import { Archive, Bot, FolderGit2, LayoutGrid, Plus } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
   SidebarHeader, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarSeparator,
 } from '@/components/ui/sidebar.tsx'
 import { cn } from '@/lib/utils.ts'
-import {
-  COLUMNS, COLUMN_META, type Agent, type Column as ColumnKey, type SchedulerState, type SchedulerSettings,
-} from '@/types.ts'
+import type { Agent, Project, SchedulerState, SchedulerSettings } from '@/types.ts'
 
-/** 列在导航里的图标。收起成图标轨之后，它是这一列仅剩的标识。 */
-const COLUMN_ICON: Record<ColumnKey, React.ComponentType<{ className?: string }>> = {
-  backlog: Inbox,
-  ready: CircleDashed,
-  running: LoaderCircle,
-  review: Eye,
-  done: CircleCheck,
-}
+/** 当前在看哪一堆卡：全部，或某个项目。 */
+export type View = { readonly kind: 'overview' } | { readonly kind: 'project'; readonly id: string }
 
 interface Props {
   agents: Agent[]
-  counts: Record<ColumnKey, number>
-  /** 当前选中的卡在哪一列 —— 导航跟着人的注意力走，而不是记住上次点了哪儿。 */
-  activeColumn: ColumnKey | null
-  onNavigate: (column: ColumnKey) => void
+  projects: Project[]
+  /** 每个项目的任务数；概览用 total。 */
+  counts: Record<string, number>
+  total: number
+  view: View
+  onView: (view: View) => void
+  onNewProject: () => void
   onCreate: () => void
+  /** 概览里没有"当前项目"，新建任务无处可落，这时按钮是灰的。 */
+  canCreate: boolean
   archivedCount: number
   showArchived: boolean
   onToggleArchived: () => void
@@ -35,7 +32,7 @@ interface Props {
 }
 
 export function AppSidebar({
-  agents, counts, activeColumn, onNavigate, onCreate,
+  agents, projects, counts, total, view, onView, onNewProject, onCreate, canCreate,
   archivedCount, showArchived, onToggleArchived,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
@@ -68,7 +65,12 @@ export function AppSidebar({
           </SidebarMenuItem>
 
           <SidebarMenuItem>
-            <SidebarMenuButton variant="primary" onClick={onCreate} title="新建任务">
+            <SidebarMenuButton
+              variant="primary"
+              onClick={onCreate}
+              disabled={!canCreate}
+              title={canCreate ? '新建任务' : '先选一个项目 —— 任务得知道自己在哪个仓库里干活'}
+            >
               <Plus />
               <span>新建任务</span>
             </SidebarMenuButton>
@@ -77,28 +79,65 @@ export function AppSidebar({
       </SidebarHeader>
 
       <SidebarContent>
-        {/* 看板导航：列 + 计数。点一下把那一列滚到眼前。 */}
+        {/* 概览：不分项目，所有卡摊在一块看板上。 */}
         <SidebarGroup>
-          <SidebarGroupLabel>看板</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {COLUMNS.map((column) => {
-                const Icon = COLUMN_ICON[column]
-                const meta = COLUMN_META[column]
-                return (
-                  <SidebarMenuItem key={column}>
-                    <SidebarMenuButton
-                      isActive={activeColumn === column}
-                      onClick={() => { onNavigate(column) }}
-                      title={meta.hint}
-                    >
-                      <Icon className={cn(column === 'running' && counts.running > 0 && 'text-sodium')} />
-                      <span>{meta.label}</span>
-                      <SidebarMenuBadge>{counts[column]}</SidebarMenuBadge>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )
-              })}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={view.kind === 'overview'}
+                  onClick={() => { onView({ kind: 'overview' }) }}
+                  title="所有项目的任务"
+                >
+                  <LayoutGrid />
+                  <span>概览</span>
+                  <SidebarMenuBadge>{total}</SidebarMenuBadge>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        {/* 项目：点进去只看这一个仓库的卡。 */}
+        <SidebarGroup>
+          <div className="flex items-center gap-1">
+            <SidebarGroupLabel className="flex-1">项目</SidebarGroupLabel>
+            <button
+              type="button"
+              aria-label="新增项目"
+              title="新增项目"
+              onClick={onNewProject}
+              className={cn(
+                'flex size-5 flex-none items-center justify-center rounded-md text-sidebar-foreground/70',
+                'transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+                'group-data-[state=collapsed]/sidebar:hidden',
+              )}
+            >
+              <Plus className="size-3.5" />
+            </button>
+          </div>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {projects.length === 0 ? (
+                <SidebarMenuItem>
+                  <SidebarMenuButton onClick={onNewProject} title="新增项目">
+                    <Plus />
+                    <span className="text-sidebar-foreground/70">还没有项目</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ) : projects.map((project) => (
+                <SidebarMenuItem key={project.id}>
+                  <SidebarMenuButton
+                    isActive={view.kind === 'project' && view.id === project.id}
+                    onClick={() => { onView({ kind: 'project', id: project.id }) }}
+                    title={`${project.repoPath}\n基线 ${project.baseBranch}`}
+                  >
+                    <FolderGit2 />
+                    <span>{project.name}</span>
+                    <SidebarMenuBadge>{counts[project.id] ?? 0}</SidebarMenuBadge>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

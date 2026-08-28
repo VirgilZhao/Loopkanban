@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
@@ -13,7 +13,7 @@ import { Storage } from '../src/storage/index.ts'
 import type { SpawnSpec } from '../src/subprocess/index.ts'
 
 const T0 = 1_700_000_000_000
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let sandbox: string
 let repo: string
@@ -45,9 +45,9 @@ const caps = (id: string): AgentCaps => ({
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'ready', position: 1,
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
     subject: id, description: '', acceptance: ['ok'],
-    repoPath: repo, baseBranch: 'main', blockedBy: [], writeScopes: [],
+    repoPath: repo, baseBranch: 'main', blockedBy: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }
 }
@@ -74,12 +74,12 @@ beforeEach(async () => {
   await capture(['git', '-C', repo, 'commit', '-qm', 'init'])
 
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
 
   const agents = [{ provider: provider('alpha'), caps: caps('alpha') }]
   runner = new Runner({
     storage: store, bus: new RunBus(), agents,
-    worktreeRoot: join(sandbox, 'worktrees'), artifactsRoot: join(sandbox, 'artifacts'),
+    artifactsRoot: join(sandbox, 'artifacts'),
     leaseTtlMs: 60_000,
   })
   scheduler = new Scheduler({ storage: store, runner, agents })

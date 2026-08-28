@@ -29,7 +29,7 @@ import type { DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
 import type { Run, Storage } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
-import { branchSlug, createWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+import { branchSlug, ensureWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
 
 /** 租期。跑着的 Run 会在到期前续，崩溃的 Run 到期后被回收。 */
 export const DEFAULT_LEASE_TTL_MS = 90_000
@@ -50,8 +50,6 @@ export interface RunnerOptions {
   readonly storage: Storage
   readonly bus: RunBus
   readonly agents: readonly DetectedAgent[]
-  /** worktree 的存放根目录，放在仓库外以免污染主工作区。 */
-  readonly worktreeRoot: string
   /** Run 产物（原始日志、last-message）目录。 */
   readonly artifactsRoot: string
   readonly leaseTtlMs?: number
@@ -131,7 +129,7 @@ export class Runner {
       provider: agent.provider.id,
       ttlMs: this.leaseTtl,
       now,
-      completed: new Set(storage.listTasks(task.boardId).filter((t) => t.column === 'done').map((t) => t.id)),
+      completed: new Set(storage.listTasks(task.projectId).filter((t) => t.column === 'done').map((t) => t.id)),
     })
     if (!claimed.ok) return { ok: false, reason: claimed.reason, detail: claimed.detail }
     if (!storage.commitTask(claimed.value)) {
@@ -175,14 +173,15 @@ export class Runner {
 
   /** 真正建（或复用）worktree、写 TASK.md、起进程并接管输出。 */
   private async launch(task: Task, runId: RunId, agent: DetectedAgent, prior?: Run): Promise<Run> {
-    const { storage, artifactsRoot, worktreeRoot } = this.options
+    const { storage, artifactsRoot } = this.options
     const { provider, caps } = agent
 
-    // 续跑复用上次的 worktree：Agent 要能看到自己上次的成果，
-    // 而不是在空目录里对着评审意见发懵。
-    const worktree = prior === undefined
-      ? await createWorktree(task.repoPath, worktreeRoot, task.id, branchSlug(task.id, task.subject), task.baseBranch)
-      : { path: prior.worktreePath, branch: prior.branch }
+    // worktree 属于任务：打回重做、换个 CLI 接着干，看到的都是同一个工作区
+    // 里上一次的成果，而不是在空目录里对着评审意见发懵。`prior` 只决定要不要
+    // 续会话，不决定在哪儿干活。
+    const worktree = await ensureWorktree(
+      task.repoPath, task.id, branchSlug(task.id, task.subject), task.baseBranch,
+    )
 
     const artifactsDir = join(artifactsRoot, runId)
     await mkdir(artifactsDir, { recursive: true })
@@ -486,10 +485,6 @@ export function renderTaskSpec(task: Task): string {
   if (task.description.trim().length > 0) lines.push(task.description.trim(), '')
   lines.push('## 验收标准', '')
   for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
-  if (task.writeScopes.length > 0) {
-    lines.push('', '## 写入范围', '', '只应改动以下路径下的文件：', '')
-    for (const scope of task.writeScopes) lines.push(`- \`${scope}\``)
-  }
   lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
   return `${lines.join('\n')}\n`
 }

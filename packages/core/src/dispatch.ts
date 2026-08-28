@@ -146,22 +146,3 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
 
   return { dispatches, skipped, reclaimable }
 }
-
-/**
- * 有重叠写入范围的正在运行的任务，用于向人提示可能的合并冲突。
- *
- * 这是**建议性**的：Bash、格式化工具、代码生成器都能绕过它。
- * @param task - 待检查的任务。
- * @param tasks - 全部任务。
- * @returns 与之写入范围重叠、且正在运行的任务 id。
- */
-export function overlappingWriteScopes(task: Task, tasks: readonly Task[]): TaskId[] {
-  if (task.writeScopes.length === 0) return []
-  const overlaps = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a)
-  return tasks
-    .filter((other) => other.id !== task.id
-      && other.column === 'running'
-      && other.repoPath === task.repoPath
-      && other.writeScopes.some((s) => task.writeScopes.some((t) => overlaps(s, t))))
-    .map((other) => other.id)
-}

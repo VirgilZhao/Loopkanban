@@ -1,6 +1,6 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Archive, CircleAlert, GitBranch, ListChecks, Lock, PauseCircle } from 'lucide-react'
+import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, PauseCircle } from 'lucide-react'
 import { cn } from '@/lib/utils.ts'
 import type { Skip, Task } from '@/types.ts'
 
@@ -20,10 +20,12 @@ interface Props {
   liveTool?: string | undefined
   /** 调度器这一轮为什么没派它。 */
   skip?: Skip | undefined
+  /** 所属项目名。只有概览里才给 —— 单项目视图下每张卡都一样，写了是噪音。 */
+  projectName?: string | undefined
   onSelect: (task: Task) => void
 }
 
-export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Props): React.JSX.Element {
+export function TaskCard({ task, now, selected, liveTool, skip, projectName, onSelect }: Props): React.JSX.Element {
   const archived = task.archivedAt !== undefined
   // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
   // 只换来一条错误提示。
@@ -101,11 +103,11 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
             <Lock className="size-3" />{task.blockedBy.length}
           </span>
         ) : null}
-        {task.writeScopes.length > 0 ? (
-          <span className="mono flex items-center gap-1 truncate text-[10px]">
-            <GitBranch className="size-3" />{task.writeScopes[0]}
+        {projectName === undefined ? null : (
+          <span className="flex min-w-0 items-center gap-1 truncate text-[10px]">
+            <FolderGit2 className="size-3 flex-none" />{projectName}
           </span>
-        ) : null}
+        )}
         <span className="flex-1" />
         <span className="mono text-[10px]">{since(task.updatedAt, now)}</span>
       </div>

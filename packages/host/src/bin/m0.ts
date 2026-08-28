@@ -18,7 +18,7 @@ import { detectAgents, type DetectedAgent } from '../agents/index.ts'
 import { claudeUsage } from '../agents/providers/claude-cli.ts'
 import type { RunContext } from '../agents/types.ts'
 import { spawnProcess } from '../subprocess/index.ts'
-import { branchSlug, createWorktree, worktreeDiff } from '../worktree/index.ts'
+import { branchSlug, ensureWorktree, worktreeDiff } from '../worktree/index.ts'
 
 const TASK = {
   id: 'task-1',
@@ -103,7 +103,7 @@ async function main(): Promise<void> {
   // ── 2. 准备仓库与隔离 worktree ──────────────────────────────────
   const repo = await scratchRepo()
   const branch = branchSlug(TASK.id, TASK.subject)
-  const worktree = await createWorktree(repo, join(repo, '..', 'worktrees'), TASK.id, branch, 'main')
+  const worktree = await ensureWorktree(repo, TASK.id, branch, 'main')
   log('worktree', `${worktree.path}  ${C.dim(`(分支 ${worktree.branch})`)}`)
 
   const artifactsDir = join(repo, '..', 'artifacts')

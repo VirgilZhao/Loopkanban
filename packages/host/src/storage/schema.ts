@@ -83,6 +83,15 @@ export const MIGRATIONS: readonly string[] = [
   `UPDATE tasks SET column_name = 'review' WHERE column_name = 'failed';`,
   // 归档标记。正交于 column：归档不改变卡在哪一列，取消归档就回到原位。
   `ALTER TABLE tasks ADD COLUMN archived_at INTEGER;`,
+  // board → project。名字换了，东西是同一个：一个仓库目录 + 一条基线分支，
+  // 任务挂在它下面。界面上不再有"多个看板"这个概念，只有项目与总览。
+  `
+  ALTER TABLE boards RENAME TO projects;
+  ALTER TABLE tasks RENAME COLUMN board_id TO project_id;
+  `,
+  // 写入范围（建议性的并发冲突预警）退场：每个任务现在都在项目派生的
+  // 独立 worktree 里干活，冲突推迟到合并时由 git 处理，比前缀猜测准确得多。
+  `ALTER TABLE tasks DROP COLUMN write_scopes_json;`,
 ]
 
 /** 当前代码期望的结构版本。 */

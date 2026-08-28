@@ -11,12 +11,13 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@loopkanban/core'
-import { asBoardId, asRunId, asTaskId } from '@loopkanban/core'
+import type { Column, Lease, ProjectId, RunId, Task, TaskId } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId } from '@loopkanban/core'
 import { migrate } from './schema.ts'
 
-export interface Board {
-  readonly id: BoardId
+/** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
+export interface Project {
+  readonly id: ProjectId
   readonly name: string
   readonly repoPath: string
   readonly baseBranch: string
@@ -70,7 +71,7 @@ export interface RunEvent {
 
 interface TaskRow {
   id: string
-  board_id: string
+  project_id: string
   revision: number
   column_name: string
   position: number
@@ -81,7 +82,6 @@ interface TaskRow {
   base_branch: string
   preferred_provider: string | null
   blocked_by_json: string
-  write_scopes_json: string
   lease_json: string | null
   feedback: string | null
   archived_at: number | null
@@ -109,7 +109,7 @@ function toTask(row: TaskRow): Task {
   const lease = row.lease_json === null ? undefined : (JSON.parse(row.lease_json) as Lease)
   return {
     id: asTaskId(row.id),
-    boardId: asBoardId(row.board_id),
+    projectId: asProjectId(row.project_id),
     revision: row.revision,
     column: row.column_name as Column,
     position: row.position,
@@ -120,7 +120,6 @@ function toTask(row: TaskRow): Task {
     baseBranch: row.base_branch,
     ...(preferred === null ? {} : { preferredProvider: preferred }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
-    writeScopes: JSON.parse(row.write_scopes_json) as string[],
     ...(lease === undefined ? {} : { lease }),
     ...(row.feedback === null ? {} : { feedback: row.feedback }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
@@ -167,20 +166,20 @@ export class Storage {
     this.db.close()
   }
 
-  // ── Board ──────────────────────────────────────────────────────
+  // ── Project ────────────────────────────────────────────────────
 
-  createBoard(board: Board): void {
+  createProject(project: Project): void {
     this.db.prepare(
-      'INSERT INTO boards (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
-    ).run(board.id, board.name, board.repoPath, board.baseBranch, board.createdAt)
+      'INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(project.id, project.name, project.repoPath, project.baseBranch, project.createdAt)
   }
 
-  listBoards(): Board[] {
-    const rows = this.db.prepare('SELECT * FROM boards ORDER BY created_at').all() as unknown as {
+  listProjects(): Project[] {
+    const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at').all() as unknown as {
       id: string; name: string; repo_path: string; base_branch: string; created_at: number
     }[]
     return rows.map((row) => ({
-      id: asBoardId(row.id),
+      id: asProjectId(row.id),
       name: row.name,
       repoPath: row.repo_path,
       baseBranch: row.base_branch,
@@ -188,21 +187,25 @@ export class Storage {
     }))
   }
 
+  getProject(id: ProjectId): Project | null {
+    return this.listProjects().find((project) => project.id === id) ?? null
+  }
+
   // ── Task ───────────────────────────────────────────────────────
 
   createTask(task: Task): void {
     this.db.prepare(`
       INSERT INTO tasks (
-        id, board_id, revision, column_name, position, subject, description,
+        id, project_id, revision, column_name, position, subject, description,
         acceptance_json, repo_path, base_branch, preferred_provider,
-        blocked_by_json, write_scopes_json, lease_json, feedback, archived_at,
+        blocked_by_json, lease_json, feedback, archived_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      task.id, task.boardId, task.revision, task.column, task.position,
+      task.id, task.projectId, task.revision, task.column, task.position,
       task.subject, task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null,
-      JSON.stringify(task.blockedBy), JSON.stringify(task.writeScopes),
+      JSON.stringify(task.blockedBy),
       task.lease === undefined ? null : JSON.stringify(task.lease),
       task.feedback ?? null,
       task.archivedAt ?? null,
@@ -215,10 +218,10 @@ export class Storage {
     return row === undefined ? null : toTask(row)
   }
 
-  listTasks(boardId?: BoardId): Task[] {
-    const rows = boardId === undefined
+  listTasks(projectId?: ProjectId): Task[] {
+    const rows = projectId === undefined
       ? this.db.prepare('SELECT * FROM tasks ORDER BY position').all()
-      : this.db.prepare('SELECT * FROM tasks WHERE board_id = ? ORDER BY position').all(boardId)
+      : this.db.prepare('SELECT * FROM tasks WHERE project_id = ? ORDER BY position').all(projectId)
     return (rows as unknown as TaskRow[]).map(toTask)
   }
 
@@ -237,14 +240,14 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, subject = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?,
-        blocked_by_json = ?, write_scopes_json = ?, lease_json = ?, feedback = ?,
+        blocked_by_json = ?, lease_json = ?, feedback = ?,
         archived_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.subject, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
       next.preferredProvider ?? null,
-      JSON.stringify(next.blockedBy), JSON.stringify(next.writeScopes),
+      JSON.stringify(next.blockedBy),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.feedback ?? null,
       next.archivedAt ?? null,

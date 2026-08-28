@@ -10,7 +10,7 @@ import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, DiffView as Diff, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
+import type { Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
 const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
@@ -52,6 +52,8 @@ function summarize(event: StreamEvent): string {
 
 interface Props {
   task: Task
+  /** 任务所属项目。任务干活的地方是它派生出来的 worktree。 */
+  project: Project | null
   agents: Agent[]
   onLiveTool: (taskId: string, tool: string | undefined) => void
   onChanged: () => void
@@ -59,12 +61,13 @@ interface Props {
   onClose: () => void
 }
 
-export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose }: Props): React.JSX.Element {
+export function RunPanel({
+  task, project, agents, onLiveTool, onChanged, onError, onClose,
+}: Props): React.JSX.Element {
   const [runs, setRuns] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
   const [diff, setDiff] = useState<Diff | null>(null)
   const [feedback, setFeedback] = useState('')
-  const [overlaps, setOverlaps] = useState<string[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -97,16 +100,6 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
       if (event.kind === 'finished') onLiveTool(task.id, undefined)
     })
   }, [latest, task.id, onLiveTool])
-
-  // 写入范围重叠预警：同仓库、正在跑、路径前缀相撞的任务。
-  useEffect(() => {
-    if (task.writeScopes.length === 0) { setOverlaps([]); return undefined }
-    let cancelled = false
-    void api.overlaps(task.id)
-      .then(({ overlaps: ids }) => { if (!cancelled) setOverlaps(ids) })
-      .catch(() => { if (!cancelled) setOverlaps([]) })
-    return () => { cancelled = true }
-  }, [task.id, task.revision])
 
   // 只在有执行记录时拉 diff；卡片状态变了要重拉（打回后又跑了一轮）。
   useEffect(() => {
@@ -194,8 +187,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               <h2 className="mt-2 text-[15px] font-semibold leading-snug text-ink">{task.subject}</h2>
             </DialogTitle>
             <DialogDescription className="mt-1 text-xs text-ink-faint">
-              仓库 <span className="mono">{task.repoPath.split('/').pop()}</span> · 基线{' '}
-              <span className="mono">{task.baseBranch}</span>
+              {project?.name ?? '未知项目'} · 基线 <span className="mono">{task.baseBranch}</span>
             </DialogDescription>
           </div>
           <Button
@@ -300,17 +292,6 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
           </div>
         ) : null}
 
-        {/* 写入范围撞车预警。建议性的 —— Bash 和代码生成器都能绕过它。 */}
-        {overlaps.length === 0 ? null : (
-          <div className="flex items-start gap-2 border-b border-lamp-fail/30 bg-lamp-fail/[0.06] px-4 py-2.5">
-            <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
-            <p className="text-xs leading-relaxed text-lamp-fail">
-              写入范围与正在执行的 <span className="mono">{overlaps.join('、')}</span> 重叠，
-              可能撞车。这只是提示，不是锁。
-            </p>
-          </div>
-        )}
-
         {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
         {!archived && task.column === 'review' ? (
           <div className="border-b border-hairline px-4 py-3">
@@ -389,6 +370,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
             )}
             <TaskEditor
               task={task}
+              project={project}
               agents={agents}
               busy={busy}
               onSave={(edit: TaskEdit) => {

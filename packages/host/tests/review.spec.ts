@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { archiveTask, asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { Review } from '../src/review/index.ts'
 import { Storage } from '../src/storage/index.ts'
-import { createWorktree, branchSlug, currentBranch, isClean } from '../src/worktree/index.ts'
+import { branchSlug, currentBranch, ensureWorktree, isClean } from '../src/worktree/index.ts'
 
 const T0 = 1_700_000_000_000
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let sandbox: string
 let repo: string
@@ -21,9 +21,9 @@ const git = (cwd: string, ...args: string[]) => capture(['git', '-C', cwd, ...ar
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'review', position: 1,
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'review', position: 1,
     subject: '加个 slugify', description: '', acceptance: ['有测试'],
-    repoPath: repo, baseBranch: 'main', blockedBy: [], writeScopes: [],
+    repoPath: repo, baseBranch: 'main', blockedBy: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }
 }
@@ -32,7 +32,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
 async function reviewable(id = 't1'): Promise<{ worktreePath: string; branch: string }> {
   store.createTask(task({ id }))
   const branch = branchSlug(id, 'slugify')
-  const wt = await createWorktree(repo, join(sandbox, 'worktrees'), id, branch, 'main')
+  const wt = await ensureWorktree(repo, id, branch, 'main')
   await writeFile(join(wt.path, 'slugify.js'), 'export const slugify = (s) => s\n', 'utf8')
   store.createRun({
     id: asRunId(`run-${id}`), taskId: asTaskId(id), provider: 'codex', cliVersion: '0.150.1',
@@ -52,8 +52,8 @@ beforeEach(async () => {
   await git(repo, 'commit', '-qm', 'init')
 
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
-  review = new Review({ storage: store, worktreeRoot: join(sandbox, 'worktrees'), now: () => T0 + 5000 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
+  review = new Review({ storage: store, now: () => T0 + 5000 })
 })
 
 afterEach(async () => { store.close(); await rm(sandbox, { recursive: true, force: true }) })
@@ -241,7 +241,6 @@ describe('CAS 与不可逆操作的顺序（回归）', () => {
         listRuns: store.listRuns.bind(store),
         commitTask: store.commitTask.bind(store),
       } as unknown as Storage,
-      worktreeRoot: join(sandbox, 'worktrees'),
       now: () => T0 + 5000,
     })
     const first = await conflicting.accept(asTaskId('t1'))

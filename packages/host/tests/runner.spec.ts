@@ -2,17 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
 import { RunBus } from '../src/server/bus.ts'
 import { Storage } from '../src/storage/index.ts'
+import { isClean, worktreeDir } from '../src/worktree/index.ts'
 import type { SpawnSpec } from '../src/subprocess/index.ts'
 import { Runner, renderPrompt, renderTaskSpec } from '../src/runner/index.ts'
 
 const T0 = 1_700_000_000_000
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let sandbox: string
 let repo: string
@@ -60,11 +61,11 @@ const caps = (): AgentCaps => ({
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'ready', position: 1,
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
     subject: '加个 greet 函数', description: '要有测试',
     acceptance: ['greet.js 存在', '有单测'],
     repoPath: repo, baseBranch: 'main',
-    blockedBy: [], writeScopes: [], createdAt: T0, updatedAt: T0, ...rest,
+    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -72,7 +73,6 @@ function runner(provider: AgentProvider, patch: Partial<ConstructorParameters<ty
   return new Runner({
     storage: store, bus,
     agents: [{ provider, caps: caps() }],
-    worktreeRoot: join(sandbox, 'worktrees'),
     artifactsRoot: join(sandbox, 'artifacts'),
     leaseTtlMs: 60_000,
     timeoutMs: 20_000,
@@ -92,7 +92,7 @@ beforeEach(async () => {
   await capture(['git', '-C', repo, 'commit', '-qm', 'init'])
 
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
   bus = new RunBus()
 })
 
@@ -110,9 +110,8 @@ async function settle(runId: string, timeoutMs = 15_000): Promise<void> {
 
 describe('renderTaskSpec / renderPrompt', () => {
   it('把验收标准写成 checklist，并声明约束', () => {
-    const spec = renderTaskSpec(task({ id: 't1', writeScopes: ['src/auth/'] }))
+    const spec = renderTaskSpec(task({ id: 't1' }))
     expect(spec).toContain('- [ ] greet.js 存在')
-    expect(spec).toContain('src/auth/')
     expect(spec).toContain('不要提交或推送')
   })
 
@@ -278,13 +277,43 @@ describe('worktree 隔离', () => {
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
 
-    expect(started.run.worktreePath).toContain('worktrees')
+    // worktree 长在项目自己的目录里：项目目录/.loopkanban/worktrees/<taskId>
+    expect(started.run.worktreePath).toBe(worktreeDir(repo, 't1'))
     expect(started.run.branch).toContain('task/t1')
     // TASK.md 写在 worktree 里，不在主仓库。
     await expect(readFile(join(started.run.worktreePath, 'TASK.md'), 'utf8')).resolves.toContain('验收标准')
     await expect(readFile(join(repo, 'TASK.md'), 'utf8')).rejects.toThrow()
+    // 而主工作区依然干净 —— worktree 目录已被写进本地排除表。
+    expect(await isClean(repo)).toBe(true)
 
     await settle(started.run.id)
+  })
+
+  it('换个 Agent 接着干，还是同一个 worktree —— 它属于任务，不属于谁在跑', async () => {
+    store.createTask(task({ id: 't1' }))
+    const first = await runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+      .start(asTaskId('t1'))
+    if (!first.ok) throw new Error(first.detail)
+    await settle(first.run.id)
+    await writeFile(join(first.run.worktreePath, 'half.txt'), '上一轮干了一半\n', 'utf8')
+
+    // 打回重来：卡回到 ready，换一个 provider 接手。
+    const after = store.getTask(asTaskId('t1'))
+    if (after === null) throw new Error('卡没了')
+    store.commitTask({ ...after, column: 'ready', lease: undefined, revision: after.revision + 1 })
+    const other = scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })])
+    const second = await new Runner({
+      storage: store, bus,
+      agents: [{ provider: { ...other, id: 'codex' }, caps: caps() }],
+      artifactsRoot: join(sandbox, 'artifacts'),
+      leaseTtlMs: 60_000, timeoutMs: 20_000,
+    }).start(asTaskId('t1'))
+    if (!second.ok) throw new Error(second.detail)
+
+    expect(second.run.worktreePath).toBe(first.run.worktreePath)
+    // 上一轮的半成品还在，Agent 不是在空目录里对着评审意见发懵。
+    await expect(readFile(join(second.run.worktreePath, 'half.txt'), 'utf8')).resolves.toContain('干了一半')
+    await settle(second.run.id)
   })
 })
 

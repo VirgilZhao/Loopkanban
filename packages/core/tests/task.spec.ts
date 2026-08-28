@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  acquireLease, archiveTask, asBoardId, asRunId, asTaskId, canTransition, COLUMNS, deleteTask,
+  acquireLease, archiveTask, asProjectId, asRunId, asTaskId, canTransition, COLUMNS, deleteTask,
   dropDependency, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease, requestChanges,
   unarchiveTask, type Task,
 } from '../src/index.ts'
@@ -10,7 +10,7 @@ const T0 = 1_000_000
 function task(patch: Partial<Task> = {}): Task {
   return {
     id: asTaskId('t1'),
-    boardId: asBoardId('b1'),
+    projectId: asProjectId('b1'),
     revision: 1,
     column: 'ready',
     position: 0,
@@ -20,7 +20,6 @@ function task(patch: Partial<Task> = {}): Task {
     repoPath: '/repo',
     baseBranch: 'main',
     blockedBy: [],
-    writeScopes: [],
     createdAt: T0,
     updatedAt: T0,
     ...patch,
@@ -250,12 +249,11 @@ describe('editTask', () => {
   })
 
   it('没提到的字段原样保留', () => {
-    const original = task({ column: 'backlog', description: '原描述', writeScopes: ['src/'] })
+    const original = task({ column: 'backlog', description: '原描述' })
     const result = edit(original, { subject: '只改标题' })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.value.description).toBe('原描述')
-    expect(result.value.writeScopes).toEqual(['src/'])
   })
 
   it('revision 不匹配时拒绝', () => {

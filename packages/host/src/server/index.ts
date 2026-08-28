@@ -15,14 +15,15 @@ import type { AddressInfo, Socket } from 'node:net'
 import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  archiveTask, asBoardId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
-  overlappingWriteScopes, unarchiveTask, type Column, type Task, type TaskEdit,
+  archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
+  unarchiveTask, type Column, type Task, type TaskEdit,
 } from '@loopkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
 import type { Storage } from '../storage/index.ts'
+import { detectBaseBranch, isGitRepo } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { RunBus } from './bus.ts'
 
@@ -178,10 +179,52 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     // ── 看板状态 ─────────────────────────────────────────────
     if (method === 'GET' && pathname === '/api/state') {
       sendJson(res, 200, {
-        boards: storage.listBoards(),
+        projects: storage.listProjects(),
         tasks: storage.listTasks(),
       }, extraHeaders)
       return
+    }
+
+    // ── 项目：列出与新增 ─────────────────────────────────────
+    if (pathname === '/api/projects') {
+      if (method === 'GET') {
+        sendJson(res, 200, { projects: storage.listProjects() }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req) as Partial<{ name: string; path: string }> | undefined
+        const name = body?.name?.trim() ?? ''
+        const raw = body?.path?.trim() ?? ''
+        if (name.length === 0 || raw.length === 0) {
+          sendJson(res, 400, { error: 'bad-request', detail: '需要项目名称与目录' })
+          return
+        }
+        if (!isAbsolute(raw)) {
+          sendJson(res, 422, { error: 'path-not-absolute', detail: '项目目录要给绝对路径' })
+          return
+        }
+        const repoPath = resolvePath(raw)
+        // 必须是 git 仓库：任务在它派生的 worktree 上干活，不是仓库就无从派生。
+        if (!(await isGitRepo(repoPath))) {
+          sendJson(res, 422, { error: 'not-a-repo', detail: `${repoPath} 不是一个 git 仓库` })
+          return
+        }
+        const baseBranch = await detectBaseBranch(repoPath)
+        if (storage.listProjects().some((project) => project.repoPath === repoPath)) {
+          sendJson(res, 409, { error: 'project-exists', detail: '这个目录已经是一个项目了' })
+          return
+        }
+        const project = {
+          id: asProjectId(`p-${randomUUID().slice(0, 8)}`),
+          name,
+          repoPath,
+          baseBranch,
+          createdAt: Date.now(),
+        }
+        storage.createProject(project)
+        sendJson(res, 201, { project }, extraHeaders)
+        return
+      }
     }
 
     // ── 已探测到的 Agent ────────────────────────────────────
@@ -232,21 +275,24 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     // ── 新建任务 ────────────────────────────────────────────
     if (method === 'POST' && pathname === '/api/tasks') {
       const body = await readJsonBody(req) as Partial<{
-        boardId: string; subject: string; description: string; acceptance: string[]
-        repoPath: string; baseBranch: string; preferredProvider: string; writeScopes: string[]
+        projectId: string; subject: string; description: string; acceptance: string[]
+        preferredProvider: string
       }> | undefined
       if (body?.subject === undefined || body.subject.trim().length === 0) {
         sendJson(res, 400, { error: 'bad-request', detail: '需要 subject' })
         return
       }
-      const board = storage.listBoards().find((b) => b.id === body.boardId) ?? storage.listBoards()[0]
-      if (board === undefined) { sendJson(res, 400, { error: 'no-board' }); return }
+      // 仓库与基线跟着项目走，不由建卡方指定 —— 任务干活的地方是这个项目
+      // 派生出来的 worktree，两者对不上就没有意义。
+      const projects = storage.listProjects()
+      const project = projects.find((p) => p.id === body.projectId) ?? projects[0]
+      if (project === undefined) { sendJson(res, 400, { error: 'no-project' }); return }
 
       const now = Date.now()
-      const tasks = storage.listTasks(board.id)
+      const tasks = storage.listTasks(project.id)
       const created: Task = {
         id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
-        boardId: asBoardId(board.id),
+        projectId: project.id,
         revision: 1,
         // 新卡一律先落 backlog：验收标准没写全就不该进队列。
         column: 'backlog',
@@ -254,11 +300,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         subject: body.subject.trim(),
         description: body.description ?? '',
         acceptance: (body.acceptance ?? []).filter((a) => a.trim().length > 0),
-        repoPath: body.repoPath ?? board.repoPath,
-        baseBranch: body.baseBranch ?? board.baseBranch,
+        repoPath: project.repoPath,
+        baseBranch: project.baseBranch,
         ...(body.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
         blockedBy: [],
-        writeScopes: body.writeScopes ?? [],
         createdAt: now,
         updatedAt: now,
       }
@@ -325,7 +370,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 下游对它的依赖要一并摘掉：留着一个查无此卡的 id，那些卡会永远停在
       // "依赖未完成"，而界面上没有任何操作能解开它。
       const now = Date.now()
-      const cascade = storage.listTasks(task.boardId)
+      const cascade = storage.listTasks(task.projectId)
         .filter((other) => other.id !== task.id)
         .map((other) => dropDependency(other, task.id, now))
         .filter((next): next is Task => next !== null)
@@ -340,16 +385,6 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
       if (review !== undefined) await review.purge(task, runs)
       sendJson(res, 200, { deleted: true, unblocked: cascade.map((t) => t.id) }, extraHeaders)
-      return
-    }
-
-    // ── 写入范围冲突预警 ────────────────────────────────────
-    const overlapOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/overlaps$/)
-    if (method === 'GET' && overlapOf !== null) {
-      const task = storage.getTask(asTaskId(decodeURIComponent(overlapOf)))
-      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
-      const ids = overlappingWriteScopes(task, storage.listTasks(task.boardId))
-      sendJson(res, 200, { overlaps: ids }, extraHeaders)
       return
     }
 

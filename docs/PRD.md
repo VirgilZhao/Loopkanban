@@ -116,20 +116,26 @@ interface Storage { /* 域 KV + 事件日志追加 */ }
 ### 2.3 数据模型
 
 ```ts
+interface Project {
+  id: ProjectId
+  name: string                     // 用户认得出的名字
+  repoPath: string                 // 本机上的 git 仓库目录
+  baseBranch: string               // 建项目时取仓库当时所在的分支
+}
+
 interface Task {
   id: TaskId
   revision: number                 // CAS，每次变更 +1
-  boardId: BoardId
+  projectId: ProjectId
   column: 'backlog' | 'ready' | 'running' | 'review' | 'done'
   position: number
   subject: string
   description: string              // Markdown
   acceptance: string[]             // 验收标准 checklist
-  repoPath: string
+  repoPath: string                 // 跟着项目走，建卡时定下，之后不由人改
   baseBranch: string
   preferredProvider?: string       // 只能选已探测到的
   blockedBy: TaskId[]
-  writeScopes: string[]            // 建议性路径前缀，用于并发冲突预警
   lease?: { runId: RunId; provider: string; acquiredAt: string; expiresAt: string }
   archivedAt?: string              // 归档标记，正交于 column
 }
@@ -151,6 +157,25 @@ interface Run {
 // append-only，UI 从它投影，SSE 从它续传
 interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; at: string }
 ```
+
+### 项目与 worktree 的归属
+
+**项目就是一个 git 仓库目录**，任务挂在它下面；界面上只有「概览」（所有项目
+的卡）与逐个项目两种视角，没有"多个看板"这个中间概念 —— 它不对应任何真实
+的东西，只是多一层要维护的名字。
+
+**worktree 属于任务，不属于某次执行、更不属于某个 Agent**：位置固定在
+`<项目目录>/.loopkanban/worktrees/<taskId>`，取用是幂等的 —— 目录在就直接用，
+分支在就挂回去。打回重做、换个 CLI 接着干、跨进程重启，看到的都是同一个工作区
+里上一次的成果，而不是在空目录里对着评审意见发懵。
+
+放进项目目录（而不是数据目录）是为了让 Agent 的工作区和它要改的代码待在一起，
+代价是主仓库会多出一坨未跟踪文件 —— 而"主工作区是否干净"正是合并前的硬前置
+条件。所以建第一个 worktree 时会把 `/.loopkanban/` 写进 `.git/info/exclude`：
+那是仓库的本地排除表，不是用户的 `.gitignore`，我们不该动用户的文件。
+
+写入范围（`writeScopes`，建议性的路径前缀预警）随之退场：每个任务本来就在
+自己的 worktree 里，冲突推迟到合并时由 git 判定，比前缀猜测准确得多。
 
 ### 2.4 看板流转
 
@@ -571,7 +596,7 @@ Review**。改成 CAS 先落定，删除只是收拾场地，失败也不影响�
 | **CLI 输出格式变化**（codex 的 `--json` 仍是 experimental 别名） | 解析失败 | 解析失败降级纯文本，不影响执行；完成判定优先用 `-o` 文件和退出码这类稳定信号 |
 | **进程树 kill 写错** | 孤儿进程、烧钱、资源泄漏 | §3.4 规格写死；针对性测试（起会 fork 子进程的任务再 kill）；启动时对账清理 |
 | **本地 HTTP 接口能执行任意代码** | 安全事故 | §4 第 4 条，M1 就做对 |
-| 并行 Agent 冲突 | 合并地狱 | worktree 隔离 + 同仓库并发上限 + `blockedBy` + `writeScopes` 预警 |
+| 并行 Agent 冲突 | 合并地狱 | worktree 隔离 + 同仓库并发上限 + `blockedBy`，冲突推迟到合并时交给 git |
 | Agent 跑飞 / 死循环 | 烧钱、占资源 | 超时终止、可随时 kill |
 | 自己实现 = 工作量比借 dsh 大 | 周期变长 | 只借六个模式不借框架，砍掉 Cordis / slot / i18n 那套；沙箱推迟 |
 

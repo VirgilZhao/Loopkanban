@@ -8,14 +8,14 @@
  */
 
 import { access, rm } from 'node:fs/promises'
-import { join } from 'node:path'
 import { moveTask, requestChanges, type Task, type TaskId } from '@loopkanban/core'
 import type { Run, Storage } from '../storage/index.ts'
-import { commitAll, mergeBranch, removeWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+import {
+  commitAll, mergeBranch, removeWorktree, worktreeDiff, worktreeDir, type Worktree,
+} from '../worktree/index.ts'
 
 export interface ReviewOptions {
   readonly storage: Storage
-  readonly worktreeRoot: string
   readonly now?: () => number
 }
 
@@ -192,7 +192,7 @@ export class Review {
     if (run !== null) {
       // 连分支一起删：用户明确表示这次成果不要了。
       await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
-      await rm(join(this.options.worktreeRoot, taskId), { recursive: true, force: true })
+      await rm(worktreeDir(task.repoPath, taskId), { recursive: true, force: true })
     }
     return { ok: true }
   }
@@ -221,7 +221,7 @@ export class Review {
     for (const run of runs) {
       await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
     }
-    await rm(join(this.options.worktreeRoot, task.id), { recursive: true, force: true }).catch(() => undefined)
+    await rm(worktreeDir(task.repoPath, task.id), { recursive: true, force: true }).catch(() => undefined)
   }
 }
 

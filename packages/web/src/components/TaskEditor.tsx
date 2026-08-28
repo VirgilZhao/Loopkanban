@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react'
-import { Plus, X } from 'lucide-react'
+import { FolderGit2, Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, Task, TaskEdit } from '@/types.ts'
+import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
 interface Props {
   task: Task
+  /** 任务所属项目；卡片就在它派生出来的 worktree 里干活。 */
+  project: Project | null
   agents: Agent[]
   busy: boolean
   onSave: (edit: TaskEdit) => void
@@ -20,7 +22,6 @@ interface Draft {
   description: string
   acceptance: string[]
   preferredProvider: string | undefined
-  writeScopes: string[]
 }
 
 /** 从任务取出可编辑的那部分，作为表单初值。 */
@@ -30,11 +31,10 @@ function draftOf(task: Task): Draft {
     description: task.description,
     acceptance: task.acceptance.length > 0 ? task.acceptance : [''],
     preferredProvider: task.preferredProvider,
-    writeScopes: task.writeScopes,
   }
 }
 
-export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Element {
+export function TaskEditor({ task, project, agents, busy, onSave }: Props): React.JSX.Element {
   const [draft, setDraft] = useState(() => draftOf(task))
   // 两种冻结，同一套只读：正在执行的、以及归档的。字段上的 disabled 全靠它。
   const locked = task.column === 'running' || task.archivedAt !== undefined
@@ -140,21 +140,15 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
           </div>
         </Field>
 
-        <Field label="写入范围" hint="建议性，用于并发冲突预警">
-          <Input
-            value={draft.writeScopes.join(', ')}
-            disabled={locked}
-            placeholder="src/auth/, docs/"
-            className="mono"
-            onChange={(e) => {
-              setDraft((d) => ({ ...d, writeScopes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) }))
-            }}
-          />
-        </Field>
-
-        <Field label="仓库">
-          <p className="mono text-xs text-ink-faint">{task.repoPath}</p>
-          <p className="mono text-xs text-ink-faint">基线 {task.baseBranch}</p>
+        <Field label="项目" hint="任务在它派生出来的 worktree 里执行，做完再合回基线">
+          <div className="rounded-md border border-hairline px-3 py-2">
+            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
+              <FolderGit2 className="size-3.5 flex-none text-ink-faint" />
+              {project?.name ?? '未知项目'}
+            </p>
+            <p className="mono mt-1 break-all text-xs text-ink-faint">{task.repoPath}</p>
+            <p className="mono text-xs text-ink-faint">基线 {task.baseBranch}</p>
+          </div>
         </Field>
       </div>
 

@@ -11,9 +11,9 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { asBoardId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
 import { createToken } from '../server/auth.ts'
 import { detectAgents } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
@@ -23,6 +23,7 @@ import { Runner } from '../runner/index.ts'
 import { Scheduler } from '../scheduler/index.ts'
 import { installService, planService, uninstallService, type ServicePlan } from '../service/index.ts'
 import { Storage } from '../storage/index.ts'
+import { detectBaseBranch } from '../worktree/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -90,11 +91,19 @@ async function resolveToken(dir: string, rotate: boolean): Promise<string> {
  * 用户第一次打开自动驾驶时它们会被立刻派出去，让 Agent 对着一个陌生仓库
  * 做一堆牛头不对马嘴的活。默认值不该有这种惊吓。
  */
-function seed(storage: Storage, repoPath: string): void {
-  if (storage.listBoards().length > 0) return
+async function seed(storage: Storage, repoPath: string): Promise<void> {
+  if (storage.listProjects().length > 0) return
   const now = Date.now()
-  const boardId = asBoardId('board-default')
-  storage.createBoard({ id: boardId, name: '默认看板', repoPath, baseBranch: 'main', createdAt: now })
+  const projectId = asProjectId('project-default')
+  const baseBranch = await detectBaseBranch(repoPath)
+  storage.createProject({
+    id: projectId,
+    // 目录名就是项目名 —— 用户认得出的是它，不是"默认看板"。
+    name: basename(repoPath),
+    repoPath,
+    baseBranch,
+    createdAt: now,
+  })
 
   const samples: { id: string; column: Task['column']; subject: string; acceptance: string[] }[] = [
     {
@@ -115,12 +124,12 @@ function seed(storage: Storage, repoPath: string): void {
   ]
   for (const [index, sample] of samples.entries()) {
     storage.createTask({
-      id: asTaskId(sample.id), boardId, revision: 1,
+      id: asTaskId(sample.id), projectId, revision: 1,
       column: sample.column, position: index + 1,
       subject: sample.subject, description: '',
       acceptance: sample.acceptance,
-      repoPath, baseBranch: 'main',
-      blockedBy: [], writeScopes: [],
+      repoPath, baseBranch,
+      blockedBy: [],
       createdAt: now, updatedAt: now,
     })
   }
@@ -220,7 +229,7 @@ async function main(): Promise<void> {
   const dir = flag('data') ?? dataDir()
   await mkdir(dir, { recursive: true })
   const storage = Storage.open(join(dir, 'loopkanban.db'))
-  seed(storage, process.cwd())
+  await seed(storage, process.cwd())
 
   console.log(C.bold('\n  LOOPKANBAN') + C.dim('  agent dispatch\n'))
 
@@ -246,13 +255,11 @@ async function main(): Promise<void> {
 
   // ── 执行器 ───────────────────────────────────────────────
   const bus = new RunBus()
-  const worktreeRoot = join(dir, 'worktrees')
   const runner = new Runner({
     storage, bus, agents,
-    worktreeRoot,
     artifactsRoot: join(dir, 'runs'),
   })
-  const review = new Review({ storage, worktreeRoot })
+  const review = new Review({ storage })
   const scheduler = new Scheduler({ storage, runner, agents })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。

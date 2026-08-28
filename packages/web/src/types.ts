@@ -21,7 +21,7 @@ export interface DiffView {
 
 export interface Task {
   id: string
-  boardId: string
+  projectId: string
   revision: number
   column: Column
   position: number
@@ -32,7 +32,6 @@ export interface Task {
   baseBranch: string
   preferredProvider?: string
   blockedBy: string[]
-  writeScopes: string[]
   lease?: Lease
   feedback?: string
   /** 归档时间；缺席表示没归档。归档正交于 column，不改变卡在哪一列。 */
@@ -46,13 +45,11 @@ export interface TaskEdit {
   subject?: string
   description?: string
   acceptance?: string[]
-  repoPath?: string
-  baseBranch?: string
   preferredProvider?: string | undefined
-  writeScopes?: string[]
 }
 
-export interface Board {
+/** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
+export interface Project {
   id: string
   name: string
   repoPath: string

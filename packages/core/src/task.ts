@@ -6,7 +6,7 @@
  * 会有一方明确失败，而不是双方都以为自己成功了。
  */
 
-import type { BoardId, RunId, TaskId } from './ids.ts'
+import type { ProjectId, RunId, TaskId } from './ids.ts'
 
 /** 看板的列。顺序即流转顺序。 */
 export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
@@ -23,7 +23,7 @@ export interface Lease {
 
 export interface Task {
   readonly id: TaskId
-  readonly boardId: BoardId
+  readonly projectId: ProjectId
   /** 单调递增，每次变更 +1，用作 compare-and-set 的凭据。 */
   readonly revision: number
   readonly column: Column
@@ -33,13 +33,12 @@ export interface Task {
   readonly description: string
   /** 验收标准。进入 ready 要求非空 —— 没有判据的任务无法验收。 */
   readonly acceptance: readonly string[]
+  /** 项目仓库路径。跟着项目走，建卡时定下，之后不由人改。 */
   readonly repoPath: string
   readonly baseBranch: string
   /** 指定执行器；未指定则由调度器在已探测到的 provider 里挑。 */
   readonly preferredProvider?: string | undefined
   readonly blockedBy: readonly TaskId[]
-  /** 建议性的写入范围前缀，用于并发冲突预警，不是锁。 */
-  readonly writeScopes: readonly string[]
   /** `undefined` 表示未被占用；清除租约就是把它置回 undefined。 */
   readonly lease?: Lease | undefined
   /**
@@ -294,11 +293,8 @@ export interface TaskEdit {
   readonly subject?: string
   readonly description?: string
   readonly acceptance?: readonly string[]
-  readonly repoPath?: string
-  readonly baseBranch?: string
   readonly preferredProvider?: string | undefined
   readonly blockedBy?: readonly TaskId[]
-  readonly writeScopes?: readonly string[]
 }
 
 export interface EditRequest {
@@ -340,11 +336,8 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
     ...(subject === undefined ? {} : { subject }),
     ...(edit.description === undefined ? {} : { description: edit.description }),
     ...(acceptance === undefined ? {} : { acceptance }),
-    ...(edit.repoPath === undefined ? {} : { repoPath: edit.repoPath }),
-    ...(edit.baseBranch === undefined ? {} : { baseBranch: edit.baseBranch }),
     ...('preferredProvider' in edit ? { preferredProvider: edit.preferredProvider } : {}),
     ...(edit.blockedBy === undefined ? {} : { blockedBy: [...edit.blockedBy] }),
-    ...(edit.writeScopes === undefined ? {} : { writeScopes: edit.writeScopes.map((s) => s.trim()).filter(Boolean) }),
   }, request.now))
 }
 

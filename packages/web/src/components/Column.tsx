@@ -1,4 +1,3 @@
-import { useCallback } from 'react'
 import { CircleCheck, CircleDashed, Eye, Inbox, LoaderCircle, Plus } from 'lucide-react'
 import { useDroppable } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
@@ -25,28 +24,22 @@ interface Props {
   liveTools: Record<string, string>
   skips: Map<string, Skip>
   onSelect: (task: Task) => void
-  /** 侧边栏导航要把某一列滚到眼前，得先拿到它的节点。 */
-  onNode?: ((column: ColumnKey, node: HTMLElement | null) => void) | undefined
+  /** 概览里同一列会来自不同仓库，给出项目名让卡片自报家门；单项目视图下不传。 */
+  projectName?: ((projectId: string) => string | undefined) | undefined
   /** 只有 Backlog 列给新建入口 —— 新卡一律从想法池起步。 */
   onCreate?: (() => void) | undefined
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, liveTools, skips, onSelect, onNode, onCreate,
+  column, tasks, now, index, selectedId, liveTools, skips, onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const { setNodeRef, isOver } = useDroppable({ id: column })
   const meta = COLUMN_META[column]
   const Icon = COLUMN_ICON[column]
 
-  // 一个节点两个用途：dnd-kit 的落点，和侧边栏导航的滚动目标。
-  const ref = useCallback((node: HTMLElement | null) => {
-    setNodeRef(node)
-    onNode?.(column, node)
-  }, [setNodeRef, onNode, column])
-
   return (
     <section
-      ref={ref}
+      ref={setNodeRef}
       className={cn(
         // 列是一块卡片面板：xl 圆角、发丝边、一层浅影，列头与内容之间一条通栏分隔线。
         'settle flex min-w-[220px] flex-1 flex-col overflow-hidden rounded-xl border border-hairline',
@@ -95,6 +88,7 @@ export function Column({
             selected={selectedId === task.id}
             liveTool={liveTools[task.id]}
             skip={skips.get(task.id)}
+            projectName={projectName?.(task.projectId)}
             onSelect={onSelect}
           />
         ))}

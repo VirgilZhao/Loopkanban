@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  asBoardId, asRunId, asTaskId, overlappingWriteScopes, planDispatch, type Task,
+  asProjectId, asRunId, asTaskId, planDispatch, type Task,
 } from '../src/index.ts'
 
 const T0 = 1_000_000
@@ -9,7 +9,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
     id: asTaskId(id),
-    boardId: asBoardId('b1'),
+    projectId: asProjectId('b1'),
     revision: 1,
     column: 'ready',
     position: 0,
@@ -19,7 +19,6 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     repoPath: '/repo',
     baseBranch: 'main',
     blockedBy: [],
-    writeScopes: [],
     createdAt: T0,
     updatedAt: T0,
     ...rest,
@@ -147,23 +146,6 @@ describe('planDispatch', () => {
   })
 })
 
-describe('overlappingWriteScopes', () => {
-  it('找出同仓库、正在运行、写入范围重叠的任务', () => {
-    const target = task({ id: 'a', writeScopes: ['src/auth/'] })
-    const others = [
-      running('b', { writeScopes: ['src/auth/login.ts'] }),
-      running('c', { writeScopes: ['src/ui/'] }),
-      running('d', { writeScopes: ['src/auth/'], repoPath: '/other-repo' }),
-      task({ id: 'e', writeScopes: ['src/auth/'] }),
-    ]
-    expect(overlappingWriteScopes(target, [target, ...others])).toEqual(['b'])
-  })
-
-  it('没声明写入范围就不做提示', () => {
-    const target = task({ id: 'a' })
-    expect(overlappingWriteScopes(target, [target, running('b', { writeScopes: ['src/'] })])).toEqual([])
-  })
-})
 
 describe('归档与调度', () => {
   it('归档的卡不派，也不进 skipped —— 它本来就不在看板上，没什么要解释', () => {

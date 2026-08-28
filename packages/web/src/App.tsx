@@ -4,8 +4,9 @@ import {
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
-import { AppSidebar } from '@/components/AppSidebar.tsx'
+import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { Column } from '@/components/Column.tsx'
+import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
@@ -13,7 +14,8 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/s
 import { insertPosition } from '@/lib/position.ts'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type RunStats, type SchedulerState, type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type Project, type RunStats, type SchedulerState,
+  type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
@@ -43,6 +45,7 @@ const ERROR_HINT: Record<string, string> = {
   'already-archived': '这张卡已经归档了。',
   'not-archived': '这张卡没有归档。',
   'not-deletable': '只有 Backlog 与 Ready 的卡能删 —— 再往后 Agent 已经动过仓库了。要删就先废弃回想法池。',
+  'no-project': '还没有项目。先在左侧新增一个 —— 任务得知道自己在哪个仓库里干活。',
   'task-not-found': '这张卡已经不在了，可能刚被删掉。',
 }
 
@@ -58,6 +61,10 @@ function notify(title: string, body: string): void {
 
 export default function App(): React.JSX.Element {
   const [tasks, setTasks] = useState<Task[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  // 看哪一堆卡：概览（全部）或某个项目。
+  const [view, setView] = useState<View>({ kind: 'overview' })
+  const [newProject, setNewProject] = useState(false)
   const [agents, setAgents] = useState<Agent[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [liveTools, setLiveTools] = useState<Record<string, string>>({})
@@ -73,12 +80,13 @@ export default function App(): React.JSX.Element {
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded }, state, summary] = await Promise.all([
+    const [{ tasks: loaded, projects: known }, state, summary] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
       api.stats().catch(() => null),
     ])
     setTasks(loaded)
+    setProjects(known)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -138,29 +146,40 @@ export default function App(): React.JSX.Element {
     const grouped = Object.fromEntries(COLUMNS.map((c) => [c, [] as Task[]])) as Record<ColumnKey, Task[]>
     for (const task of tasks) {
       if (task.archivedAt !== undefined && !showArchived) continue
+      if (view.kind === 'project' && task.projectId !== view.id) continue
       grouped[task.column].push(task)
     }
     for (const list of Object.values(grouped)) list.sort((a, b) => a.position - b.position)
     return grouped
-  }, [tasks, showArchived])
+  }, [tasks, showArchived, view])
 
-  const counts = useMemo(
-    () => Object.fromEntries(COLUMNS.map((c) => [c, byColumn[c].length])) as Record<ColumnKey, number>,
-    [byColumn],
+  /** 侧边栏上的项目计数。归档的卡不算 —— 归档就是从视野里拿走。 */
+  const projectCounts = useMemo(() => {
+    const counted: Record<string, number> = {}
+    for (const task of tasks) {
+      if (task.archivedAt !== undefined) continue
+      counted[task.projectId] = (counted[task.projectId] ?? 0) + 1
+    }
+    return counted
+  }, [tasks])
+
+  const projectById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project])),
+    [projects],
   )
+
+  /**
+   * 新卡落到哪个项目。
+   *
+   * 概览里没有"当前项目"，只有一个项目时不必逼人先去点它 —— 别的情况就得
+   * 明确选一个，否则任务不知道自己该在哪个仓库里干活。
+   */
+  const activeProject = view.kind === 'project'
+    ? projectById.get(view.id) ?? null
+    : projects.length === 1 ? projects[0] ?? null : null
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null
   const dragged = tasks.find((t) => t.id === draggingId) ?? null
-
-  // 侧边栏点某一列时把它滚到眼前 —— 列多、屏窄时这是唯一的找法。
-  const columnNodes = useRef(new Map<ColumnKey, HTMLElement>())
-  const registerColumn = useCallback((column: ColumnKey, node: HTMLElement | null) => {
-    if (node === null) columnNodes.current.delete(column)
-    else columnNodes.current.set(column, node)
-  }, [])
-  const jumpToColumn = useCallback((column: ColumnKey) => {
-    columnNodes.current.get(column)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
-  }, [])
 
   // 「我的卡为什么不动」——调度器每一轮的跳过原因都摊到卡片上。
   const skipsByTask = useMemo(() => {
@@ -169,18 +188,19 @@ export default function App(): React.JSX.Element {
     return map
   }, [scheduler])
 
-  /** 建一张空白卡并立刻选中它，用户接着在右侧面板里填内容。 */
+  /** 建一张空白卡并立刻选中它，用户接着在弹窗里填内容。 */
   const createTask = useCallback(() => {
+    if (activeProject === null) return
     void (async () => {
       try {
-        const { task } = await api.createTask({ subject: '新任务' })
+        const { task } = await api.createTask({ projectId: activeProject.id, subject: '新任务' })
         await refresh()
         setSelectedId(task.id)
       } catch (error) {
         if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
       }
     })()
-  }, [refresh])
+  }, [refresh, activeProject])
 
   const changeScheduler = useCallback(async (patch: Parameters<typeof api.setScheduler>[0]) => {
     setSchedulerBusy(true)
@@ -252,10 +272,14 @@ export default function App(): React.JSX.Element {
     <SidebarProvider>
       <AppSidebar
         agents={agents}
-        counts={counts}
-        activeColumn={selected?.column ?? null}
-        onNavigate={jumpToColumn}
+        projects={projects}
+        counts={projectCounts}
+        total={tasks.filter((t) => t.archivedAt === undefined).length}
+        view={view}
+        onView={setView}
+        onNewProject={() => { setNewProject(true) }}
         onCreate={createTask}
+        canCreate={activeProject !== null}
         archivedCount={archivedCount}
         showArchived={showArchived}
         onToggleArchived={() => { setShowArchived((on) => !on) }}
@@ -270,8 +294,17 @@ export default function App(): React.JSX.Element {
         <header className="flex h-12 flex-none items-center gap-2 border-b border-hairline px-3">
           <SidebarTrigger />
           <span className="h-4 w-px bg-hairline" />
-          <h1 className="text-[13px] font-semibold tracking-tight text-ink">看板</h1>
-          <span className="chrome-label !text-[8px]">{tasks.length} tasks</span>
+          <h1 className="flex-none whitespace-nowrap text-[13px] font-semibold tracking-tight text-ink">
+            {view.kind === 'overview' ? '概览' : projectById.get(view.id)?.name ?? '项目'}
+          </h1>
+          {view.kind === 'overview' ? (
+            <span className="chrome-label !text-[8px]">所有项目</span>
+          ) : (
+            <span className="mono min-w-0 flex-1 truncate text-[10px] text-ink-faint" title={projectById.get(view.id)?.repoPath}>
+              {projectById.get(view.id)?.repoPath}
+              <span className="ms-2">基线 {projectById.get(view.id)?.baseBranch}</span>
+            </span>
+          )}
           <span className="flex-1" />
           <ThemeToggle />
         </header>
@@ -315,8 +348,11 @@ export default function App(): React.JSX.Element {
                 liveTools={liveTools}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
-                onNode={registerColumn}
-                onCreate={column === 'backlog' ? createTask : undefined}
+                // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
+                projectName={view.kind === 'overview'
+                  ? (id: string) => projectById.get(id)?.name
+                  : undefined}
+                onCreate={column === 'backlog' && activeProject !== null ? createTask : undefined}
               />
             ))}
           </div>
@@ -336,6 +372,7 @@ export default function App(): React.JSX.Element {
         {selected === null ? null : (
           <RunPanel
             task={selected}
+            project={projectById.get(selected.projectId) ?? null}
             agents={agents}
             onLiveTool={onLiveTool}
             onChanged={() => { void refresh() }}
@@ -345,6 +382,20 @@ export default function App(): React.JSX.Element {
             onClose={() => { setSelectedId(null) }}
           />
         )}
+
+        {newProject ? (
+          <NewProjectDialog
+            onSubmit={async (input) => (await api.createProject(input)).project}
+            onCreated={(project) => {
+              setNewProject(false)
+              setProjects((prev) => [...prev, project])
+              // 建完就切过去 —— 用户下一步多半是往里加卡。
+              setView({ kind: 'project', id: project.id })
+              void refresh()
+            }}
+            onClose={() => { setNewProject(false) }}
+          />
+        ) : null}
 
         {stats === null ? null : <StatsBar stats={stats} />}
       </SidebarInset>

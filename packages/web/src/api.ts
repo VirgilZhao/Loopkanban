@@ -7,7 +7,7 @@
  */
 
 import type {
-  Agent, Board, DiffView, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task,
+  Agent, DiffView, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task,
   TaskEdit,
 } from './types.ts'
 
@@ -32,13 +32,25 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  state: () => call<{ boards: Board[]; tasks: Task[] }>('/api/state'),
+  state: () => call<{ projects: Project[]; tasks: Task[] }>('/api/state'),
+
+  projects: () => call<{ projects: Project[] }>('/api/projects'),
+
+  /** 新增项目。目录必须是本机上的一个 git 仓库，基线分支由它自己说了算。 */
+  createProject: (input: { name: string; path: string }) =>
+    call<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
 
   agents: () => call<{ agents: Agent[] }>('/api/agents'),
 
   runsOf: (taskId: string) => call<{ runs: Run[] }>(`/api/tasks/${encodeURIComponent(taskId)}/runs`),
 
-  createTask: (input: { subject: string; description?: string; acceptance?: string[]; preferredProvider?: string }) =>
+  createTask: (input: {
+    projectId: string
+    subject: string
+    description?: string
+    acceptance?: string[]
+    preferredProvider?: string
+  }) =>
     call<{ task: Task }>('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
 
   /** 派活。202 表示已接受并开始执行。 */
@@ -66,10 +78,6 @@ export const api = {
     call<{ deleted: boolean; unblocked: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: 'DELETE', body: JSON.stringify({ expectedRevision }),
     }),
-
-  /** 与该任务写入范围重叠、且正在运行的任务。 */
-  overlaps: (taskId: string) =>
-    call<{ overlaps: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}/overlaps`),
 
   stats: () => call<RunStats>('/api/stats'),
 

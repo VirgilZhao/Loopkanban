@@ -9,10 +9,10 @@ declare const brand: unique symbol
 
 type Branded<T, B extends string> = T & { readonly [brand]: B }
 
-export type BoardId = Branded<string, 'BoardId'>
+export type ProjectId = Branded<string, 'ProjectId'>
 export type TaskId = Branded<string, 'TaskId'>
 export type RunId = Branded<string, 'RunId'>
 
-export const asBoardId = (value: string): BoardId => value as BoardId
+export const asProjectId = (value: string): ProjectId => value as ProjectId
 export const asTaskId = (value: string): TaskId => value as TaskId
 export const asRunId = (value: string): RunId => value as RunId

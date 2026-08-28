@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { spawn } from 'node:child_process'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { connect, type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { Storage } from '../src/storage/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
 const T0 = 1_000_000
 const TOKEN = 'test-token-' + 'x'.repeat(32)
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let store: Storage
 let server: RunningServer
@@ -18,9 +19,9 @@ let server: RunningServer
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'ready', position: 1,
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
     subject: id, description: '', acceptance: ['ok'], repoPath: '/repo', baseBranch: 'main',
-    blockedBy: [], writeScopes: [], createdAt: T0, updatedAt: T0, ...rest,
+    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -45,7 +46,7 @@ function rawRequest(headers: Record<string, string>, path = '/api/state'): Promi
 
 beforeEach(async () => {
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: '/repo', baseBranch: 'main', createdAt: T0 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: '/repo', baseBranch: 'main', createdAt: T0 })
   // 心跳调快，让「发现死连接」的延迟在测试里可控。
   server = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50 })
 })
@@ -53,6 +54,74 @@ beforeEach(async () => {
 afterEach(async () => {
   await server.close()
   store.close()
+})
+
+describe('POST /api/projects', () => {
+  let sandbox: string
+  let repo: string
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-projects-'))
+    repo = join(sandbox, 'repo')
+    await mkdir(repo, { recursive: true })
+    await new Promise((resolve, reject) => {
+      const child = spawn('git', ['init', '-q', '-b', 'main', repo], { stdio: 'ignore' })
+      child.on('exit', resolve)
+      child.on('error', reject)
+    })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  const create = (body: unknown) =>
+    api('/api/projects', { method: 'POST', body: JSON.stringify(body) })
+
+  it('新增项目：记下名字与目录，基线分支由仓库自己说了算', async () => {
+    const res = await create({ name: '我的项目', path: repo })
+    expect(res.status).toBe(201)
+    const { project } = await res.json() as { project: { name: string; repoPath: string; baseBranch: string } }
+    expect(project.name).toBe('我的项目')
+    expect(project.baseBranch).toBe('main')
+    expect(store.listProjects()).toHaveLength(2)
+  })
+
+  it('不是 git 仓库就拒绝 —— 任务要在它派生的 worktree 上干活，派不出来就没有意义', async () => {
+    const res = await create({ name: '空目录', path: sandbox })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('not-a-repo')
+  })
+
+  it('相对路径拒绝：服务端不该去猜它相对于谁', async () => {
+    const res = await create({ name: '相对', path: './repo' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('path-not-absolute')
+  })
+
+  it('同一个目录不能加两次', async () => {
+    await create({ name: '第一次', path: repo })
+    const res = await create({ name: '第二次', path: repo })
+    expect(res.status).toBe(409)
+    expect((await res.json() as { error: string }).error).toBe('project-exists')
+  })
+
+  it('缺名字或缺目录一律 400', async () => {
+    expect((await create({ path: repo })).status).toBe(400)
+    expect((await create({ name: '没目录' })).status).toBe(400)
+  })
+
+  it('新建的卡跟着项目走：仓库与基线从项目取，不听建卡方的', async () => {
+    const { project } = await (await create({ name: '我的项目', path: repo })).json() as
+      { project: { id: string } }
+    const res = await api('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ projectId: project.id, subject: '在新项目里干活' }),
+    })
+    expect(res.status).toBe(201)
+    const { task: created } = await res.json() as { task: Task }
+    expect(created.projectId).toBe(project.id)
+    expect(created.repoPath).toBe(repo)
+    expect(created.baseBranch).toBe('main')
+  })
 })
 
 describe('GET /api/agents', () => {
@@ -145,10 +214,10 @@ describe('安全守卫', () => {
 })
 
 describe('GET /api/state', () => {
-  it('返回看板与任务', async () => {
+  it('返回项目与任务', async () => {
     store.createTask(task({ id: 't1' }))
-    const body = await (await api('/api/state')).json() as { boards: unknown[]; tasks: Task[] }
-    expect(body.boards).toHaveLength(1)
+    const body = await (await api('/api/state')).json() as { projects: unknown[]; tasks: Task[] }
+    expect(body.projects).toHaveLength(1)
     expect(body.tasks.map((t) => t.id)).toEqual(['t1'])
   })
 
@@ -495,11 +564,11 @@ describe('错误处理（回归）', () => {
   })
 
   it('内部异常不把原始信息回给调用方', async () => {
-    // 让 listBoards 抛一个带敏感路径的异常。
-    const real = store.listBoards.bind(store)
-    store.listBoards = (() => { throw new Error('ENOENT /Users/someone/.ssh/id_rsa') }) as typeof store.listBoards
+    // 让 listProjects 抛一个带敏感路径的异常。
+    const real = store.listProjects.bind(store)
+    store.listProjects = (() => { throw new Error('ENOENT /Users/someone/.ssh/id_rsa') }) as typeof store.listProjects
     const res = await api('/api/state')
-    store.listBoards = real
+    store.listProjects = real
 
     expect(res.status).toBe(500)
     const body = await res.text()
@@ -560,7 +629,7 @@ describe('开发模式：把前端转发给 vite', () => {
   it('/api 仍由 host 自己处理，不会被转走', async () => {
     const res = await get('/api/state')
     expect(res.status).toBe(200)
-    expect(await res.json()).toHaveProperty('boards')
+    expect(await res.json()).toHaveProperty('projects')
     expect(seen).toHaveLength(0)
   })
 

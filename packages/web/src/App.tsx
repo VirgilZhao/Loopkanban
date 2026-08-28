@@ -3,17 +3,21 @@ import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors,
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
-import { Archive } from 'lucide-react'
 import { api, ApiError } from '@/api.ts'
-import { Autopilot } from '@/components/Autopilot.tsx'
+import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { Column } from '@/components/Column.tsx'
+import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
+import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
+import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { insertPosition } from '@/lib/position.ts'
+import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type RunStats, type SchedulerState, type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunStats,
+  type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
@@ -26,7 +30,6 @@ const CLOCK_MS = 5_000
  * 所以这里给的不是错误名，而是下一步该做什么。
  */
 const ERROR_HINT: Record<string, string> = {
-  'acceptance-required': '这张卡还没有验收标准。补上之后才能进 Ready —— 否则 Agent 干完了也没人能判定对不对。',
   'illegal-transition': '不允许这样跨列。流转顺序是 Backlog → Ready → Running → Review → Done。',
   'blocked-by-dependency': '它依赖的任务还没完成。',
   'lease-held': '这张卡正被某个 Agent 持有，等它跑完或超时释放。',
@@ -34,15 +37,15 @@ const ERROR_HINT: Record<string, string> = {
   'provider-unavailable': '这个 Agent CLI 本机没有探测到。装好它，或者换一个。',
   'launch-failed': '起进程失败。多半是 worktree 建不出来 —— 检查仓库路径和基线分支。',
   'no-runner': '当前实例没有启用执行器，只能看板不能派活。',
-  'feedback-required': '打回要写明改什么，否则 Agent 只会把上次的活重做一遍。',
   'dirty-worktree': '你的主工作区有未提交改动，先处理干净再合并。改动已经提交在任务分支上，不会丢。',
   'wrong-branch': '你的主工作区不在基线分支上。改动已经提交在任务分支上，切回去再合并即可。',
   'no-run': '这张卡还没有执行记录。',
-  'no-worktree': '这次执行没留下工作区（多半是起进程就失败了），没有东西可验收 —— 打回重跑或废弃。',
+  'no-worktree': '这次执行没留下工作区（多半是起进程就失败了），没有东西可验收 —— 去讨论里说一句让它重跑，或者废弃。',
   'task-archived': '这张卡已归档。要动它先取消归档 —— 归档的卡是冻结的，不会被自动认领。',
   'already-archived': '这张卡已经归档了。',
   'not-archived': '这张卡没有归档。',
   'not-deletable': '只有 Backlog 与 Ready 的卡能删 —— 再往后 Agent 已经动过仓库了。要删就先废弃回想法池。',
+  'no-project': '还没有项目。先在左侧新增一个 —— 任务得知道自己在哪个仓库里干活。',
   'task-not-found': '这张卡已经不在了，可能刚被删掉。',
 }
 
@@ -58,9 +61,15 @@ function notify(title: string, body: string): void {
 
 export default function App(): React.JSX.Element {
   const [tasks, setTasks] = useState<Task[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  // 看哪一堆卡：概览（全部）或某个项目。
+  const [view, setView] = useState<View>({ kind: 'overview' })
+  const [newProject, setNewProject] = useState(false)
+  const [deleting, setDeleting] = useState<Project | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [liveTools, setLiveTools] = useState<Record<string, string>>({})
+  // 运行中卡片的最后一条事件，跟着看板轮询一起来 —— 详情弹窗关着也看得见。
+  const [live, setLive] = useState<Record<string, LiveLine>>({})
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -73,12 +82,14 @@ export default function App(): React.JSX.Element {
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded }, state, summary] = await Promise.all([
+    const [{ tasks: loaded, projects: known, live: lines }, state, summary] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
       api.stats().catch(() => null),
     ])
     setTasks(loaded)
+    setProjects(known)
+    setLive(lines)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -120,7 +131,7 @@ export default function App(): React.JSX.Element {
       previous.set(task.id, task.column)
       if (first || before === undefined || before === task.column) continue
       if (task.column !== 'review' || task.archivedAt !== undefined) continue
-      notify('待验收', task.subject)
+      notify('待验收', taskTitle(task))
     }
   }, [tasks])
 
@@ -138,11 +149,48 @@ export default function App(): React.JSX.Element {
     const grouped = Object.fromEntries(COLUMNS.map((c) => [c, [] as Task[]])) as Record<ColumnKey, Task[]>
     for (const task of tasks) {
       if (task.archivedAt !== undefined && !showArchived) continue
+      if (view.kind === 'project' && task.projectId !== view.id) continue
       grouped[task.column].push(task)
     }
     for (const list of Object.values(grouped)) list.sort((a, b) => a.position - b.position)
     return grouped
-  }, [tasks, showArchived])
+  }, [tasks, showArchived, view])
+
+  /** 每个执行器当前跑着几张卡。租约上写的 provider 才是真正在跑的那个。 */
+  const runningByAgent = useMemo(() => {
+    const counted: Record<string, number> = {}
+    for (const task of tasks) {
+      const provider = task.lease?.provider
+      if (task.column !== 'running' || provider === undefined) continue
+      counted[provider] = (counted[provider] ?? 0) + 1
+    }
+    return counted
+  }, [tasks])
+
+  /** 侧边栏上的项目计数。归档的卡不算 —— 归档就是从视野里拿走。 */
+  const projectCounts = useMemo(() => {
+    const counted: Record<string, number> = {}
+    for (const task of tasks) {
+      if (task.archivedAt !== undefined) continue
+      counted[task.projectId] = (counted[task.projectId] ?? 0) + 1
+    }
+    return counted
+  }, [tasks])
+
+  const projectById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project])),
+    [projects],
+  )
+
+  /**
+   * 新卡落到哪个项目。
+   *
+   * 概览里没有"当前项目"，只有一个项目时不必逼人先去点它 —— 别的情况就得
+   * 明确选一个，否则任务不知道自己该在哪个仓库里干活。
+   */
+  const activeProject = view.kind === 'project'
+    ? projectById.get(view.id) ?? null
+    : projects.length === 1 ? projects[0] ?? null : null
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null
   const dragged = tasks.find((t) => t.id === draggingId) ?? null
@@ -154,18 +202,20 @@ export default function App(): React.JSX.Element {
     return map
   }, [scheduler])
 
-  /** 建一张空白卡并立刻选中它，用户接着在右侧面板里填内容。 */
+  /** 建一张空白卡并立刻选中它，用户接着在弹窗里填内容。 */
   const createTask = useCallback(() => {
+    if (activeProject === null) return
     void (async () => {
       try {
-        const { task } = await api.createTask({ subject: '新任务' })
+        // 建一张空白卡，内容在弹窗里写 —— 先落地，再动笔。
+        const { task } = await api.createTask({ projectId: activeProject.id })
         await refresh()
         setSelectedId(task.id)
       } catch (error) {
         if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
       }
     })()
-  }, [refresh])
+  }, [refresh, activeProject])
 
   const changeScheduler = useCallback(async (patch: Parameters<typeof api.setScheduler>[0]) => {
     setSchedulerBusy(true)
@@ -220,160 +270,165 @@ export default function App(): React.JSX.Element {
     }
   }, [tasks, refresh])
 
-  const onLiveTool = useCallback((taskId: string, tool: string | undefined) => {
-    setLiveTools((prev) => {
-      if (tool === undefined) {
-        const { [taskId]: _drop, ...rest } = prev
-        return rest
-      }
-      return { ...prev, [taskId]: tool }
-    })
-  }, [])
-
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
   const runningCount = byColumn.running.length
 
   return (
-    <div className="flex h-full flex-col">
-      {/* ── 顶栏：产品标识 + 本机 Agent 状态 ───────────────────── */}
-      <header className="flex flex-none items-center gap-4 border-b border-hairline px-4 py-2.5">
-        <div className="flex items-baseline gap-2">
-          <span
-            className="text-[15px] font-semibold tracking-tight text-ink"
-            style={{ fontFamily: 'var(--font-chrome)' }}
-          >
-            OPEN<span className="text-sodium">KANBAN</span>
-          </span>
-          <span className="chrome-label !text-[8px]">agent dispatch</span>
-        </div>
+    <SidebarProvider>
+      <AppSidebar
+        agents={agents}
+        runningByAgent={runningByAgent}
+        projects={projects}
+        counts={projectCounts}
+        total={tasks.filter((t) => t.archivedAt === undefined).length}
+        view={view}
+        onView={setView}
+        onNewProject={() => { setNewProject(true) }}
+        onDeleteProject={setDeleting}
+        onRenameProject={(project, name) => {
+          // 乐观改名：一个字段的重命名不值得让边栏闪一下。失败就用服务端的真相盖回来。
+          setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, name } : p)))
+          void api.renameProject(project.id, name)
+            .catch((error: unknown) => {
+              if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+              void refresh()
+            })
+        }}
+        onCreate={createTask}
+        canCreate={activeProject !== null}
+        archivedCount={archivedCount}
+        showArchived={showArchived}
+        onToggleArchived={() => { setShowArchived((on) => !on) }}
+        scheduler={scheduler}
+        schedulerBusy={schedulerBusy}
+        running={runningCount}
+        onScheduler={(patch) => { void changeScheduler(patch) }}
+      />
 
-        <div className="h-4 w-px bg-hairline" />
-
-        {/* 探测到的 CLI —— 没探测到的 provider 不会出现，任务也选不到它。 */}
-        <div className="flex items-center gap-3">
-          {agents.length === 0 ? (
-            <span className="cjk-label !text-lamp-fail">未探测到 Agent CLI</span>
-          ) : agents.map((agent) => (
-            <div
-              key={agent.id}
-              className="flex items-center gap-1.5"
-              title={[agent.bin, agent.version, agent.permissionCaveat?.detail].filter(Boolean).join('\n')}
-            >
-              <span className="lamp" data-state="done" />
-              <span className="chrome-label !text-ink-dim">{agent.id}</span>
-              <span className="mono text-[10px] text-ink-faint">
-                {/^[\d.]+/.exec(agent.version)?.[0] ?? agent.version}
-              </span>
-              {agent.canResume ? null : (
-                <span className="cjk-label !text-[10px] !text-lamp-fail">无续跑</span>
-              )}
-              {/* 档位名字对不上实际约束时的警示。悬停看完整说明。 */}
-              {agent.permissionCaveat === undefined ? null : (
-                <span className="cjk-label !text-[10px] !text-sodium">{agent.permissionCaveat.label}</span>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <span className="flex-1" />
-
-        {/* 归档开关。计数常驻 —— 不然被收走的卡就真的无迹可寻了。 */}
-        <button
-          onClick={() => { setShowArchived((on) => !on) }}
-          title={showArchived ? '隐藏归档的卡' : '显示归档的卡'}
-          className={cn(
-            'chrome-label flex items-center gap-1.5 rounded-md border px-2 py-1 transition-colors',
-            showArchived
-              ? 'border-sodium-deep !text-sodium'
-              : 'border-hairline !text-ink-faint hover:border-sodium hover:!text-sodium',
+      <SidebarInset>
+        {/* ── 顶栏：侧边栏开关 + 当前视图 ─────────────────────── */}
+        <header className="flex h-12 flex-none items-center gap-2 border-b border-hairline px-3">
+          <SidebarTrigger />
+          <span className="h-4 w-px bg-hairline" />
+          <h1 className="flex-none whitespace-nowrap text-[13px] font-semibold tracking-tight text-ink">
+            {view.kind === 'overview' ? '概览' : projectById.get(view.id)?.name ?? '项目'}
+          </h1>
+          {view.kind === 'overview' ? (
+            <span className="chrome-label !text-[8px]">所有项目</span>
+          ) : (
+            <span className="mono min-w-0 flex-1 truncate text-[10px] text-ink-faint" title={projectById.get(view.id)?.repoPath}>
+              {projectById.get(view.id)?.repoPath}
+              <span className="ms-2">基线 {projectById.get(view.id)?.baseBranch}</span>
+            </span>
           )}
+          <span className="flex-1" />
+          <ThemeToggle />
+        </header>
+
+        {notice === null ? null : (
+          <div className={cn(
+            'flex flex-none items-center gap-3 border-b px-4 py-2',
+            notice.tone === 'warn'
+              ? 'border-lamp-fail/40 bg-lamp-fail/[0.07]'
+              : 'border-sodium-deep/50 bg-sodium/[0.07]',
+          )}>
+            <span className="lamp" data-state={notice.tone === 'warn' ? 'failed' : 'running'} />
+            <span className={cn('flex-1', notice.tone === 'warn' ? 'text-lamp-fail' : 'text-sodium')}>
+              {notice.text}
+            </span>
+            <button
+              onClick={() => { setNotice(null) }}
+              className="chrome-label rounded-md border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+
+        {/* ── 看板 ───────────────────────────────────────────── */}
+        <DndContext
+          sensors={sensors}
+          onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
+          onDragCancel={() => { setDraggingId(null) }}
+          onDragEnd={(e) => { void handleDragEnd(e) }}
         >
-          <Archive className="size-2.5" />归档
-          <span className="mono text-[10px]">{archivedCount}</span>
-        </button>
+          <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
+            {COLUMNS.map((column, index) => (
+              <Column
+                key={column}
+                column={column}
+                index={index}
+                tasks={byColumn[column]}
+                now={now}
+                selectedId={selectedId}
+                live={live}
+                skips={skipsByTask}
+                onSelect={(task) => { setSelectedId(task.id) }}
+                // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
+                projectName={view.kind === 'overview'
+                  ? (id: string) => projectById.get(id)?.name
+                  : undefined}
+                onCreate={column === 'backlog' && activeProject !== null ? createTask : undefined}
+              />
+            ))}
+          </div>
 
-        <ThemeToggle />
+          {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
+          <DragOverlay dropAnimation={null}>
+            {dragged === null ? null : (
+              <div className="rounded-xl border border-sodium bg-panel px-3 py-2.5 shadow-lg">
+                <span className="tag">{dragged.id}</span>
+                <p className="mt-1.5 line-clamp-2 text-ink">{taskTitle(dragged)}</p>
+              </div>
+            )}
+          </DragOverlay>
+        </DndContext>
 
-        {scheduler === null ? null : (
-          <Autopilot
-            settings={scheduler.settings}
-            running={runningCount}
-            busy={schedulerBusy}
-            onChange={(patch) => { void changeScheduler(patch) }}
+        {/* ── 任务详情：弹窗 ─────────────────────────────────── */}
+        {selected === null ? null : (
+          <RunPanel
+            task={selected}
+            project={projectById.get(selected.projectId) ?? null}
+            agents={agents}
+            onChanged={() => { void refresh() }}
+            onError={(code, detail) => {
+              setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
+            }}
+            onClose={() => { setSelectedId(null) }}
           />
         )}
-      </header>
 
-      {notice === null ? null : (
-        <div className={cn(
-          'flex flex-none items-center gap-3 border-b px-4 py-2',
-          notice.tone === 'warn'
-            ? 'border-lamp-fail/40 bg-lamp-fail/[0.07]'
-            : 'border-sodium-deep/50 bg-sodium/[0.07]',
-        )}>
-          <span className="lamp" data-state={notice.tone === 'warn' ? 'failed' : 'running'} />
-          <span className={cn('flex-1', notice.tone === 'warn' ? 'text-lamp-fail' : 'text-sodium')}>
-            {notice.text}
-          </span>
-          <button
-            onClick={() => { setNotice(null) }}
-            className="chrome-label rounded-md border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
-          >
-            dismiss
-          </button>
-        </div>
-      )}
+        {deleting === null ? null : (
+          <DeleteProjectDialog
+            project={deleting}
+            taskCount={tasks.filter((t) => t.projectId === deleting.id).length}
+            onSubmit={() => api.deleteProject(deleting.id)}
+            onDeleted={() => {
+              // 删掉的正是当前视角的话，退回概览 —— 否则界面停在一个不存在的项目上。
+              if (view.kind === 'project' && view.id === deleting.id) setView({ kind: 'overview' })
+              setDeleting(null)
+              void refresh()
+            }}
+            onClose={() => { setDeleting(null) }}
+          />
+        )}
 
-      {/* ── 看板 ─────────────────────────────────────────────── */}
-      <DndContext
-        sensors={sensors}
-        onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
-        onDragCancel={() => { setDraggingId(null) }}
-        onDragEnd={(e) => { void handleDragEnd(e) }}
-      >
-        <div className="flex min-h-0 flex-1 overflow-x-auto">
-          {COLUMNS.map((column, index) => (
-            <Column
-              key={column}
-              column={column}
-              index={index}
-              tasks={byColumn[column]}
-              now={now}
-              selectedId={selectedId}
-              liveTools={liveTools}
-              skips={skipsByTask}
-              onSelect={(task) => { setSelectedId(task.id) }}
-              onCreate={column === 'backlog' ? createTask : undefined}
-            />
-          ))}
-        </div>
+        {newProject ? (
+          <NewProjectDialog
+            onSubmit={async (input) => (await api.createProject(input)).project}
+            onCreated={(project) => {
+              setNewProject(false)
+              setProjects((prev) => [...prev, project])
+              // 建完就切过去 —— 用户下一步多半是往里加卡。
+              setView({ kind: 'project', id: project.id })
+              void refresh()
+            }}
+            onClose={() => { setNewProject(false) }}
+          />
+        ) : null}
 
-        {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
-        <DragOverlay dropAnimation={null}>
-          {dragged === null ? null : (
-            <div className="rounded-lg border border-sodium bg-panel px-2.5 py-2 shadow-lg">
-              <span className="tag">{dragged.id}</span>
-              <p className="mt-1.5 line-clamp-2 text-ink">{dragged.subject}</p>
-            </div>
-          )}
-        </DragOverlay>
-      </DndContext>
-
-      {/* ── 任务详情：弹窗 ───────────────────────────────────── */}
-      {selected === null ? null : (
-        <RunPanel
-          task={selected}
-          agents={agents}
-          onLiveTool={onLiveTool}
-          onChanged={() => { void refresh() }}
-          onError={(code, detail) => {
-            setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
-          }}
-          onClose={() => { setSelectedId(null) }}
-        />
-      )}
-
-      {stats === null ? null : <StatsBar stats={stats} />}
-    </div>
+        {stats === null ? null : <StatsBar stats={stats} />}
+      </SidebarInset>
+    </SidebarProvider>
   )
 }

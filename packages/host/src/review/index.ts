@@ -8,14 +8,14 @@
  */
 
 import { access, rm } from 'node:fs/promises'
-import { join } from 'node:path'
-import { moveTask, requestChanges, type Task, type TaskId } from '@loopkanban/core'
+import { moveTask, taskTitle, type Task, type TaskId } from '@loopkanban/core'
 import type { Run, Storage } from '../storage/index.ts'
-import { commitAll, mergeBranch, removeWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+import {
+  commitAll, mergeBranch, removeWorktree, worktreeDiff, worktreeDir, type Worktree,
+} from '../worktree/index.ts'
 
 export interface ReviewOptions {
   readonly storage: Storage
-  readonly worktreeRoot: string
   readonly now?: () => number
 }
 
@@ -146,28 +146,6 @@ export class Review {
   }
 
   /**
-   * 打回重做：带上评审意见把卡片放回队列。
-   *
-   * worktree 与分支**保留** —— 下一次执行接着在同一个工作区继续，
-   * 这样 Agent 能看到自己上次的成果，而不是从空目录重来。
-   *
-   * @param taskId - 目标任务。
-   * @param feedback - 要改什么。空的会被拒绝。
-   */
-  requestChanges(taskId: TaskId, feedback: string): ReviewResult {
-    const { storage } = this.options
-    const task = storage.getTask(taskId)
-    if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
-
-    const changed = requestChanges(task, { expectedRevision: task.revision, feedback, now: this.now })
-    if (!changed.ok) return { ok: false, reason: changed.reason, detail: changed.detail }
-    if (!storage.commitTask(changed.value)) {
-      return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
-    }
-    return { ok: true }
-  }
-
-  /**
    * 废弃这次成果：删掉分支与 worktree，卡片回想法池。
    *
    * **去向只有 backlog**。没有"记为失败"这个终点了 —— 一张卡要么做完进 Done，
@@ -192,7 +170,7 @@ export class Review {
     if (run !== null) {
       // 连分支一起删：用户明确表示这次成果不要了。
       await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
-      await rm(join(this.options.worktreeRoot, taskId), { recursive: true, force: true })
+      await rm(worktreeDir(task.repoPath, taskId), { recursive: true, force: true })
     }
     return { ok: true }
   }
@@ -221,11 +199,11 @@ export class Review {
     for (const run of runs) {
       await removeWorktree(task.repoPath, this.worktreeOf(run), false).catch(() => undefined)
     }
-    await rm(join(this.options.worktreeRoot, task.id), { recursive: true, force: true }).catch(() => undefined)
+    await rm(worktreeDir(task.repoPath, task.id), { recursive: true, force: true }).catch(() => undefined)
   }
 }
 
 /** 提交信息带上执行者，日后 blame 时看得出这段是谁写的。 */
 function commitMessage(task: Task, run: Run): string {
-  return [task.subject, '', `Task: ${task.id}`, `Agent: ${run.provider} ${run.cliVersion}`].join('\n')
+  return [taskTitle(task), '', `Task: ${task.id}`, `Agent: ${run.provider} ${run.cliVersion}`].join('\n')
 }

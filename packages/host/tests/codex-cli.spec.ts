@@ -15,6 +15,7 @@ const CAPS: AgentCaps = {
   streaming: true,
   canPinSessionId: false,
   canResume: true,
+  canPickModel: true, models: [],
   permissionTiers: ['strict', 'standard', 'yolo'],
   help: parseHelp(fixture('codex-exec-help.txt')),
   resumeHelp: parseHelp(fixture('codex-exec-resume-help.txt')),

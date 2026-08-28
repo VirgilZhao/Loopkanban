@@ -181,6 +181,8 @@
   --void: var(--background);
   --panel: var(--card);
   --raised: var(--secondary);
+  /* 卡片槽：比面板沉一档，卡片才浮得出来。 */
+  --sunken: var(--muted);
   --hairline: var(--border);
   --hairline-bright: #c2d2d4;
 
@@ -205,6 +207,7 @@
   --void: var(--background);
   --panel: var(--card);
   --raised: var(--secondary);
+  --sunken: var(--muted);
   --hairline: var(--border);
   --hairline-bright: #23383a;
 
@@ -226,6 +229,7 @@
   --color-void:      var(--void);
   --color-panel:     var(--panel);
   --color-raised:    var(--raised);
+  --color-sunken:    var(--sunken);
   --color-hairline:  var(--hairline);
   --color-hairline-bright: var(--hairline-bright);
   --color-ink:       var(--ink);

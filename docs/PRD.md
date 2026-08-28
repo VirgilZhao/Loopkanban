@@ -116,20 +116,26 @@ interface Storage { /* 域 KV + 事件日志追加 */ }
 ### 2.3 数据模型
 
 ```ts
+interface Project {
+  id: ProjectId
+  name: string                     // 用户认得出的名字
+  repoPath: string                 // 本机上的 git 仓库目录
+  baseBranch: string               // 建项目时取仓库当时所在的分支
+}
+
 interface Task {
   id: TaskId
   revision: number                 // CAS，每次变更 +1
-  boardId: BoardId
+  projectId: ProjectId
   column: 'backlog' | 'ready' | 'running' | 'review' | 'done'
   position: number
-  subject: string
-  description: string              // Markdown
-  acceptance: string[]             // 验收标准 checklist
-  repoPath: string
+  description: string              // Markdown。卡片的全部内容，没有独立标题
+  acceptance: string[]             // 验收标准 checklist，可选
+  repoPath: string                 // 跟着项目走，建卡时定下，之后不由人改
   baseBranch: string
   preferredProvider?: string       // 只能选已探测到的
+  model?: string                   // 指定模型；留空用该 CLI 自己的默认
   blockedBy: TaskId[]
-  writeScopes: string[]            // 建议性路径前缀，用于并发冲突预警
   lease?: { runId: RunId; provider: string; acquiredAt: string; expiresAt: string }
   archivedAt?: string              // 归档标记，正交于 column
 }
@@ -151,6 +157,94 @@ interface Run {
 // append-only，UI 从它投影，SSE 从它续传
 interface RunEvent { runId: RunId; seq: number; kind: string; payload: unknown; at: string }
 ```
+
+### 并发上限按执行器算，不是全局
+
+三个 CLI 各有各的额度与速率限制，claude 排满了不该顺带把 codex 也堵住 ——
+所以 `limit` 是**每个执行器**的位子数，界面上也这么写（`limit / agent`），
+本机 Agent 那一栏跟着显示「占用 / 总数」。
+
+由此带出一条调度规则：没指定执行器的卡，挑**当前跑得最少的那个**，而不是
+永远取第一个。上限按执行器算之后，总取第一个会让没指定的卡全堆在 claude 上
+排队，而 codex 闲着。打平时按探测顺序，结果仍然是确定的。
+
+### 讨论取代打回
+
+评审意见原本是任务上的一个字段：打回时写一句，下一次执行读走，然后清空。
+问题在于它**只剩最后一句** —— 人第三轮说的话，Agent 看不到前两轮已经确认过
+什么，于是反复推翻自己。
+
+现在人和 Agent 的每一轮往来都记在 `task_comments` 里：Agent 跑完把「我做了
+什么」写进讨论（**失败的那一轮也写**，它卡在哪儿正是最该被讨论的），人在下面
+回一条。**在 Review 里留言就是「再改一版」**：卡自动回 Ready，下一次执行把整条
+线程写进 TASK.md 的「讨论」一节交给 Agent。反馈因此是累积的。
+
+所以「打回」这个动作没有了 —— 它和「留言」是同一件事，留两个入口只会让人
+犹豫该点哪个。Review 里剩下的是通过、通过并合并、废弃。
+
+界面上 Agent 的回复按 Markdown 渲染，用的是一个**不引依赖、直接产出 React
+元素**的小渲染器：Agent 的输出里就算带着 `<script>` 也只是一段文本，没有注入面；
+换成 `marked` + `dangerouslySetInnerHTML` 就得再配一个消毒器，那是两个依赖加
+一处必须记得做对的地方。
+
+### 卡片没有标题
+
+一句话的活写一句话，复杂的活写一段 —— 逼人先起个标题只是多一道手续，而
+多数标题最后就是描述第一行的复读。要显示"叫什么"的地方（列表、分支名、
+提交信息、桌面通知）一律取描述的第一行，截断到 60 字；一个字都没写就退回
+任务 id，空白的分支名比丑的更糟。列表里超过两行用省略号收住。
+
+**验收标准是可选的**。有判据当然更好（Agent 照着做，人照着验），但强制它
+等于给每张卡都加一道门槛，而很多活的判据就是"跑起来对不对"。原先卡在
+「进 Ready」和「打回」两处的守卫因此一并撤掉。
+
+### 指定执行器之后还能指定模型
+
+模型名是各家 CLI 自己的说法，不通用，所以这一栏只在选定执行器后出现，
+且**先探测再展示**：`--model` / `-m` 在那个版本的 help 里存在才给填，
+否则界面上直接说"这个版本没有这个参数"，而不是让人填完再被运行时拒绝。
+
+模型清单也是**探测**来的，不是写死的，各 CLI 能给多少就用多少：
+
+- `opencode models` 是真正的枚举命令，本机实测 122 条，探测时跑一次（~0.7s）。
+- claude 没有这种命令，但它把可用别名写在 `--model` 的帮助文本里
+  （「e.g. 'opus', 'sonnet'」），从那段原文里捞 —— 措辞变了最多是捞不到，
+  退回自由输入，不会给出过期的错答案。为此 help 解析器开始留存参数块原文。
+- codex 两样都没有 —— 它的清单来自 models.dev。
+
+claude 与 codex 另外从 **models.dev** 补一份完整型号（那是一份公开的模型目录，
+opencode 自己也用它）：输出不含文本的（嵌入、画图）和不支持工具调用的一概不列 ——
+Agent 没有工具寸步难行；按发布日期倒序，新的排前面。CLI 自己报的排在最前，
+它才是那个版本当下认的写法。
+
+这是 LoopKanban **唯一**的对外请求，别处只连 127.0.0.1，所以给了它三条底线：
+一天最多取一次、结果落在数据目录里、`--no-models` 可以彻底关掉。取不到不是
+错误 —— 离线、超时、对方改了格式，一律退回已有缓存（过期的也比空的强，模型名
+不会一夜之间全变）或空清单。
+
+界面上只能**选**、不能填：能选的都是探测出来的，手打一个 CLI 不认的名字只会
+在派活那一刻才炸。不选就是「默认模型」，那时我们一个 `--model` 都不传，
+由 CLI 自己做主。卡上原有的模型即使不在当前清单里也留在下拉里 —— 清单会随
+CLI 升级、随 models.dev 变，不该因为它变了就把一张老卡的选择悄悄抹掉。
+
+### 项目与 worktree 的归属
+
+**项目就是一个 git 仓库目录**，任务挂在它下面；界面上只有「概览」（所有项目
+的卡）与逐个项目两种视角，没有"多个看板"这个中间概念 —— 它不对应任何真实
+的东西，只是多一层要维护的名字。
+
+**worktree 属于任务，不属于某次执行、更不属于某个 Agent**：位置固定在
+`<项目目录>/.loopkanban/worktrees/<taskId>`，取用是幂等的 —— 目录在就直接用，
+分支在就挂回去。打回重做、换个 CLI 接着干、跨进程重启，看到的都是同一个工作区
+里上一次的成果，而不是在空目录里对着评审意见发懵。
+
+放进项目目录（而不是数据目录）是为了让 Agent 的工作区和它要改的代码待在一起，
+代价是主仓库会多出一坨未跟踪文件 —— 而"主工作区是否干净"正是合并前的硬前置
+条件。所以建第一个 worktree 时会把 `/.loopkanban/` 写进 `.git/info/exclude`：
+那是仓库的本地排除表，不是用户的 `.gitignore`，我们不该动用户的文件。
+
+写入范围（`writeScopes`，建议性的路径前缀预警）随之退场：每个任务本来就在
+自己的 worktree 里，冲突推迟到合并时由 git 判定，比前缀猜测准确得多。
 
 ### 2.4 看板流转
 
@@ -571,7 +665,7 @@ Review**。改成 CAS 先落定，删除只是收拾场地，失败也不影响�
 | **CLI 输出格式变化**（codex 的 `--json` 仍是 experimental 别名） | 解析失败 | 解析失败降级纯文本，不影响执行；完成判定优先用 `-o` 文件和退出码这类稳定信号 |
 | **进程树 kill 写错** | 孤儿进程、烧钱、资源泄漏 | §3.4 规格写死；针对性测试（起会 fork 子进程的任务再 kill）；启动时对账清理 |
 | **本地 HTTP 接口能执行任意代码** | 安全事故 | §4 第 4 条，M1 就做对 |
-| 并行 Agent 冲突 | 合并地狱 | worktree 隔离 + 同仓库并发上限 + `blockedBy` + `writeScopes` 预警 |
+| 并行 Agent 冲突 | 合并地狱 | worktree 隔离 + 同仓库并发上限 + `blockedBy`，冲突推迟到合并时交给 git |
 | Agent 跑飞 / 死循环 | 烧钱、占资源 | 超时终止、可随时 kill |
 | 自己实现 = 工作量比借 dsh 大 | 周期变长 | 只借六个模式不借框架，砍掉 Cordis / slot / i18n 那套；沙箱推迟 |
 

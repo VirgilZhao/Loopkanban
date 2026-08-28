@@ -7,8 +7,8 @@
  */
 
 import type {
-  Agent, Board, DiffView, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent, Task,
-  TaskEdit,
+  Agent, DiffView, DirListing, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState,
+  StreamEvent, Task, TaskComment, TaskEdit,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -31,14 +31,56 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T
 }
 
+/**
+ * 把 `undefined` 换成 `null` 再上路。
+ *
+ * JSON 里没有 undefined —— `JSON.stringify` 会把这种键**整条丢掉**，于是
+ * 「清空指定执行器」在服务端看起来和「这次没提到它」一模一样，永远存不下去。
+ * null 是"请把它清空"的显式说法。
+ */
+function clearable(edit: TaskEdit): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(edit).map(([key, value]) => [key, value ?? null]))
+}
+
 export const api = {
-  state: () => call<{ boards: Board[]; tasks: Task[] }>('/api/state'),
+  state: () => call<{ projects: Project[]; tasks: Task[]; live: Record<string, LiveLine> }>('/api/state'),
+
+  projects: () => call<{ projects: Project[] }>('/api/projects'),
+
+  /** 改项目名。仓库路径与基线分支是它的身份，改名不动它们。 */
+  renameProject: (projectId: string, name: string) =>
+    call<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH', body: JSON.stringify({ name }),
+    }),
+
+  /**
+   * 删除项目，连同它名下所有卡片、执行历史，以及这些卡留下的分支与 worktree。
+   * **仓库本身不动**。还有卡在执行时会被拒绝。
+   */
+  deleteProject: (projectId: string) =>
+    call<{ deleted: boolean; tasks: number }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+    }),
+
+  /** 列出本机某个目录下的子目录，供新增项目时挑文件夹。不传则从家目录起步。 */
+  browse: (path?: string) =>
+    call<DirListing>(`/api/fs${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`),
+
+  /** 新增项目。目录必须是本机上的一个 git 仓库，基线分支由它自己说了算。 */
+  createProject: (input: { name: string; path: string }) =>
+    call<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
 
   agents: () => call<{ agents: Agent[] }>('/api/agents'),
 
   runsOf: (taskId: string) => call<{ runs: Run[] }>(`/api/tasks/${encodeURIComponent(taskId)}/runs`),
 
-  createTask: (input: { subject: string; description?: string; acceptance?: string[]; preferredProvider?: string }) =>
+  createTask: (input: {
+    projectId: string
+    description?: string
+    acceptance?: string[]
+    preferredProvider?: string
+    model?: string
+  }) =>
     call<{ task: Task }>('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
 
   /** 派活。202 表示已接受并开始执行。 */
@@ -55,7 +97,7 @@ export const api = {
   /** 编辑任务内容。执行中的卡片会被拒绝。 */
   edit: (taskId: string, expectedRevision: number, edit: TaskEdit) =>
     call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
-      method: 'PATCH', body: JSON.stringify({ expectedRevision, ...edit }),
+      method: 'PATCH', body: JSON.stringify({ expectedRevision, ...clearable(edit) }),
     }),
 
   /**
@@ -66,10 +108,6 @@ export const api = {
     call<{ deleted: boolean; unblocked: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: 'DELETE', body: JSON.stringify({ expectedRevision }),
     }),
-
-  /** 与该任务写入范围重叠、且正在运行的任务。 */
-  overlaps: (taskId: string) =>
-    call<{ overlaps: string[] }>(`/api/tasks/${encodeURIComponent(taskId)}/overlaps`),
 
   stats: () => call<RunStats>('/api/stats'),
 
@@ -88,11 +126,19 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ merge }) },
     ),
 
-  /** 打回重做。worktree 保留，下一次执行接着改。 */
-  requestChanges: (taskId: string, feedback: string) =>
-    call(`/api/tasks/${encodeURIComponent(taskId)}/request-changes`, {
-      method: 'POST', body: JSON.stringify({ feedback }),
-    }),
+  /** 一张卡的讨论，按时间正序。 */
+  comments: (taskId: string) =>
+    call<{ comments: TaskComment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/comments`),
+
+  /**
+   * 留一条言。**在 Review 里留言就是"再改一版"**：卡自动回队列，
+   * 下一次执行会带着整条讨论走。`requeued` 说明这次有没有搬动卡片。
+   */
+  comment: (taskId: string, body: string) =>
+    call<{ comments: TaskComment[]; requeued: boolean }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/comments`,
+      { method: 'POST', body: JSON.stringify({ body }) },
+    ),
 
   /** 废弃这次成果：删掉分支与 worktree，卡片回想法池。 */
   discard: (taskId: string) =>

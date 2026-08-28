@@ -6,7 +6,7 @@
  * 会有一方明确失败，而不是双方都以为自己成功了。
  */
 
-import type { BoardId, RunId, TaskId } from './ids.ts'
+import type { ProjectId, RunId, TaskId } from './ids.ts'
 
 /** 看板的列。顺序即流转顺序。 */
 export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
@@ -23,32 +23,36 @@ export interface Lease {
 
 export interface Task {
   readonly id: TaskId
-  readonly boardId: BoardId
+  readonly projectId: ProjectId
   /** 单调递增，每次变更 +1，用作 compare-and-set 的凭据。 */
   readonly revision: number
   readonly column: Column
   /** 列内排序，允许非整数以便插入时不必重排全列。 */
   readonly position: number
-  readonly subject: string
+  /**
+   * 卡片的全部内容。**没有单独的标题** —— 一句话的活写一句话，复杂的活
+   * 写一段，逼人先起个标题只是多一道手续。要显示"叫什么"时取第一行，
+   * 见 {@link taskTitle}。
+   */
   readonly description: string
-  /** 验收标准。进入 ready 要求非空 —— 没有判据的任务无法验收。 */
+  /**
+   * 验收标准。**可选** —— 有判据当然更好（Agent 照着做，人照着验），
+   * 但强制它等于给每张卡都加一道门槛，而很多活的判据就是"跑起来对不对"。
+   */
   readonly acceptance: readonly string[]
+  /** 项目仓库路径。跟着项目走，建卡时定下，之后不由人改。 */
   readonly repoPath: string
   readonly baseBranch: string
   /** 指定执行器；未指定则由调度器在已探测到的 provider 里挑。 */
   readonly preferredProvider?: string | undefined
+  /**
+   * 指定模型。留空就用那个 CLI 自己的默认 —— 我们不替它做主。
+   * 只在指定了执行器时有意义：模型名是各家 CLI 自己的说法，不通用。
+   */
+  readonly model?: string | undefined
   readonly blockedBy: readonly TaskId[]
-  /** 建议性的写入范围前缀，用于并发冲突预警，不是锁。 */
-  readonly writeScopes: readonly string[]
   /** `undefined` 表示未被占用；清除租约就是把它置回 undefined。 */
   readonly lease?: Lease | undefined
-  /**
-   * 打回时留下的评审意见。下一次执行会把它交给 Agent，然后清空。
-   *
-   * 存在任务上而不是 Run 上：打回之后这张卡回到队列，谁来接、什么时候接
-   * 都还不确定，意见必须跟着卡走。
-   */
-  readonly feedback?: string | undefined
   /**
    * 归档时间；`undefined` 表示没归档。
    *
@@ -94,6 +98,24 @@ export function canTransition(from: Column, to: Column): boolean {
   return from === to || ALLOWED[from].includes(to)
 }
 
+/** 显示名的长度上限。再长的第一行在卡片、分支名、提交信息里都塞不下。 */
+const TITLE_MAX = 60
+
+/**
+ * 卡片的显示名：描述的第一行。
+ *
+ * 任务没有独立的标题字段，但分支名、提交信息、通知标题这些地方都需要一个
+ * 短称呼。取第一行是最不意外的规则 —— 人写多行时，第一行本来就是那句话。
+ *
+ * @param task - 只需要 id 与描述。
+ * @returns 第一行（截断到 60 字）；一个字都没写时退回任务 id。
+ */
+export function taskTitle(task: Pick<Task, 'id' | 'description'>): string {
+  const first = task.description.split('\n').map((line) => line.trim()).find((line) => line.length > 0)
+  if (first === undefined) return String(task.id)
+  return first.length > TITLE_MAX ? `${first.slice(0, TITLE_MAX)}…` : first
+}
+
 /** 领域操作的结果：要么成功带出新值，要么失败带出可判别的原因。 */
 export type DomainResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -102,18 +124,15 @@ export type DomainResult<T> =
 export type DomainError =
   | 'revision-conflict'
   | 'illegal-transition'
-  | 'acceptance-required'
   | 'blocked-by-dependency'
   | 'lease-held'
   | 'lease-missing'
   | 'lease-mismatch'
-  | 'feedback-required'
   | 'task-running'
   | 'task-archived'
   | 'already-archived'
   | 'not-archived'
   | 'not-deletable'
-  | 'subject-required'
 
 const fail = <T>(reason: DomainError, detail: string): DomainResult<T> => ({ ok: false, reason, detail })
 const succeed = <T>(value: T): DomainResult<T> => ({ ok: true, value })
@@ -273,10 +292,6 @@ export function moveTask(task: Task, request: MoveRequest): DomainResult<Task> {
   if (!canTransition(task.column, request.to)) {
     return fail('illegal-transition', `不允许从 ${task.column} 移到 ${request.to}`)
   }
-  // 没有验收标准的任务不能进队列：Agent 干完了也没人能判定它对不对。
-  if (request.to === 'ready' && task.acceptance.length === 0) {
-    return fail('acceptance-required', '进入 ready 前必须写明验收标准')
-  }
   // 离开 running 时租约必须一并释放，否则卡片会永远显示"被占用"。
   const patch: Partial<Task> = request.to === 'running'
     ? {}
@@ -291,14 +306,11 @@ export function moveTask(task: Task, request: MoveRequest): DomainResult<Task> {
 
 /** 允许人工编辑的字段。执行相关的状态（列、租约、revision）不在此列。 */
 export interface TaskEdit {
-  readonly subject?: string
   readonly description?: string
   readonly acceptance?: readonly string[]
-  readonly repoPath?: string
-  readonly baseBranch?: string
   readonly preferredProvider?: string | undefined
+  readonly model?: string | undefined
   readonly blockedBy?: readonly TaskId[]
-  readonly writeScopes?: readonly string[]
 }
 
 export interface EditRequest {
@@ -326,25 +338,14 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
   if (!shelved.ok) return shelved
 
   const { edit } = request
-  const subject = edit.subject?.trim()
-  if (subject !== undefined && subject.length === 0) {
-    return fail('subject-required', '标题不能为空')
-  }
   const acceptance = edit.acceptance?.map((item) => item.trim()).filter((item) => item.length > 0)
-  // 已经在队列里的卡不能把验收标准清空 —— 那会让它变成一张无法验收的活卡。
-  if (task.column === 'ready' && acceptance !== undefined && acceptance.length === 0) {
-    return fail('acceptance-required', '队列中的任务不能清空验收标准，先移回 Backlog')
-  }
 
   return succeed(bump(task, {
-    ...(subject === undefined ? {} : { subject }),
     ...(edit.description === undefined ? {} : { description: edit.description }),
     ...(acceptance === undefined ? {} : { acceptance }),
-    ...(edit.repoPath === undefined ? {} : { repoPath: edit.repoPath }),
-    ...(edit.baseBranch === undefined ? {} : { baseBranch: edit.baseBranch }),
     ...('preferredProvider' in edit ? { preferredProvider: edit.preferredProvider } : {}),
+    ...('model' in edit ? { model: edit.model } : {}),
     ...(edit.blockedBy === undefined ? {} : { blockedBy: [...edit.blockedBy] }),
-    ...(edit.writeScopes === undefined ? {} : { writeScopes: edit.writeScopes.map((s) => s.trim()).filter(Boolean) }),
   }, request.now))
 }
 
@@ -409,53 +410,6 @@ export function renewLease(task: Task, runId: RunId, ttlMs: number, now: number)
   return succeed(bump(task, { lease: { ...task.lease, expiresAt: now + ttlMs } }, now))
 }
 
-export interface RequestChangesRequest {
-  readonly expectedRevision: number
-  readonly feedback: string
-  readonly now: number
-}
-
-/**
- * 打回重做：带着评审意见把卡片放回队列。
- *
- * 刻意不引入 `review → running` 这条流转。打回后走的仍是普通的排队路径，
- * 于是自动调度、并发上限、依赖阻塞这些规则一视同仁地作用在它身上，
- * **ready 的入列条件也一样要满足**；而"接着上次改"是执行时的实现细节
- * （见 Runner 的续跑判定），不是状态机的分支。
- *
- * @param task - 当前任务。
- * @param request - CAS 凭据、评审意见与时间。
- */
-export function requestChanges(task: Task, request: RequestChangesRequest): DomainResult<Task> {
-  const guard = checkRevision(task, request.expectedRevision)
-  if (!guard.ok) return guard
-  const shelved = checkNotArchived(task)
-  if (!shelved.ok) return shelved
-  if (task.column !== 'review') {
-    return fail('illegal-transition', `只有 review 列的任务可以打回，当前在 ${task.column}`)
-  }
-  const feedback = request.feedback.trim()
-  if (feedback.length === 0) {
-    return fail('feedback-required', '打回必须写明要改什么，否则 Agent 只会把上次的活重做一遍')
-  }
-  // 打回的去向就是 ready，所以**入列条件在这里同样成立**。
-  // 只在 moveTask 里挡是不够的：卡在 review 期间是可以清空验收标准的，
-  // 而打回又是失败任务重新开始的主路径 —— 从这道门溜进队列的卡，Agent
-  // 照样会被派去做，做完却没人能判定它对不对。
-  if (task.acceptance.length === 0) {
-    return fail('acceptance-required', '这张卡的验收标准是空的，打回等于把一张没法验收的卡放回队列。先补上再打回')
-  }
-  return succeed(bump(task, { column: 'ready', feedback, lease: undefined }, request.now))
-}
-
-/**
- * 清空已经交给 Agent 的评审意见，避免它在后续执行里被重复投喂。
- * @param task - 当前任务。
- * @param now - 当前时间。
- */
-export function consumeFeedback(task: Task, now: number): Task {
-  return task.feedback === undefined ? task : bump(task, { feedback: undefined }, now)
-}
 
 /** 租约是否已失效（不存在也算失效）。 */
 export function isLeaseExpired(task: Task, now: number): boolean {

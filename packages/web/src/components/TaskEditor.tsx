@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react'
-import { Plus, X } from 'lucide-react'
+import { ChevronRight, FolderGit2, Plus, X } from 'lucide-react'
+import { Button } from '@/components/ui/button.tsx'
+import { Input } from '@/components/ui/input.tsx'
+import { Label } from '@/components/ui/label.tsx'
+import { Textarea } from '@/components/ui/textarea.tsx'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, Task, TaskEdit } from '@/types.ts'
+import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
 interface Props {
   task: Task
+  /** 任务所属项目；卡片就在它派生出来的 worktree 里干活。 */
+  project: Project | null
   agents: Agent[]
   busy: boolean
   onSave: (edit: TaskEdit) => void
@@ -12,25 +18,23 @@ interface Props {
 
 /** 表单里持有的草稿。`preferredProvider` 显式允许 undefined —— 「任意」就是它。 */
 interface Draft {
-  subject: string
   description: string
   acceptance: string[]
   preferredProvider: string | undefined
-  writeScopes: string[]
+  model: string | undefined
 }
 
 /** 从任务取出可编辑的那部分，作为表单初值。 */
 function draftOf(task: Task): Draft {
   return {
-    subject: task.subject,
     description: task.description,
     acceptance: task.acceptance.length > 0 ? task.acceptance : [''],
     preferredProvider: task.preferredProvider,
-    writeScopes: task.writeScopes,
+    model: task.model,
   }
 }
 
-export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Element {
+export function TaskEditor({ task, project, agents, busy, onSave }: Props): React.JSX.Element {
   const [draft, setDraft] = useState(() => draftOf(task))
   // 两种冻结，同一套只读：正在执行的、以及归档的。字段上的 disabled 全靠它。
   const locked = task.column === 'running' || task.archivedAt !== undefined
@@ -38,10 +42,21 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
     ? '正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。'
     : '已归档，内容冻结。要改先从归档里取出。'
 
-  // 卡片被外部改动（打回、执行完成）后重置表单，避免拿着旧值去覆盖新状态。
+  // 卡片被外部改动（留言回队列、执行完成）后重置表单，避免拿着旧值去覆盖新状态。
   useEffect(() => { setDraft(draftOf(task)) }, [task.id, task.revision])
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(task))
+  /** 选定的执行器；没选就没有模型这一说。 */
+  const picked = agents.find((agent) => agent.id === draft.preferredProvider)
+  /**
+   * 下拉里的选项。卡上原有的模型即使不在探测清单里也补进去 —— 清单会随
+   * CLI 升级、随 models.dev 变，不该因为它变了就把一张老卡的选择抹掉。
+   */
+  const options = picked === undefined
+    ? []
+    : draft.model !== undefined && !picked.models.includes(draft.model)
+      ? [draft.model, ...picked.models]
+      : picked.models
 
   const setAcceptance = (index: number, value: string): void => {
     setDraft((d) => ({ ...d, acceptance: d.acceptance.map((item, i) => (i === index ? value : item)) }))
@@ -49,114 +64,164 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
         {locked ? (
-          <p className="cjk-label mb-3 rounded-md border border-sodium-deep/40 bg-sodium/[0.06] p-2 !text-sodium">
+          <p className="rounded-md border border-sodium-deep/40 bg-sodium/[0.06] px-3 py-2 text-sm text-sodium">
             {lockReason}
           </p>
         ) : null}
 
-        <Label>标题</Label>
-        <input
-          value={draft.subject}
-          disabled={locked}
-          onChange={(e) => { setDraft((d) => ({ ...d, subject: e.target.value })) }}
-          className={inputClass}
-        />
+        {/* 卡片没有标题字段：一句话的活写一句话，复杂的活写一段。
+            要显示"叫什么"的地方（分支名、提交信息、通知）取第一行。 */}
+        <Field label="任务内容" hint="第一行会被当作这张卡的名字">
+          <Textarea
+            value={draft.description}
+            disabled={locked}
+            rows={6}
+            autoFocus={draft.description.trim().length === 0}
+            placeholder="要 Agent 做什么？"
+            onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
+            // Textarea 用的是 field-sizing:content，高度跟着内容走、rows 说了不算，
+            // 所以要给它更大的起始高度得抬 min-h（rows 只在不支持的浏览器上兜底）。
+            className="min-h-32 leading-relaxed"
+          />
+        </Field>
 
-        <Label>描述</Label>
-        <textarea
-          value={draft.description}
-          disabled={locked}
-          rows={4}
-          onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
-          className={cn(inputClass, 'resize-y leading-relaxed')}
-        />
+        {/* 验收标准是可选的，所以默认收起来 —— 没写的时候它不该占着屏幕。 */}
+        <Collapsible
+          label="验收标准"
+          hint="可选。写了 Agent 就照着做、你就照着验；不写也能派活"
+          count={draft.acceptance.filter((item) => item.trim().length > 0).length}
+          defaultOpen={task.acceptance.length > 0}
+        >
+          <div className="space-y-2">
+            {draft.acceptance.map((item, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <Input
+                  value={item}
+                  disabled={locked}
+                  placeholder="一条可判定的标准"
+                  onChange={(e) => { setAcceptance(index, e.target.value) }}
+                />
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="删除这条"
+                  title="删除这条"
+                  disabled={locked || draft.acceptance.length === 1}
+                  onClick={() => {
+                    setDraft((d) => ({ ...d, acceptance: d.acceptance.filter((_, i) => i !== index) }))
+                  }}
+                >
+                  <X />
+                </Button>
+              </div>
+            ))}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              disabled={locked}
+              onClick={() => { setDraft((d) => ({ ...d, acceptance: [...d.acceptance, ''] })) }}
+            >
+              <Plus />新增一条
+            </Button>
+          </div>
+        </Collapsible>
 
-        <Label>
-          验收标准
-          <span className="ms-2 !font-normal !text-ink-faint/70">Agent 的完成判据，空着就进不了 Ready</span>
-        </Label>
-        <div className="space-y-1">
-          {draft.acceptance.map((item, index) => (
-            <div key={index} className="flex items-center gap-1">
-              <span className="mono text-[11px] text-ink-faint">□</span>
-              <input
-                value={item}
+        <Field label="指定执行器" hint="不指定就由调度器按可用性挑一个">
+          <div className="flex flex-wrap gap-2">
+            <Chip
+              active={draft.preferredProvider === undefined}
+              disabled={locked}
+              onClick={() => {
+                // 不指定执行器时模型也跟着清掉：模型名是各家 CLI 自己的说法，
+                // 留着一个别人不认识的名字只会在派活时炸。
+                setDraft((d) => ({ ...d, preferredProvider: undefined, model: undefined }))
+              }}
+            >
+              任意
+            </Chip>
+            {agents.map((agent) => (
+              <Chip
+                key={agent.id}
+                active={draft.preferredProvider === agent.id}
                 disabled={locked}
-                placeholder="一条可判定的标准"
-                onChange={(e) => { setAcceptance(index, e.target.value) }}
-                className={cn(inputClass, 'my-0 flex-1')}
-              />
-              <IconButton
-                label="删除这条"
-                disabled={locked || draft.acceptance.length === 1}
+                title={agent.permissionCaveat?.detail}
                 onClick={() => {
-                  setDraft((d) => ({ ...d, acceptance: d.acceptance.filter((_, i) => i !== index) }))
+                  setDraft((d) => ({
+                    ...d,
+                    preferredProvider: agent.id,
+                    ...(d.preferredProvider === agent.id ? {} : { model: undefined }),
+                  }))
                 }}
               >
-                <X className="size-2.5" />
-              </IconButton>
-            </div>
-          ))}
-          <IconButton
-            label="新增一条" disabled={locked} wide
-            onClick={() => { setDraft((d) => ({ ...d, acceptance: [...d.acceptance, ''] })) }}
-          >
-            <Plus className="size-2.5" />
-          </IconButton>
-        </div>
+                {agent.id}
+                {agent.permissionCaveat === undefined ? null : (
+                  <span className="text-sodium">{agent.permissionCaveat.label}</span>
+                )}
+              </Chip>
+            ))}
+          </div>
+        </Field>
 
-        <Label>指定执行器</Label>
-        <div className="flex flex-wrap gap-1">
-          <Chip
-            active={draft.preferredProvider === undefined}
-            disabled={locked}
-            onClick={() => { setDraft((d) => ({ ...d, preferredProvider: undefined })) }}
-          >
-            任意
-          </Chip>
-          {agents.map((agent) => (
-            <Chip
-              key={agent.id}
-              active={draft.preferredProvider === agent.id}
+        {/* 只有选定了执行器、且那个 CLI 认 --model 时才出现这一栏。
+            能不能指定模型是**探测**出来的，不是写死的。 */}
+        {picked === undefined ? null : !picked.canPickModel ? (
+          <Field label="模型">
+            <p className="text-xs text-ink-faint">
+              这个版本的 {picked.id} 没有 <span className="mono">--model</span> 参数，
+              只能用它自己的默认模型。
+            </p>
+          </Field>
+        ) : options.length === 0 ? (
+          <Field label="模型">
+            <p className="text-xs text-ink-faint">
+              没能列出 {picked.id} 的可选模型（离线或它报不出来），这次只能用它自己的默认。
+            </p>
+          </Field>
+        ) : (
+          <Field label="模型" hint={`${String(picked.models.length)} 个可选；不选就用 ${picked.id} 自己的默认`}>
+            {/* 只可选、不可填：能选的都是探测出来的，手打一个 CLI 不认的名字
+                只会在派活那一刻才炸。卡上原有的模型即使不在清单里也留着，
+                免得打开一张老卡就把它的选择悄悄抹掉。 */}
+            <select
+              value={draft.model ?? ''}
               disabled={locked}
-              title={agent.permissionCaveat?.detail}
-              onClick={() => { setDraft((d) => ({ ...d, preferredProvider: agent.id })) }}
-            >
-              {agent.id}
-              {agent.permissionCaveat === undefined ? null : (
-                <span className="ms-1 !text-sodium">{agent.permissionCaveat.label}</span>
+              onChange={(e) => {
+                const next = e.target.value
+                setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
+              }}
+              className={cn(
+                'mono border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+                'transition-[color,box-shadow] outline-none dark:bg-input/30',
+                'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+                'disabled:cursor-not-allowed disabled:opacity-50',
               )}
-            </Chip>
-          ))}
-        </div>
+            >
+              <option value="">（默认模型）</option>
+              {options.map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
+          </Field>
+        )}
 
-        <Label>
-          写入范围
-          <span className="ms-2 !font-normal !text-ink-faint/70">建议性，用于并发冲突预警</span>
-        </Label>
-        <input
-          value={draft.writeScopes.join(', ')}
-          disabled={locked}
-          placeholder="src/auth/, docs/"
-          onChange={(e) => {
-            setDraft((d) => ({ ...d, writeScopes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) }))
-          }}
-          className={cn(inputClass, 'mono !text-[11px]')}
-        />
-
-        <Label>仓库</Label>
-        <p className="mono text-[11px] text-ink-faint">{task.repoPath}</p>
-        <p className="mono text-[11px] text-ink-faint">基线 {task.baseBranch}</p>
+        <Field label="项目" hint="任务在它派生出来的 worktree 里执行，做完再合回基线">
+          <div className="rounded-md border border-hairline px-3 py-2">
+            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
+              <FolderGit2 className="size-3.5 flex-none text-ink-faint" />
+              {project?.name ?? '未知项目'}
+            </p>
+            <p className="mono mt-1 break-all text-xs text-ink-faint">{task.repoPath}</p>
+            <p className="mono text-xs text-ink-faint">基线 {task.baseBranch}</p>
+          </div>
+        </Field>
       </div>
 
-      <div className="flex flex-none items-center gap-2 border-t border-hairline px-3 py-2">
-        <span className="cjk-label !text-[10px] !text-ink-faint/70">
-          {dirty ? '有未保存的改动' : '已保存'}
-        </span>
+      <div className="flex flex-none items-center gap-2 border-t border-hairline px-4 py-3">
+        <span className="text-xs text-ink-faint">{dirty ? '有未保存的改动' : '已保存'}</span>
         <span className="flex-1" />
-        <button
+        <Button
+          size="sm"
           disabled={busy || locked || !dirty}
           onClick={() => {
             onSave({
@@ -164,51 +229,65 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
               acceptance: draft.acceptance.map((s) => s.trim()).filter(Boolean),
             })
           }}
-          className={cn(
-            'cjk-label rounded-md border px-2.5 py-1 !text-[11px] transition-colors',
-            'disabled:cursor-not-allowed disabled:opacity-40',
-            dirty ? 'border-sodium !text-sodium hover:bg-sodium/10' : 'border-hairline',
-          )}
         >
           保存
-        </button>
+        </Button>
       </div>
     </div>
   )
 }
 
-/** 裸输入框：只留一条发丝下划线，和整套面板的语言一致。 */
-const inputClass = cn(
-  'my-1 w-full rounded-md border border-hairline bg-void px-2 py-1 text-[12px] text-ink',
-  'placeholder:text-ink-faint/50 focus:border-sodium-deep focus:outline-none',
-  'disabled:cursor-not-allowed disabled:opacity-50',
-)
-
-function Label({ children }: { children: React.ReactNode }): React.JSX.Element {
-  return <h3 className="cjk-label mb-1 mt-4 !text-[10px] first:mt-0">{children}</h3>
-}
-
-function IconButton({ children, onClick, disabled, label, wide }: {
-  children: React.ReactNode
-  onClick: () => void
-  disabled: boolean
+/** 一组「标签 + 说明 + 控件」。说明写在标签下面，和主题预览里的卡片一个语序。 */
+function Field({ label, hint, children }: {
   label: string
-  wide?: boolean
+  hint?: string
+  children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <button
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        'flex h-5 items-center justify-center border border-hairline text-ink-faint transition-colors',
-        'hover:border-sodium hover:text-sodium disabled:opacity-30 disabled:hover:border-hairline',
-        wide ? 'w-full' : 'w-5 flex-none',
-      )}
-    >
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <Label>{label}</Label>
+        {hint === undefined ? null : <p className="text-xs text-ink-faint">{hint}</p>}
+      </div>
       {children}
-    </button>
+    </div>
+  )
+}
+
+/** 可折叠的一组字段。收起时只留标题那一行，右侧标出里面有几条。 */
+function Collapsible({ label, hint, count, defaultOpen, children }: {
+  label: string
+  hint?: string
+  count: number
+  defaultOpen: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => { setOpen((on) => !on) }}
+        className="flex w-full items-start gap-1.5 text-left"
+      >
+        <ChevronRight
+          className={cn('mt-0.5 size-3.5 flex-none text-ink-faint transition-transform', open && 'rotate-90')}
+        />
+        <div className="min-w-0 flex-1 space-y-1">
+          <Label className="cursor-pointer">
+            {label}
+            {count > 0 ? <span className="mono text-xs text-ink-faint">{count}</span> : null}
+          </Label>
+        </div>
+      </button>
+      {open ? (
+        <div className="space-y-2 ps-5">
+          {hint === undefined ? null : <p className="text-xs text-ink-faint">{hint}</p>}
+          {children}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -220,16 +299,15 @@ function Chip({ children, active, disabled, onClick, title }: {
   title?: string
 }): React.JSX.Element {
   return (
-    <button
+    <Button
+      variant="outline"
+      size="sm"
       disabled={disabled}
       onClick={onClick}
-      title={title}
-      className={cn(
-        'chrome-label rounded-md border px-2 py-1 transition-colors disabled:opacity-40',
-        active ? 'border-sodium !text-sodium' : 'border-hairline hover:border-hairline-bright hover:!text-ink-dim',
-      )}
+      {...(title === undefined ? {} : { title })}
+      className={cn(active && 'border-primary bg-primary/10 text-sodium hover:bg-primary/15 hover:text-sodium')}
     >
       {children}
-    </button>
+    </Button>
   )
 }

@@ -1,9 +1,19 @@
-import { Plus } from 'lucide-react'
+import { CircleCheck, CircleDashed, Eye, Inbox, LoaderCircle, Plus } from 'lucide-react'
 import { useDroppable } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { Button } from '@/components/ui/button.tsx'
 import { cn } from '@/lib/utils.ts'
-import { COLUMN_META, type Column as ColumnKey, type Skip, type Task } from '@/types.ts'
+import { COLUMN_META, type Column as ColumnKey, type LiveLine, type Skip, type Task } from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
+
+/** 列头的图标，与侧边栏导航同一套 —— 两处指的是同一件东西。 */
+const COLUMN_ICON: Record<ColumnKey, React.ComponentType<{ className?: string }>> = {
+  backlog: Inbox,
+  ready: CircleDashed,
+  running: LoaderCircle,
+  review: Eye,
+  done: CircleCheck,
+}
 
 interface Props {
   column: ColumnKey
@@ -11,55 +21,63 @@ interface Props {
   now: number
   index: number
   selectedId: string | null
-  liveTools: Record<string, string>
+  live: Record<string, LiveLine>
   skips: Map<string, Skip>
   onSelect: (task: Task) => void
+  /** 概览里同一列会来自不同仓库，给出项目名让卡片自报家门；单项目视图下不传。 */
+  projectName?: ((projectId: string) => string | undefined) | undefined
   /** 只有 Backlog 列给新建入口 —— 新卡一律从想法池起步。 */
   onCreate?: (() => void) | undefined
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, liveTools, skips, onSelect, onCreate,
+  column, tasks, now, index, selectedId, live, skips, onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const { setNodeRef, isOver } = useDroppable({ id: column })
   const meta = COLUMN_META[column]
+  const Icon = COLUMN_ICON[column]
 
   return (
     <section
       ref={setNodeRef}
       className={cn(
-        'settle flex min-w-[208px] flex-1 flex-col border-e border-hairline/70 last:border-e-0',
-        isOver && 'bg-sodium/[0.035]',
+        // 列是一块卡片面板：xl 圆角、发丝边、一层浅影，列头与内容之间一条通栏分隔线。
+        'settle flex min-w-[220px] flex-1 flex-col overflow-hidden rounded-xl border border-hairline',
+        'bg-panel shadow-sm transition-colors duration-150',
+        isOver && 'border-sodium-deep/60 shadow-md',
       )}
       style={{ animationDelay: `${String(index * 45)}ms` }}
     >
-      {/* 列头：微标签 + 计数格，一条发丝线把它和内容分开。 */}
-      <header className="flex items-baseline gap-2 border-b border-hairline px-3 py-2.5">
-        <span className="lamp self-center" data-state={meta.lamp} />
-        <h2 className="chrome-label !text-[10px] !text-ink-dim">{meta.label}</h2>
-        <span className="flex-1" />
+      {/* 列头：图标 + 列名 + 一句说明；右侧是新建入口与计数章。 */}
+      <header className="flex flex-none items-start gap-2 px-3.5 pb-3 pt-3.5">
+        <Icon className={cn('mt-px size-4 flex-none text-ink-faint', column === 'running' && 'text-sodium')} />
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-sm font-semibold leading-none text-ink">{meta.label}</h2>
+          <p className="mt-1.5 truncate text-xs text-ink-faint">{meta.hint}</p>
+        </div>
         {onCreate === undefined ? null : (
-          <button
+          <Button
+            variant="outline"
+            size="icon-xs"
             aria-label="新建任务"
             title="新建任务"
             onClick={onCreate}
-            className={cn(
-              'flex size-4 items-center justify-center rounded-sm border border-hairline text-ink-faint',
-              'transition-colors hover:border-sodium hover:text-sodium',
-            )}
           >
-            <Plus className="size-2.5" />
-          </button>
+            <Plus />
+          </Button>
         )}
-        <span className="mono rounded-sm border border-hairline px-1 text-[10px] leading-4 text-ink-faint">
+        <span className={cn(
+          'mono flex h-6 min-w-6 items-center justify-center rounded-md border border-hairline px-1.5',
+          'text-xs tabular-nums text-ink-faint',
+        )}>
           {tasks.length}
         </span>
       </header>
-      <p className="cjk-label border-b border-hairline/40 px-3 py-1 !text-[10px] !text-ink-faint/60">
-        {meta.hint}
-      </p>
 
-      <div className="flex flex-1 flex-col gap-1.5 overflow-y-auto p-1.5">
+      <div className={cn(
+        'flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto border-t border-hairline p-2.5',
+        isOver && 'bg-sodium/[0.05]',
+      )}>
         {/* 列内可排序：position 决定自动驾驶的派发顺序，所以拖动即调优先级。 */}
         <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
         {tasks.map((task) => (
@@ -68,15 +86,16 @@ export function Column({
             task={task}
             now={now}
             selected={selectedId === task.id}
-            liveTool={liveTools[task.id]}
+            live={live[task.id]}
             skip={skips.get(task.id)}
+            projectName={projectName?.(task.projectId)}
             onSelect={onSelect}
           />
         ))}
         {/* 空列给一个矮的虚线槽位，像机架上空着的插槽；撑满整列会太吵。 */}
         </SortableContext>
         {tasks.length === 0 ? (
-          <div className="mx-1.5 mt-1.5 h-14 rounded-lg border border-dashed border-hairline/60" />
+          <div className="h-16 rounded-lg border border-dashed border-hairline" />
         ) : null}
       </div>
     </section>

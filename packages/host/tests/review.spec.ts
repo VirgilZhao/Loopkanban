@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { archiveTask, asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { Review } from '../src/review/index.ts'
 import { Storage } from '../src/storage/index.ts'
-import { createWorktree, branchSlug, currentBranch, isClean } from '../src/worktree/index.ts'
+import { branchSlug, currentBranch, ensureWorktree, isClean } from '../src/worktree/index.ts'
 
 const T0 = 1_700_000_000_000
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let sandbox: string
 let repo: string
@@ -21,9 +21,9 @@ const git = (cwd: string, ...args: string[]) => capture(['git', '-C', cwd, ...ar
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'review', position: 1,
-    subject: '加个 slugify', description: '', acceptance: ['有测试'],
-    repoPath: repo, baseBranch: 'main', blockedBy: [], writeScopes: [],
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'review', position: 1,
+    description: '加个 slugify', acceptance: ['有测试'],
+    repoPath: repo, baseBranch: 'main', blockedBy: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }
 }
@@ -32,7 +32,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
 async function reviewable(id = 't1'): Promise<{ worktreePath: string; branch: string }> {
   store.createTask(task({ id }))
   const branch = branchSlug(id, 'slugify')
-  const wt = await createWorktree(repo, join(sandbox, 'worktrees'), id, branch, 'main')
+  const wt = await ensureWorktree(repo, id, branch, 'main')
   await writeFile(join(wt.path, 'slugify.js'), 'export const slugify = (s) => s\n', 'utf8')
   store.createRun({
     id: asRunId(`run-${id}`), taskId: asTaskId(id), provider: 'codex', cliVersion: '0.150.1',
@@ -52,8 +52,8 @@ beforeEach(async () => {
   await git(repo, 'commit', '-qm', 'init')
 
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
-  review = new Review({ storage: store, worktreeRoot: join(sandbox, 'worktrees'), now: () => T0 + 5000 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
+  review = new Review({ storage: store, now: () => T0 + 5000 })
 })
 
 afterEach(async () => { store.close(); await rm(sandbox, { recursive: true, force: true }) })
@@ -126,31 +126,6 @@ describe('accept', () => {
   })
 })
 
-describe('requestChanges', () => {
-  it('带意见回到 ready，worktree 与分支都保留', async () => {
-    const { worktreePath } = await reviewable()
-    const result = review.requestChanges(asTaskId('t1'), '中文标题会被吃掉，要保留 Unicode 字母')
-
-    expect(result.ok).toBe(true)
-    const task = store.getTask(asTaskId('t1'))
-    expect(task?.column).toBe('ready')
-    expect(task?.feedback).toContain('Unicode')
-    // 下一次执行要接着改，工作区不能被清掉。
-    await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).resolves.toContain('slugify')
-  })
-
-  it('空意见被拒 —— 否则 Agent 只会把上次的活重做一遍', () => {
-    store.createTask(task({ id: 't1' }))
-    expect(review.requestChanges(asTaskId('t1'), '   ')).toMatchObject({ ok: false, reason: 'feedback-required' })
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
-  })
-
-  it('只有 review 列的卡能打回', () => {
-    store.createTask(task({ id: 't1', column: 'done' }))
-    expect(review.requestChanges(asTaskId('t1'), '改一下')).toMatchObject({ ok: false, reason: 'illegal-transition' })
-  })
-})
-
 describe('失败的执行也停在 Review', () => {
   it('起进程就失败、没有 worktree 的卡：明确拒绝验收，而不是在不存在的目录上跑 git', async () => {
     store.createTask(task({ id: 't1' }))
@@ -164,11 +139,6 @@ describe('失败的执行也停在 Review', () => {
     expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
   })
 
-  it('失败的卡打回后回到队列，接着重新排队执行', () => {
-    store.createTask(task({ id: 't1' }))
-    expect(review.requestChanges(asTaskId('t1'), '先把依赖装上')).toMatchObject({ ok: true })
-    expect(store.getTask(asTaskId('t1'))).toMatchObject({ column: 'ready', feedback: '先把依赖装上' })
-  })
 })
 
 describe('副作用绝不跑在领域判定之前（回归）', () => {
@@ -231,7 +201,7 @@ describe('CAS 与不可逆操作的顺序（回归）', () => {
     // 模拟"提交期间别人改了这张卡"：先让存储里的 revision 前进一格。
     const stale = store.getTask(asTaskId('t1'))
     if (stale === null) throw new Error('unreachable')
-    store.commitTask({ ...stale, revision: stale.revision + 1, subject: '被人改过' })
+    store.commitTask({ ...stale, revision: stale.revision + 1, description: '被人改过' })
 
     // review 读的是更新前的快照 → CAS 必然失败。
     const conflicting = new Review({
@@ -241,7 +211,6 @@ describe('CAS 与不可逆操作的顺序（回归）', () => {
         listRuns: store.listRuns.bind(store),
         commitTask: store.commitTask.bind(store),
       } as unknown as Storage,
-      worktreeRoot: join(sandbox, 'worktrees'),
       now: () => T0 + 5000,
     })
     const first = await conflicting.accept(asTaskId('t1'))

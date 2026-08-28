@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button.tsx'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog.tsx'
+import { Textarea } from '@/components/ui/textarea.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
 import {
-  Archive, ArchiveRestore, Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert,
+  Archive, ArchiveRestore, Bot, Check, GitMerge, Play, Send, Square, Trash2, TriangleAlert, User, X,
 } from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
+import { summarize } from '@/lib/events.ts'
+import { renderMarkdown } from '@/lib/markdown.tsx'
+import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, DiffView as Diff, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
+import type {
+  Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskComment, TaskEdit,
+} from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
 const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
@@ -21,54 +28,31 @@ const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
   raw:      { label: 'RAW',      tone: 'text-ink-faint/60' },
 }
 
-/** raw 行是没被识别的原始输出，只留个头，别把整坨 JSON 倒进界面。 */
-const RAW_MAX = 140
-
-/** 把一条事件压成一行可读文本。 */
-function summarize(event: StreamEvent): string {
-  const p = event.payload
-  switch (event.kind) {
-    case 'session': {
-      // 不同 CLI 给的字段不一样（codex 没有 model / apiKeySource），
-      // 缺的就不显示，别用 "?" 占位假装它存在。
-      const parts = [String(p['sessionId'] ?? '')]
-      if (typeof p['model'] === 'string') parts.push(`model=${p['model']}`)
-      if (typeof p['apiKeySource'] === 'string') parts.push(`apiKeySource=${p['apiKeySource']}`)
-      return parts.join('  ')
-    }
-    case 'text': return String(p['text'] ?? '')
-    case 'tool': return String(p['name'] ?? '')
-    case 'notice': return String(p['text'] ?? '')
-    case 'usage': return `in=${String(p['inputTokens'] ?? '-')} out=${String(p['outputTokens'] ?? '-')}${p['costUsd'] === undefined ? '' : ` $${String(p['costUsd'])}`}`
-    case 'finished': return `${p['ok'] === true ? 'ok' : 'failed'} ${String(p['diagnostic'] ?? p['summary'] ?? '')}`
-    default: {
-      const text = String(p['line'] ?? JSON.stringify(p))
-      return text.length > RAW_MAX ? `${text.slice(0, RAW_MAX)}…` : text
-    }
-  }
-}
-
 interface Props {
   task: Task
+  /** 任务所属项目。任务干活的地方是它派生出来的 worktree。 */
+  project: Project | null
   agents: Agent[]
-  onLiveTool: (taskId: string, tool: string | undefined) => void
   onChanged: () => void
   onError: (code: string, detail: string) => void
   onClose: () => void
 }
 
-export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose }: Props): React.JSX.Element {
+export function RunPanel({
+  task, project, agents, onChanged, onError, onClose,
+}: Props): React.JSX.Element {
   const [runs, setRuns] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
   const [diff, setDiff] = useState<Diff | null>(null)
-  const [feedback, setFeedback] = useState('')
-  const [overlaps, setOverlaps] = useState<string[]>([])
+  const [comments, setComments] = useState<TaskComment[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
   const archived = task.archivedAt !== undefined
+  /** 卡上指定的执行器，且本机确实探测到了它。 */
+  const pinned = agents.find((agent) => agent.id === task.preferredProvider)
   // 只有想法池与队列里的卡能删。再往后 Agent 已经动过仓库，该走的是终止 / 废弃。
   const deletable = task.column === 'backlog' || task.column === 'ready'
 
@@ -87,26 +71,23 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     return () => { cancelled = true }
   }, [task.id, task.revision])
 
+  // 讨论跟着卡的 revision 走：跑完一轮 Agent 会往里加一条回复。
+  useEffect(() => {
+    let cancelled = false
+    void api.comments(task.id)
+      .then(({ comments: loaded }) => { if (!cancelled) setComments(loaded) })
+      .catch(() => { if (!cancelled) setComments([]) })
+    return () => { cancelled = true }
+  }, [task.id, task.revision, runs.length])
+
   useEffect(() => {
     if (latest === undefined) return undefined
     return subscribeRun(latest.id, (event) => {
       setEvents((prev) => (prev.some((e) => e.seq === event.seq) ? prev : [...prev, event]))
-      if (event.kind === 'tool') onLiveTool(task.id, String(event.payload['name'] ?? ''))
-      if (event.kind === 'finished') onLiveTool(task.id, undefined)
     })
-  }, [latest, task.id, onLiveTool])
+  }, [latest])
 
-  // 写入范围重叠预警：同仓库、正在跑、路径前缀相撞的任务。
-  useEffect(() => {
-    if (task.writeScopes.length === 0) { setOverlaps([]); return undefined }
-    let cancelled = false
-    void api.overlaps(task.id)
-      .then(({ overlaps: ids }) => { if (!cancelled) setOverlaps(ids) })
-      .catch(() => { if (!cancelled) setOverlaps([]) })
-    return () => { cancelled = true }
-  }, [task.id, task.revision])
-
-  // 只在有执行记录时拉 diff；卡片状态变了要重拉（打回后又跑了一轮）。
+  // 只在有执行记录时拉 diff；卡片状态变了要重拉（留言之后又跑了一轮）。
   useEffect(() => {
     if (latest === undefined) { setDiff(null); return undefined }
     let cancelled = false
@@ -155,14 +136,35 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
       .finally(() => { setBusy(false); setConfirmDelete(false) })
   }
 
-  /** 统一处理验收动作的忙碌态与错误上报。 */
-  const act = async (call: () => Promise<unknown>): Promise<void> => {
+  /** 动作成功就收工回看板；失败留在原地。 */
+  const closeIfOk = (ok: boolean): void => { if (ok) onClose() }
+
+  /** 把这张卡派给某个执行器。 */
+  const dispatch = (provider: string): void => {
+    setBusy(true)
+    void api.run(task.id, provider)
+      .then(() => { onChanged() })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) onError(error.code, error.message)
+      })
+      .finally(() => { setBusy(false) })
+  }
+
+  /**
+   * 统一处理验收动作的忙碌态与错误上报。
+   *
+   * 返回是否成功 —— 保存之后要关掉弹窗，而失败时必须留在原地，
+   * 否则用户的改动连同那条错误一起消失了。
+   */
+  const act = async (call: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true)
     try {
       await call()
       onChanged()
+      return true
     } catch (error) {
       if (error instanceof ApiError) onError(error.code, error.message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -172,9 +174,9 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent
         showCloseButton={false}
-        className="flex h-[82vh] max-h-[820px] w-[860px] max-w-[92vw] flex-col gap-0 overflow-hidden rounded-lg border-hairline bg-panel p-0 sm:max-w-[92vw]"
+        className="flex h-[82vh] max-h-[820px] w-[860px] max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg sm:max-w-[92vw]"
       >
-        <header className="flex items-start gap-2 border-b border-hairline px-3 py-2.5">
+        <header className="flex items-start gap-2 border-b border-hairline px-4 py-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="tag">{task.id}</span>
@@ -182,30 +184,31 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               <span className="chrome-label !text-[9px]">{task.column}</span>
             </div>
             <DialogTitle asChild>
-              <h2 className="mt-1.5 text-[14px] font-medium leading-snug text-ink">{task.subject}</h2>
+              <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug text-ink">
+                {taskTitle(task)}
+              </h2>
             </DialogTitle>
-            <DialogDescription className="sr-only">任务详情与执行面板</DialogDescription>
+            <DialogDescription className="mt-1 text-xs text-ink-faint">
+              {project?.name ?? '未知项目'} · 基线 <span className="mono">{task.baseBranch}</span>
+            </DialogDescription>
           </div>
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             disabled={busy || task.column === 'running'}
-            title={task.column === 'running' ? '正在执行的卡片不能归档，先终止执行' : undefined}
+            {...(task.column === 'running' ? { title: '正在执行的卡片不能归档，先终止执行' } : {})}
             onClick={() => {
               void act(() => (archived
                 ? api.unarchive(task.id, task.revision)
                 : api.archive(task.id, task.revision)))
             }}
-            className={cn(
-              'chrome-label flex items-center gap-1 rounded-md border border-hairline px-1.5 py-0.5',
-              'transition-colors hover:border-sodium hover:text-sodium',
-              'disabled:cursor-not-allowed disabled:opacity-40',
-            )}
           >
-            {archived
-              ? <><ArchiveRestore className="size-2.5" />取出</>
-              : <><Archive className="size-2.5" />归档</>}
-          </button>
+            {archived ? <><ArchiveRestore />取出</> : <><Archive />归档</>}
+          </Button>
           {deletable ? (
-            <button
+            <Button
+              variant="outline"
+              size="sm"
               disabled={busy}
               title={confirmDelete
                 ? '再点一次就删掉了，不可撤销'
@@ -215,31 +218,25 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                 remove()
               }}
               className={cn(
-                'chrome-label flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition-colors',
-                'disabled:cursor-not-allowed disabled:opacity-40',
-                confirmDelete
-                  ? 'border-lamp-fail bg-lamp-fail/10 !text-lamp-fail'
-                  : 'border-hairline hover:border-lamp-fail hover:!text-lamp-fail',
+                'border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail',
+                confirmDelete && 'border-lamp-fail bg-lamp-fail/10',
               )}
             >
-              <Trash2 className="size-2.5" />{confirmDelete ? '确认删除' : '删除'}
-            </button>
+              <Trash2 />{confirmDelete ? '确认删除' : '删除'}
+            </Button>
           ) : null}
-          <button
-            onClick={onClose}
-            className="chrome-label rounded-md border border-hairline px-1.5 py-0.5 transition-colors hover:border-hairline-bright hover:text-ink"
-          >
-            esc
-          </button>
+          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="关闭" title="关闭 · esc">
+            <X />
+          </Button>
         </header>
 
         {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"和"删除"
             两个动作（删除和归档指向同一个方向，不必先取出来再删一次）。
             与其把按钮摆在那儿等服务端拒绝，不如直接换成一条说明。 */}
         {archived ? (
-          <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-3 py-2">
-            <Archive className="mt-[2px] size-3 flex-none text-ink-faint" />
-            <p className="min-w-0 text-[11px] leading-snug text-ink-faint">
+          <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-4 py-2.5">
+            <Archive className="mt-[3px] size-3.5 flex-none text-ink-faint" />
+            <p className="min-w-0 text-xs leading-relaxed text-ink-faint">
               已归档{task.archivedAt === undefined ? '' : ` · ${new Date(task.archivedAt).toLocaleString()}`}。
               它留在 {task.column} 列但不出现在看板上，也不会被自动认领。
               取出后回到原位。
@@ -249,161 +246,188 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
 
         {/* 派活 / 取消。只有 ready 的卡能派，running 的能停。 */}
         {!archived && (task.column === 'ready' || task.column === 'running') ? (
-          <div className="flex items-center gap-1.5 border-b border-hairline px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-hairline px-4 py-2.5">
             {task.column === 'ready' ? (
               <>
-                <span className="cjk-label !text-[10px]">派给</span>
+                <span className="text-xs text-ink-faint">派给</span>
                 {agents.length === 0 ? (
                   <span className="cjk-label !text-lamp-fail">没有可用的 Agent CLI</span>
-                ) : agents.map((agent) => (
-                  <button
-                    key={agent.id}
-                    disabled={busy}
-                    title={agent.permissionCaveat?.detail}
-                    onClick={() => {
-                      setBusy(true)
-                      void api.run(task.id, agent.id)
-                        .then(() => { onChanged() })
-                        .catch((error: unknown) => {
-                          if (error instanceof ApiError) onError(error.code, error.message)
-                        })
-                        .finally(() => { setBusy(false) })
-                    }}
-                    className={cn(
-                      'chrome-label flex items-center gap-1 rounded-md border border-hairline px-2 py-1',
-                      'transition-colors hover:border-sodium hover:text-sodium',
-                      'disabled:cursor-not-allowed disabled:opacity-40',
+                ) : task.preferredProvider === undefined ? (
+                  // 没指定执行器：三个都摆出来，点哪个是哪个。
+                  agents.map((agent) => (
+                    <Button
+                      key={agent.id}
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      {...(agent.permissionCaveat === undefined ? {} : { title: agent.permissionCaveat.detail })}
+                      onClick={() => { dispatch(agent.id) }}
+                    >
+                      <Play />{agent.id}
+                      {agent.permissionCaveat === undefined ? null : (
+                        <span className="text-xs text-sodium">{agent.permissionCaveat.label}</span>
+                      )}
+                    </Button>
+                  ))
+                ) : pinned === undefined ? (
+                  // 指定的执行器本机没探测到。这里不给"换一个派"的口子 ——
+                  // 卡上写着要谁干，就不该在派活这一步偷偷换人。
+                  <span className="text-xs text-lamp-fail">
+                    指定的 <span className="mono">{task.preferredProvider}</span> 本机没探测到，去规格里换一个
+                  </span>
+                ) : (
+                  <>
+                    {/* 指定过了就只派给它，连模型一起标出来 —— 这一屏只剩一个动作。 */}
+                    <Button
+                      size="sm"
+                      disabled={busy}
+                      {...(pinned.permissionCaveat === undefined ? {} : { title: pinned.permissionCaveat.detail })}
+                      onClick={() => { dispatch(pinned.id) }}
+                    >
+                      <Play />{pinned.id}{task.model === undefined ? '' : ` · ${task.model}`}
+                    </Button>
+                    {pinned.permissionCaveat === undefined ? null : (
+                      <span className="text-xs text-sodium">{pinned.permissionCaveat.label}</span>
                     )}
-                  >
-                    <Play className="size-2.5" />{agent.id}
-                    {agent.permissionCaveat === undefined ? null : (
-                      <span className="cjk-label !text-[10px] !text-sodium">{agent.permissionCaveat.label}</span>
-                    )}
-                  </button>
-                ))}
+                  </>
+                )}
               </>
             ) : (
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={busy || latest === undefined}
                 onClick={() => {
                   if (latest === undefined) return
                   setBusy(true)
                   void api.cancel(latest.id).then(() => { onChanged() }).finally(() => { setBusy(false) })
                 }}
-                className={cn(
-                  'chrome-label flex items-center gap-1 rounded-md border border-lamp-fail/50 px-2 py-1 text-lamp-fail',
-                  'transition-colors hover:bg-lamp-fail/10 disabled:opacity-40',
-                )}
+                className="border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
               >
-                <Square className="size-2.5" />终止执行
-              </button>
+                <Square />终止执行
+              </Button>
             )}
           </div>
         ) : null}
 
-        {/* 写入范围撞车预警。建议性的 —— Bash 和代码生成器都能绕过它。 */}
-        {overlaps.length === 0 ? null : (
-          <div className="flex items-start gap-2 border-b border-lamp-fail/30 bg-lamp-fail/[0.06] px-3 py-2">
-            <TriangleAlert className="mt-[2px] size-3 flex-none text-lamp-fail" />
-            <p className="text-[11px] leading-snug text-lamp-fail">
-              写入范围与正在执行的 <span className="mono">{overlaps.join('、')}</span> 重叠，
-              可能撞车。这只是提示，不是锁。
-            </p>
-          </div>
-        )}
-
-        {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
+        {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
         {!archived && task.column === 'review' ? (
-          <div className="border-b border-hairline px-3 py-2">
+          <div className="border-b border-hairline px-4 py-3">
             {/* 失败的执行也停在这一列，所以必须一眼看出这次是成是败 ——
                 否则"通过"按钮会摆在一堆没跑完的活旁边。 */}
             {latest !== undefined && latest.status !== 'completed' ? (
-              <div className="mb-2 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-2 py-1.5">
-                <TriangleAlert className="mt-[2px] size-3 flex-none text-lamp-fail" />
-                <p className="min-w-0 text-[11px] leading-snug text-lamp-fail">
+              <div className="mb-3 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-3 py-2">
+                <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
+                <p className="min-w-0 text-xs leading-relaxed text-lamp-fail">
                   这次执行{latest.status === 'aborted' ? '被终止' : '失败'}了。
                   {latest.diagnostic === undefined ? null : (
                     <span className="mono block break-words">{latest.diagnostic}</span>
                   )}
-                  看完日志后打回重跑，或者废弃。
+                  看完日志后去讨论里说一句让它重跑，或者废弃。
                 </p>
               </div>
             ) : null}
 
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* 验收动作都是"对这张卡的最后一句话"：判完就回看板。
+                  失败留在原地，让人看见错误再决定（同保存、同留言）。 */}
               <Action
-                icon={<Check className="size-2.5" />} label="通过" tone="ok" busy={busy}
-                onClick={() => { void act(() => api.accept(task.id, false)) }}
+                icon={<GitMerge />} label="通过并合并" tone="primary" busy={busy}
+                onClick={() => { void act(() => api.accept(task.id, true)).then(closeIfOk) }}
               />
               <Action
-                icon={<GitMerge className="size-2.5" />} label="通过并合并" busy={busy}
-                onClick={() => { void act(() => api.accept(task.id, true)) }}
+                icon={<Check />} label="通过" tone="ok" busy={busy}
+                onClick={() => { void act(() => api.accept(task.id, false)).then(closeIfOk) }}
               />
               <span className="flex-1" />
               <Action
-                icon={<Trash2 className="size-2.5" />} label="废弃" tone="fail" busy={busy}
-                onClick={() => { void act(() => api.discard(task.id)) }}
+                icon={<Trash2 />} label="废弃" tone="fail" busy={busy}
+                onClick={() => { void act(() => api.discard(task.id)).then(closeIfOk) }}
               />
             </div>
 
-            <div className="mt-2 flex gap-1.5">
-              <input
-                value={feedback}
-                onChange={(event) => { setFeedback(event.target.value) }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && feedback.trim().length > 0) {
-                    void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
-                  }
-                }}
-                placeholder="要改什么？写清楚再打回"
-                className={cn(
-                  'min-w-0 flex-1 rounded-md border border-hairline bg-void px-2 py-1 text-[12px]',
-                  'placeholder:text-ink-faint/60 focus:border-sodium-deep focus:outline-none',
-                )}
-              />
-              <Action
-                icon={<RotateCcw className="size-2.5" />} label="打回" busy={busy || feedback.trim().length === 0}
-                onClick={() => {
-                  void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
-                }}
-              />
-            </div>
-            <p className="cjk-label mt-1.5 !text-[10px] !text-ink-faint/70">
+            <p className="mt-2 text-xs leading-relaxed text-ink-faint">
               通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区；
               废弃会删掉分支并把卡退回 Backlog。
+              要它再改一版，去<span className="text-sodium">讨论</span>里说 —— 留言会把卡送回队列。
             </p>
           </div>
         ) : null}
 
-        <Tabs defaultValue="stream" className="flex min-h-0 flex-1 flex-col gap-0">
-          <TabsList className="h-auto w-full justify-start rounded-none border-b border-hairline bg-transparent p-0">
-            {([['stream', '事件流'], ['diff', 'Diff'], ['spec', '规格'], ['runs', '执行历史']] as const).map(([value, label]) => (
-              <TabsTrigger
-                key={value}
-                value={value}
-                className={cn(
-                  'cjk-label rounded-none border-0 border-b-2 border-transparent px-3 py-1.5',
-                  'data-[state=active]:border-sodium data-[state=active]:!bg-transparent',
-                  'data-[state=active]:!text-sodium data-[state=active]:shadow-none',
-                )}
-              >
-                {label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+        {/* 顺序即翻卡的顺序：先看要做什么，再看做成了什么，最后才是过程。 */}
+        <Tabs defaultValue="spec" className="flex min-h-0 flex-1 flex-col gap-0">
+          <div className="flex-none border-b border-hairline px-4 py-2.5">
+            <TabsList>
+              {([
+                ['spec', '规格'],
+                ['talk', '讨论'],
+                ['diff', 'Diff'],
+                ['stream', '事件流'],
+                ['runs', '执行历史'],
+              ] as const).map(([value, label]) => (
+                <TabsTrigger key={value} value={value} className="px-3">
+                  {label}
+                  {value === 'talk' && comments.length > 0 ? (
+                    <span className="mono text-[10px] text-ink-faint">{comments.length}</span>
+                  ) : null}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
+
+          <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
+            <TaskEditor
+              task={task}
+              project={project}
+              agents={agents}
+              busy={busy}
+              onSave={(edit: TaskEdit) => {
+                // 存完就收工，回到看板；存失败留在原地，让人看见错误再决定。
+                void act(() => api.edit(task.id, task.revision, edit)).then((ok) => { if (ok) onClose() })
+              }}
+            />
+          </TabsContent>
+
+          <TabsContent value="talk" className="mt-0 flex min-h-0 flex-1 flex-col">
+            <Discussion
+              comments={comments}
+              busy={busy}
+              /** Review 里留言会把卡送回队列，按钮上得先说清楚。 */
+              requeues={task.column === 'review'}
+              onSend={(body) => {
+                setBusy(true)
+                void api.comment(task.id, body)
+                  .then(({ comments: next }) => {
+                    setComments(next)
+                    onChanged()
+                    // 说完就收工，回到看板 —— 话已经带给下一轮了，留在这儿没事可做。
+                    // 失败则留在原地，让人看见错误再决定（同保存）。
+                    onClose()
+                  })
+                  .catch((error: unknown) => {
+                    if (error instanceof ApiError) onError(error.code, error.message)
+                  })
+                  .finally(() => { setBusy(false) })
+              }}
+            />
+          </TabsContent>
+
+          <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
+            {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
+          </TabsContent>
 
           <TabsContent value="stream" className="mt-0 flex min-h-0 flex-1 flex-col">
             {latest === undefined ? (
               <Empty text="这张卡还没有执行记录" />
             ) : (
               <>
-                <div className="flex items-center gap-2 border-b border-hairline/60 px-3 py-1.5">
+                <div className="flex items-center gap-2 border-b border-hairline/60 px-4 py-2">
                   <span className="chrome-label">{latest.provider}</span>
                   <span className="mono text-[10px] text-ink-faint">{latest.cliVersion}</span>
                   <span className="flex-1" />
                   <span className="mono text-[10px] text-ink-faint">{latest.branch}</span>
                 </div>
-                <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+                <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
                   {events.map((event) => {
                     const style = EVENT_STYLE[event.kind] ?? EVENT_STYLE['raw']
                     return (
@@ -420,7 +444,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                   {events.length === 0 ? <Empty text="等待事件…" /> : null}
                 </div>
                 {toolCounts.length > 0 ? (
-                  <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-hairline/60 px-3 py-1.5">
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-hairline/60 px-4 py-2">
                     {toolCounts.map(([name, count]) => (
                       <span key={name} className="mono text-[10px] text-ink-faint">
                         {name}<span className="text-sodium-deep">×{count}</span>
@@ -432,28 +456,9 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
             )}
           </TabsContent>
 
-          <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
-            {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
-          </TabsContent>
-
-          <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
-            {task.feedback === undefined ? null : (
-              <div className="border-b border-sodium-deep/40 bg-sodium/[0.06] px-3 py-2">
-                <p className="cjk-label mb-1 !text-[10px] !text-sodium">待处理的评审意见</p>
-                <p className="whitespace-pre-wrap text-[12px] text-sodium">{task.feedback}</p>
-              </div>
-            )}
-            <TaskEditor
-              task={task}
-              agents={agents}
-              busy={busy}
-              onSave={(edit: TaskEdit) => { void act(() => api.edit(task.id, task.revision, edit)) }}
-            />
-          </TabsContent>
-
           <TabsContent value="runs" className="mt-0 min-h-0 flex-1 overflow-y-auto">
             {runs.length === 0 ? <Empty text="暂无执行记录" /> : runs.map((run) => (
-              <div key={run.id} className="border-b border-hairline/60 px-3 py-2">
+              <div key={run.id} className="border-b border-hairline/60 px-4 py-2.5">
                 <div className="flex items-center gap-2">
                   <span className="lamp" data-state={run.status === 'completed' ? 'done' : run.status} />
                   <span className="chrome-label">{run.provider}</span>
@@ -480,22 +485,22 @@ function Action({ icon, label, onClick, busy, tone }: {
   label: string
   onClick: () => void
   busy: boolean
-  tone?: 'ok' | 'fail'
+  /** primary 是这一屏的主动作，实心；ok / fail 只借个色，形制仍是描边。 */
+  tone?: 'primary' | 'ok' | 'fail'
 }): React.JSX.Element {
   return (
-    <button
+    <Button
+      size="sm"
+      variant={tone === 'primary' ? 'default' : 'outline'}
       disabled={busy}
       onClick={onClick}
       className={cn(
-        'cjk-label flex items-center gap-1 rounded-md border border-hairline px-2 py-1 !text-[11px]',
-        'transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-        tone === 'ok' && 'hover:border-lamp-ok hover:!text-lamp-ok',
-        tone === 'fail' && 'hover:border-lamp-fail hover:!text-lamp-fail',
-        tone === undefined && 'hover:border-sodium hover:!text-sodium',
+        tone === 'ok' && 'border-lamp-ok/40 text-lamp-ok hover:bg-lamp-ok/10 hover:text-lamp-ok',
+        tone === 'fail' && 'border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail',
       )}
     >
       {icon}{label}
-    </button>
+    </Button>
   )
 }
 
@@ -503,11 +508,87 @@ function Empty({ text }: { text: string }): React.JSX.Element {
   return <p className="cjk-label p-6 text-center">{text}</p>
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
+/**
+ * 讨论线程：Agent 的回复与人的留言按时间排开，底下是输入框。
+ *
+ * 这条线程不只是给人看的记录 —— 下一次执行会把它整段交给 Agent，所以
+ * 「说了什么」和「什么时候说的」都要能对上号。
+ */
+function Discussion({ comments, busy, requeues, onSend }: {
+  comments: TaskComment[]
+  busy: boolean
+  requeues: boolean
+  onSend: (body: string) => void
+}): React.JSX.Element {
+  const [draft, setDraft] = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ block: 'end' }) }, [comments.length])
+
+  const send = (): void => {
+    const body = draft.trim()
+    if (body.length === 0) return
+    onSend(body)
+    setDraft('')
+  }
+
   return (
-    <div className="mb-4">
-      <h3 className="cjk-label mb-1.5 border-b border-hairline/50 pb-1 !text-[10px]">{label}</h3>
-      {children}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+        {comments.length === 0 ? (
+          <Empty text="还没有讨论。跑完一轮 Agent 会把它做了什么写在这儿，你也可以先留个话" />
+        ) : comments.map((comment) => (
+          <div key={comment.id} className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              {comment.author === 'agent'
+                ? <Bot className="size-3.5 text-sodium" />
+                : <User className="size-3.5 text-ink-faint" />}
+              <span className={cn(
+                'text-xs font-medium',
+                comment.author === 'agent' ? 'text-sodium' : 'text-ink',
+              )}>
+                {comment.author === 'agent' ? 'Agent' : '你'}
+              </span>
+              <span className="mono text-[10px] text-ink-faint">
+                {new Date(comment.at).toLocaleString()}
+              </span>
+            </div>
+            <div className={cn(
+              'rounded-lg border px-3 py-2 text-[13px]',
+              comment.author === 'agent'
+                ? 'border-hairline bg-sunken/40'
+                : 'border-sodium-deep/30 bg-sodium/[0.05]',
+            )}>
+              {renderMarkdown(comment.body)}
+            </div>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="flex-none space-y-2 border-t border-hairline px-4 py-3">
+        <Textarea
+          value={draft}
+          disabled={busy}
+          placeholder={requeues ? '要它再改什么？发出去这张卡就回队列' : '留一条话，下次执行会带上它'}
+          onChange={(event) => { setDraft(event.target.value) }}
+          onKeyDown={(event) => {
+            // ⌘/Ctrl + Enter 发出去；单独回车留给换行 —— 这里写的是段落，不是聊天。
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send()
+          }}
+          className="min-h-20"
+        />
+        <div className="flex items-center gap-2">
+          <p className="flex-1 text-xs text-ink-faint">
+            {requeues
+              ? '发出去这张卡回到 Ready，下一次执行会带着整条讨论走。'
+              : '下一次执行会带着整条讨论走。'}
+          </p>
+          <Button size="sm" disabled={busy || draft.trim().length === 0} onClick={send}>
+            <Send />发送
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }

@@ -83,6 +83,48 @@ export const MIGRATIONS: readonly string[] = [
   `UPDATE tasks SET column_name = 'review' WHERE column_name = 'failed';`,
   // 归档标记。正交于 column：归档不改变卡在哪一列，取消归档就回到原位。
   `ALTER TABLE tasks ADD COLUMN archived_at INTEGER;`,
+  // board → project。名字换了，东西是同一个：一个仓库目录 + 一条基线分支，
+  // 任务挂在它下面。界面上不再有"多个看板"这个概念，只有项目与总览。
+  `
+  ALTER TABLE boards RENAME TO projects;
+  ALTER TABLE tasks RENAME COLUMN board_id TO project_id;
+  `,
+  // 写入范围（建议性的并发冲突预警）退场：每个任务现在都在项目派生的
+  // 独立 worktree 里干活，冲突推迟到合并时由 git 处理，比前缀猜测准确得多。
+  `ALTER TABLE tasks DROP COLUMN write_scopes_json;`,
+  // 标题退场，描述成为卡片的全部内容。旧数据一个字都不能丢：描述为空就
+  // 直接搬过去，两边都有就把标题拼在描述前面 —— 它本来就是那段话的第一句。
+  `
+  UPDATE tasks SET description = CASE
+    WHEN TRIM(description) = '' THEN subject
+    ELSE subject || char(10) || char(10) || description
+  END;
+  ALTER TABLE tasks DROP COLUMN subject;
+  `,
+  // 指定执行器之后还能指定模型。留空就用那个 CLI 自己的默认。
+  `ALTER TABLE tasks ADD COLUMN model TEXT;`,
+  // 讨论取代打回。评审意见原本是任务上的一个字段，用完即弃；现在人和 Agent
+  // 的每一轮往来都留下来，下一次执行会带着整条线程走 —— 反馈得以累积，而不是
+  // 每次只剩最后一句。旧的 feedback 就地变成一条人类留言，一个字不丢。
+  `
+  CREATE TABLE task_comments (
+    id       TEXT PRIMARY KEY,
+    task_id  TEXT    NOT NULL REFERENCES tasks(id),
+    -- 'human' | 'agent'
+    author   TEXT    NOT NULL,
+    body     TEXT    NOT NULL,
+    -- Agent 的回答出自哪次执行；人写的留言为空。
+    run_id   TEXT,
+    at       INTEGER NOT NULL
+  );
+  CREATE INDEX idx_comments_task ON task_comments(task_id, at);
+
+  INSERT INTO task_comments (id, task_id, author, body, at)
+    SELECT 'c-legacy-' || id, id, 'human', feedback, updated_at
+    FROM tasks WHERE feedback IS NOT NULL AND TRIM(feedback) <> '';
+
+  ALTER TABLE tasks DROP COLUMN feedback;
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

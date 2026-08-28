@@ -126,6 +126,10 @@ export const codexCliProvider: AgentProvider = {
       // codex 的 thread_id 由它自己生成，我们只能事后从事件里捞。
       canPinSessionId: false,
       canResume,
+      canPickModel: hasFlag(help, 'model'),
+      // codex 没有列模型的子命令，help 里也没写候选 —— 枚举不出来就如实
+      // 给空，界面退回自由输入，而不是编一份清单出来。
+      models: [],
       permissionTiers: supportedTiers(choicesOf(help, 'sandbox'), help),
       help,
       ...(canResume ? { resumeHelp } : {}),

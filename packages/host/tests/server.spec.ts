@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { spawn } from 'node:child_process'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { connect, type AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { Storage } from '../src/storage/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
 
 const T0 = 1_000_000
 const TOKEN = 'test-token-' + 'x'.repeat(32)
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let store: Storage
 let server: RunningServer
@@ -18,9 +19,9 @@ let server: RunningServer
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'ready', position: 1,
-    subject: id, description: '', acceptance: ['ok'], repoPath: '/repo', baseBranch: 'main',
-    blockedBy: [], writeScopes: [], createdAt: T0, updatedAt: T0, ...rest,
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
+    description: id, acceptance: ['ok'], repoPath: '/repo', baseBranch: 'main',
+    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -45,7 +46,7 @@ function rawRequest(headers: Record<string, string>, path = '/api/state'): Promi
 
 beforeEach(async () => {
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: '/repo', baseBranch: 'main', createdAt: T0 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: '/repo', baseBranch: 'main', createdAt: T0 })
   // 心跳调快，让「发现死连接」的延迟在测试里可控。
   server = await startServer({ storage: store, token: TOKEN, sseHeartbeatMs: 50 })
 })
@@ -53,6 +54,163 @@ beforeEach(async () => {
 afterEach(async () => {
   await server.close()
   store.close()
+})
+
+describe('POST /api/projects', () => {
+  let sandbox: string
+  let repo: string
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-projects-'))
+    repo = join(sandbox, 'repo')
+    await mkdir(repo, { recursive: true })
+    await new Promise((resolve, reject) => {
+      const child = spawn('git', ['init', '-q', '-b', 'main', repo], { stdio: 'ignore' })
+      child.on('exit', resolve)
+      child.on('error', reject)
+    })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  const create = (body: unknown) =>
+    api('/api/projects', { method: 'POST', body: JSON.stringify(body) })
+
+  it('新增项目：记下名字与目录，基线分支由仓库自己说了算', async () => {
+    const res = await create({ name: '我的项目', path: repo })
+    expect(res.status).toBe(201)
+    const { project } = await res.json() as { project: { name: string; repoPath: string; baseBranch: string } }
+    expect(project.name).toBe('我的项目')
+    expect(project.baseBranch).toBe('main')
+    expect(store.listProjects()).toHaveLength(2)
+  })
+
+  it('不是 git 仓库就拒绝 —— 任务要在它派生的 worktree 上干活，派不出来就没有意义', async () => {
+    const res = await create({ name: '空目录', path: sandbox })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('not-a-repo')
+  })
+
+  it('相对路径拒绝：服务端不该去猜它相对于谁', async () => {
+    const res = await create({ name: '相对', path: './repo' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('path-not-absolute')
+  })
+
+  it('同一个目录不能加两次', async () => {
+    await create({ name: '第一次', path: repo })
+    const res = await create({ name: '第二次', path: repo })
+    expect(res.status).toBe(409)
+    expect((await res.json() as { error: string }).error).toBe('project-exists')
+  })
+
+  it('缺名字或缺目录一律 400', async () => {
+    expect((await create({ path: repo })).status).toBe(400)
+    expect((await create({ name: '没目录' })).status).toBe(400)
+  })
+
+  it('新建的卡跟着项目走：仓库与基线从项目取，不听建卡方的', async () => {
+    const { project } = await (await create({ name: '我的项目', path: repo })).json() as
+      { project: { id: string } }
+    const res = await api('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ projectId: project.id, description: '在新项目里干活' }),
+    })
+    expect(res.status).toBe(201)
+    const { task: created } = await res.json() as { task: Task }
+    expect(created.projectId).toBe(project.id)
+    expect(created.repoPath).toBe(repo)
+    expect(created.baseBranch).toBe('main')
+  })
+})
+
+describe('PATCH /api/projects/:id', () => {
+  const rename = (id: string, body: unknown) =>
+    api(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+
+  it('改名字，仓库路径与基线分支不动 —— 那是它的身份', async () => {
+    const res = await rename(PROJECT, { name: '改过的名字' })
+    expect(res.status).toBe(200)
+    const project = store.getProject(PROJECT)
+    expect(project?.name).toBe('改过的名字')
+    expect(project?.repoPath).toBe('/repo')
+    expect(project?.baseBranch).toBe('main')
+  })
+
+  it('空名字 400 —— 边栏上一行空白没人认得出那是什么', async () => {
+    expect((await rename(PROJECT, { name: '   ' })).status).toBe(400)
+    expect(store.getProject(PROJECT)?.name).toBe('默认')
+  })
+
+  it('项目不存在返回 404', async () => {
+    expect((await rename('nope', { name: '新名字' })).status).toBe(404)
+  })
+})
+
+describe('DELETE /api/projects/:id', () => {
+  it('删掉项目，连同它名下的卡与执行历史', async () => {
+    store.createTask(task({ id: 't1' }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+
+    const res = await api(`/api/projects/${PROJECT}`, { method: 'DELETE' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ deleted: true, tasks: 2 })
+    expect(store.listProjects()).toHaveLength(0)
+    expect(store.listTasks()).toHaveLength(0)
+  })
+
+  it('还有卡在执行时拒绝 —— 账本抽走了，那个进程会继续跑到没人认识它', async () => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    const res = await api(`/api/projects/${PROJECT}`, { method: 'DELETE' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('project-busy')
+    // 拒绝就是什么都没动。
+    expect(store.listProjects()).toHaveLength(1)
+    expect(store.listTasks()).toHaveLength(1)
+  })
+
+  it('项目不存在返回 404', async () => {
+    expect((await api('/api/projects/nope', { method: 'DELETE' })).status).toBe(404)
+  })
+})
+
+describe('GET /api/fs', () => {
+  let sandbox: string
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-fs-'))
+    await mkdir(join(sandbox, 'a-repo'), { recursive: true })
+    await mkdir(join(sandbox, 'b-plain'), { recursive: true })
+    await mkdir(join(sandbox, '.hidden'), { recursive: true })
+    await new Promise((resolve, reject) => {
+      const child = spawn('git', ['init', '-q', join(sandbox, 'a-repo')], { stdio: 'ignore' })
+      child.on('exit', resolve)
+      child.on('error', reject)
+    })
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('列子目录并标出哪些是 git 仓库；点开头的不列', async () => {
+    const res = await api(`/api/fs?path=${encodeURIComponent(sandbox)}`)
+    expect(res.status).toBe(200)
+    const listing = await res.json() as
+      { path: string; parent: string | null; entries: { name: string; isRepo: boolean }[] }
+    expect(listing.entries.map((e) => e.name)).toEqual(['a-repo', 'b-plain'])
+    expect(listing.entries.find((e) => e.name === 'a-repo')?.isRepo).toBe(true)
+    expect(listing.entries.find((e) => e.name === 'b-plain')?.isRepo).toBe(false)
+    expect(listing.parent).not.toBeNull()
+  })
+
+  it('不传 path 就落在家目录', async () => {
+    const listing = await (await api('/api/fs')).json() as { path: string }
+    expect(listing.path).toBe(homedir())
+  })
+
+  it('打不开的目录 404，相对路径 422', async () => {
+    expect((await api(`/api/fs?path=${encodeURIComponent(join(sandbox, '不存在'))}`)).status).toBe(404)
+    expect((await api('/api/fs?path=./relative')).status).toBe(422)
+  })
 })
 
 describe('GET /api/agents', () => {
@@ -64,7 +222,11 @@ describe('GET /api/agents', () => {
       streaming: true, canPinSessionId: false, canResume: true,
       permissionTiers: ['standard'],
       ...(caveat === undefined ? {} : { permissionCaveat: caveat }),
-      help: { flags: new Set<string>(), choices: new Map<string, readonly string[]>() },
+      help: {
+        flags: new Set<string>(),
+        choices: new Map<string, readonly string[]>(),
+        descriptions: new Map<string, string>(),
+      },
     } as never,
   })
 
@@ -145,15 +307,43 @@ describe('安全守卫', () => {
 })
 
 describe('GET /api/state', () => {
-  it('返回看板与任务', async () => {
+  it('返回项目与任务', async () => {
     store.createTask(task({ id: 't1' }))
-    const body = await (await api('/api/state')).json() as { boards: unknown[]; tasks: Task[] }
-    expect(body.boards).toHaveLength(1)
+    const body = await (await api('/api/state')).json() as { projects: unknown[]; tasks: Task[] }
+    expect(body.projects).toHaveLength(1)
     expect(body.tasks.map((t) => t.id)).toEqual(['t1'])
   })
 
   it('未知路径 404', async () => {
     expect((await api('/api/nope')).status).toBe(404)
+  })
+})
+
+describe('GET /api/state 的运行中预览', () => {
+  it('运行中的卡捎上最后一条事件 —— 关着弹窗也看得出 Agent 走到哪儿了', async () => {
+    const runId = asRunId('run-1')
+    store.createTask(task({
+      id: 't1',
+      column: 'running',
+      lease: { runId, provider: 'claude', acquiredAt: T0, expiresAt: T0 + 60_000 },
+    }))
+    store.createRun({
+      id: runId, taskId: asTaskId('t1'), provider: 'claude', cliVersion: '1.0',
+      worktreePath: '/wt', branch: 'task/t1', status: 'running', startedAt: T0,
+    })
+    store.appendEvent(runId, 'tool', { name: 'Bash' }, T0 + 1)
+    store.appendEvent(runId, 'tool', { name: 'Edit' }, T0 + 2)
+
+    const body = await (await api('/api/state')).json() as
+      { live: Record<string, { kind: string; payload: { name?: string } }> }
+    // 最后一条，不是第一条。
+    expect(body.live['t1']).toMatchObject({ kind: 'tool', payload: { name: 'Edit' } })
+  })
+
+  it('没在跑的卡不捎 —— 它没有正在发生的事', async () => {
+    store.createTask(task({ id: 't1', column: 'ready' }))
+    const body = await (await api('/api/state')).json() as { live: Record<string, unknown> }
+    expect(body.live).toEqual({})
   })
 })
 
@@ -248,6 +438,80 @@ describe('POST /api/tasks/:id/archive · unarchive', () => {
     const res = await shelf('archive', { expectedRevision: 2 })
     expect(res.status).toBe(422)
     expect(await res.json()).toMatchObject({ error: 'already-archived' })
+  })
+})
+
+describe('PATCH /api/tasks/:id', () => {
+  const edit = (id: string, body: unknown) =>
+    api(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+
+  it('改描述与验收标准', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const res = await edit('t1', { expectedRevision: 1, description: '新内容', acceptance: [] })
+    expect(res.status).toBe(200)
+    const after = store.getTask(asTaskId('t1'))
+    expect(after?.description).toBe('新内容')
+    // 验收标准是可选的，清空不再被拒。
+    expect(after?.acceptance).toEqual([])
+  })
+
+  it('指定执行器与模型，null 才是"清空"', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    await edit('t1', { expectedRevision: 1, preferredProvider: 'claude', model: 'opus' })
+    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+
+    // 字段缺席只意味着"这次没提到"，不该把它抹掉。
+    await edit('t1', { expectedRevision: 2, description: '只改内容' })
+    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+
+    // 显式送 null 才清空 —— JSON 里没有 undefined。
+    await edit('t1', { expectedRevision: 3, preferredProvider: null, model: null })
+    const cleared = store.getTask(asTaskId('t1'))
+    expect(cleared?.model).toBeUndefined()
+    expect(cleared?.preferredProvider).toBeUndefined()
+  })
+})
+
+describe('讨论', () => {
+  const say = (id: string, body: unknown) =>
+    api(`/api/tasks/${id}/comments`, { method: 'POST', body: JSON.stringify(body) })
+
+  it('在 Review 里留言 = 再改一版：卡自动回队列', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const res = await say('t1', { body: '中文标题被吃掉了，要保留 Unicode' })
+    expect(res.status).toBe(201)
+    expect(await res.json()).toMatchObject({ requeued: true })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('ready')
+    expect(store.listComments(asTaskId('t1'))[0]).toMatchObject({
+      author: 'human', body: '中文标题被吃掉了，要保留 Unicode',
+    })
+  })
+
+  it('别的列只是留个话，不动卡的位置', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    expect(await (await say('t1', { body: '顺手记一笔' })).json()).toMatchObject({ requeued: false })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(1)
+  })
+
+  it('空留言 400，卡也不该被搬走', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    expect((await say('t1', { body: '   ' })).status).toBe(400)
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(0)
+  })
+
+  it('按时间正序读回来 —— 这也是交给 Agent 的上下文顺序', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '第一句', at: T0 })
+    store.addComment({ id: 'c2', taskId: asTaskId('t1'), author: 'agent', body: '答复', at: T0 + 1 })
+    const body = await (await api('/api/tasks/t1/comments')).json() as
+      { comments: { author: string; body: string }[] }
+    expect(body.comments.map((c) => c.author)).toEqual(['human', 'agent'])
+  })
+
+  it('卡不存在 404', async () => {
+    expect((await say('nope', { body: 'x' })).status).toBe(404)
   })
 })
 
@@ -488,18 +752,18 @@ describe('错误处理（回归）', () => {
     const res = await api('/api/tasks', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: '{"subject": ',
+      body: '{"description": ',
     })
     expect(res.status).toBe(400)
     expect(await res.json()).toMatchObject({ error: 'bad-request' })
   })
 
   it('内部异常不把原始信息回给调用方', async () => {
-    // 让 listBoards 抛一个带敏感路径的异常。
-    const real = store.listBoards.bind(store)
-    store.listBoards = (() => { throw new Error('ENOENT /Users/someone/.ssh/id_rsa') }) as typeof store.listBoards
+    // 让 listProjects 抛一个带敏感路径的异常。
+    const real = store.listProjects.bind(store)
+    store.listProjects = (() => { throw new Error('ENOENT /Users/someone/.ssh/id_rsa') }) as typeof store.listProjects
     const res = await api('/api/state')
-    store.listBoards = real
+    store.listProjects = real
 
     expect(res.status).toBe(500)
     const body = await res.text()
@@ -560,7 +824,7 @@ describe('开发模式：把前端转发给 vite', () => {
   it('/api 仍由 host 自己处理，不会被转走', async () => {
     const res = await get('/api/state')
     expect(res.status).toBe(200)
-    expect(await res.json()).toHaveProperty('boards')
+    expect(await res.json()).toHaveProperty('projects')
     expect(seen).toHaveLength(0)
   })
 

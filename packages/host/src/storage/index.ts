@@ -11,16 +11,33 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { BoardId, Column, Lease, RunId, Task, TaskId } from '@loopkanban/core'
-import { asBoardId, asRunId, asTaskId } from '@loopkanban/core'
+import type { Column, Lease, ProjectId, RunId, Task, TaskId } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId } from '@loopkanban/core'
 import { migrate } from './schema.ts'
 
-export interface Board {
-  readonly id: BoardId
+/** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
+export interface Project {
+  readonly id: ProjectId
   readonly name: string
   readonly repoPath: string
   readonly baseBranch: string
   readonly createdAt: number
+}
+
+/**
+ * 讨论里的一条留言。
+ *
+ * 人和 Agent 的往来都记在这儿，按时间顺序就是这张卡的完整上下文 ——
+ * 下一次执行会把整条线程交给 Agent，所以它不只是给人看的记录。
+ */
+export interface TaskComment {
+  readonly id: string
+  readonly taskId: TaskId
+  readonly author: 'human' | 'agent'
+  readonly body: string
+  /** Agent 的回答出自哪次执行；人写的留言没有。 */
+  readonly runId?: RunId | undefined
+  readonly at: number
 }
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
@@ -70,20 +87,18 @@ export interface RunEvent {
 
 interface TaskRow {
   id: string
-  board_id: string
+  project_id: string
   revision: number
   column_name: string
   position: number
-  subject: string
   description: string
   acceptance_json: string
   repo_path: string
   base_branch: string
   preferred_provider: string | null
+  model: string | null
   blocked_by_json: string
-  write_scopes_json: string
   lease_json: string | null
-  feedback: string | null
   archived_at: number | null
   created_at: number
   updated_at: number
@@ -109,20 +124,18 @@ function toTask(row: TaskRow): Task {
   const lease = row.lease_json === null ? undefined : (JSON.parse(row.lease_json) as Lease)
   return {
     id: asTaskId(row.id),
-    boardId: asBoardId(row.board_id),
+    projectId: asProjectId(row.project_id),
     revision: row.revision,
     column: row.column_name as Column,
     position: row.position,
-    subject: row.subject,
     description: row.description,
     acceptance: JSON.parse(row.acceptance_json) as string[],
     repoPath: row.repo_path,
     baseBranch: row.base_branch,
     ...(preferred === null ? {} : { preferredProvider: preferred }),
+    ...(row.model === null ? {} : { model: row.model }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
-    writeScopes: JSON.parse(row.write_scopes_json) as string[],
     ...(lease === undefined ? {} : { lease }),
-    ...(row.feedback === null ? {} : { feedback: row.feedback }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -167,24 +180,102 @@ export class Storage {
     this.db.close()
   }
 
-  // ── Board ──────────────────────────────────────────────────────
+  // ── Project ────────────────────────────────────────────────────
 
-  createBoard(board: Board): void {
+  createProject(project: Project): void {
     this.db.prepare(
-      'INSERT INTO boards (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
-    ).run(board.id, board.name, board.repoPath, board.baseBranch, board.createdAt)
+      'INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(project.id, project.name, project.repoPath, project.baseBranch, project.createdAt)
   }
 
-  listBoards(): Board[] {
-    const rows = this.db.prepare('SELECT * FROM boards ORDER BY created_at').all() as unknown as {
+  listProjects(): Project[] {
+    const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at').all() as unknown as {
       id: string; name: string; repo_path: string; base_branch: string; created_at: number
     }[]
     return rows.map((row) => ({
-      id: asBoardId(row.id),
+      id: asProjectId(row.id),
       name: row.name,
       repoPath: row.repo_path,
       baseBranch: row.base_branch,
       createdAt: row.created_at,
+    }))
+  }
+
+  getProject(id: ProjectId): Project | null {
+    return this.listProjects().find((project) => project.id === id) ?? null
+  }
+
+  /**
+   * 改项目的名字。只动这一个字段 —— 仓库路径与基线分支是它的身份，
+   * 改了名字还是同一个项目；要换仓库，那是另一个项目。
+   *
+   * @returns 是否改到了；false 表示这个项目不在。
+   */
+  renameProject(id: ProjectId, name: string): boolean {
+    return this.db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id).changes === 1
+  }
+
+  /**
+   * 删除项目，连同它名下所有卡片与执行历史。
+   *
+   * 同 `deleteTask`，这是 `run_events` 只插不改不删的另一处例外：整个项目都
+   * 没了，留着一串指向空 taskId 的事件只是垃圾，外键也不允许它们留着。
+   *
+   * **不碰仓库本身**。删的只是 LoopKanban 记的账；仓库里那些 worktree 与
+   * 分支由调用方（Review.purge）收拾，也只收拾我们自己建的那些。
+   *
+   * 整件事在一个事务里：要么全成、要么全不动。
+   *
+   * @param id - 要删的项目。
+   * @returns 是否删掉了；false 表示这个项目本来就不在。
+   */
+  deleteProject(id: ProjectId): boolean {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      // 顺序是外键定的：事件 → Run → 卡片 → 项目。
+      this.db.prepare(`
+        DELETE FROM run_events WHERE run_id IN (
+          SELECT id FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+        )
+      `).run(id)
+      this.db.prepare('DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM task_comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
+      const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
+      if (removed.changes !== 1) {
+        this.db.exec('ROLLBACK')
+        return false
+      }
+      this.db.exec('COMMIT')
+      return true
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  // ── 讨论 ───────────────────────────────────────────────────────
+
+  addComment(comment: TaskComment): void {
+    this.db.prepare(
+      'INSERT INTO task_comments (id, task_id, author, body, run_id, at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(comment.id, comment.taskId, comment.author, comment.body, comment.runId ?? null, comment.at)
+  }
+
+  /** 一张卡的讨论，按时间正序 —— 它同时也是交给 Agent 的上下文顺序。 */
+  listComments(taskId: TaskId): TaskComment[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_comments WHERE task_id = ? ORDER BY at, id',
+    ).all(taskId) as unknown as {
+      id: string; task_id: string; author: string; body: string; run_id: string | null; at: number
+    }[]
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: asTaskId(row.task_id),
+      author: row.author === 'agent' ? 'agent' : 'human',
+      body: row.body,
+      ...(row.run_id === null ? {} : { runId: asRunId(row.run_id) }),
+      at: row.at,
     }))
   }
 
@@ -193,18 +284,17 @@ export class Storage {
   createTask(task: Task): void {
     this.db.prepare(`
       INSERT INTO tasks (
-        id, board_id, revision, column_name, position, subject, description,
-        acceptance_json, repo_path, base_branch, preferred_provider,
-        blocked_by_json, write_scopes_json, lease_json, feedback, archived_at,
+        id, project_id, revision, column_name, position, description,
+        acceptance_json, repo_path, base_branch, preferred_provider, model,
+        blocked_by_json, lease_json, archived_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      task.id, task.boardId, task.revision, task.column, task.position,
-      task.subject, task.description, JSON.stringify(task.acceptance),
-      task.repoPath, task.baseBranch, task.preferredProvider ?? null,
-      JSON.stringify(task.blockedBy), JSON.stringify(task.writeScopes),
+      task.id, task.projectId, task.revision, task.column, task.position,
+      task.description, JSON.stringify(task.acceptance),
+      task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
+      JSON.stringify(task.blockedBy),
       task.lease === undefined ? null : JSON.stringify(task.lease),
-      task.feedback ?? null,
       task.archivedAt ?? null,
       task.createdAt, task.updatedAt,
     )
@@ -215,10 +305,10 @@ export class Storage {
     return row === undefined ? null : toTask(row)
   }
 
-  listTasks(boardId?: BoardId): Task[] {
-    const rows = boardId === undefined
+  listTasks(projectId?: ProjectId): Task[] {
+    const rows = projectId === undefined
       ? this.db.prepare('SELECT * FROM tasks ORDER BY position').all()
-      : this.db.prepare('SELECT * FROM tasks WHERE board_id = ? ORDER BY position').all(boardId)
+      : this.db.prepare('SELECT * FROM tasks WHERE project_id = ? ORDER BY position').all(projectId)
     return (rows as unknown as TaskRow[]).map(toTask)
   }
 
@@ -235,18 +325,17 @@ export class Storage {
   commitTask(next: Task): boolean {
     const result = this.db.prepare(`
       UPDATE tasks SET
-        revision = ?, column_name = ?, position = ?, subject = ?, description = ?,
-        acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?,
-        blocked_by_json = ?, write_scopes_json = ?, lease_json = ?, feedback = ?,
+        revision = ?, column_name = ?, position = ?, description = ?,
+        acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
+        blocked_by_json = ?, lease_json = ?,
         archived_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
-      next.revision, next.column, next.position, next.subject, next.description,
+      next.revision, next.column, next.position, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
-      next.preferredProvider ?? null,
-      JSON.stringify(next.blockedBy), JSON.stringify(next.writeScopes),
+      next.preferredProvider ?? null, next.model ?? null,
+      JSON.stringify(next.blockedBy),
       next.lease === undefined ? null : JSON.stringify(next.lease),
-      next.feedback ?? null,
       next.archivedAt ?? null,
       next.updatedAt,
       next.id, next.revision - 1,
@@ -274,6 +363,7 @@ export class Storage {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 顺序是外键定的：事件 → Run → 卡片。反过来第一步就会被 runs 的引用挡住。
+      this.db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)
@@ -444,6 +534,28 @@ export class Storage {
    * @param at - 发生时间（毫秒）。
    * @returns 分配到的 seq，可直接用作 SSE 的 `id:`。
    */
+  /**
+   * 一次执行的最后一条事件。
+   *
+   * 看板上的"运行中"卡片要一行日志预览，而它们的 SSE 只在详情弹窗开着时才
+   * 订阅 —— 关着弹窗就什么都看不见。看板本来就在轮询，顺手把最后一条捎上，
+   * 比给每张卡各开一条 SSE 便宜得多。
+   */
+  lastEvent(runId: RunId): RunEvent | null {
+    const row = this.db.prepare(
+      'SELECT * FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1',
+    ).get(runId) as unknown as
+      { run_id: string; seq: number; kind: string; payload_json: string; at: number } | undefined
+    if (row === undefined) return null
+    return {
+      runId: asRunId(row.run_id),
+      seq: row.seq,
+      kind: row.kind,
+      payload: JSON.parse(row.payload_json) as unknown,
+      at: row.at,
+    }
+  }
+
   appendEvent(runId: RunId, kind: string, payload: unknown, at: number): number {
     this.db.exec('BEGIN IMMEDIATE')
     try {

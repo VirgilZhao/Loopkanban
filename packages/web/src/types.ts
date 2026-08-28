@@ -21,20 +21,21 @@ export interface DiffView {
 
 export interface Task {
   id: string
-  boardId: string
+  projectId: string
   revision: number
   column: Column
   position: number
-  subject: string
+  /** 卡片的全部内容。没有单独的标题；要显示"叫什么"时取第一行。 */
   description: string
+  /** 验收标准，可选。 */
   acceptance: string[]
   repoPath: string
   baseBranch: string
   preferredProvider?: string
+  /** 指定模型；留空用该 CLI 自己的默认。 */
+  model?: string
   blockedBy: string[]
-  writeScopes: string[]
   lease?: Lease
-  feedback?: string
   /** 归档时间；缺席表示没归档。归档正交于 column，不改变卡在哪一列。 */
   archivedAt?: number
   createdAt: number
@@ -43,16 +44,29 @@ export interface Task {
 
 /** 允许人工编辑的字段。 */
 export interface TaskEdit {
-  subject?: string
   description?: string
   acceptance?: string[]
-  repoPath?: string
-  baseBranch?: string
   preferredProvider?: string | undefined
-  writeScopes?: string[]
+  model?: string | undefined
 }
 
-export interface Board {
+/** 目录选择框的一层：当前目录、上一级、以及下面的子目录。 */
+export interface DirEntry {
+  name: string
+  path: string
+  /** 是不是 git 仓库 —— 能直接选来当项目的就是它们。 */
+  isRepo: boolean
+}
+
+export interface DirListing {
+  path: string
+  parent: string | null
+  isRepo: boolean
+  entries: DirEntry[]
+}
+
+/** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
+export interface Project {
   id: string
   name: string
   repoPath: string
@@ -72,6 +86,10 @@ export interface Agent {
   streaming: boolean
   canPinSessionId: boolean
   canResume: boolean
+  /** 能否指定模型。不支持的 CLI 界面上直接没有这一栏。 */
+  canPickModel: boolean
+  /** 探测到的可用模型。空数组表示这个 CLI 没法枚举，此时只能自由输入。 */
+  models: string[]
   permissionTiers: string[]
   /** 档位语义与别家不一致时的警示；有就必须显示出来。 */
   permissionCaveat?: PermissionCaveat
@@ -93,6 +111,24 @@ export interface Run {
 }
 
 /** SSE 推过来的一条事件，与 host 的 AgentEvent 对齐。 */
+/** 讨论里的一条留言。人和 Agent 的往来都在这儿，也是下一次执行的上下文。 */
+export interface TaskComment {
+  id: string
+  taskId: string
+  author: 'human' | 'agent'
+  body: string
+  /** Agent 的回答出自哪次执行；人写的留言没有。 */
+  runId?: string
+  at: number
+}
+
+/** 运行中卡片的最后一条事件，看板上那行日志预览就来自它。 */
+export interface LiveLine {
+  kind: string
+  payload: Record<string, unknown>
+  at: number
+}
+
 export interface StreamEvent {
   seq: number
   kind: string
@@ -120,13 +156,14 @@ export interface RunStats {
 
 export interface SchedulerSettings {
   autopilot: boolean
-  maxConcurrent: number
+  /** 每个执行器的并发上限 —— 不是全局上限。 */
+  maxPerProvider: number
   maxPerRepo: number
 }
 
 export interface Skip {
   taskId: string
-  reason: 'blocked-by-dependency' | 'global-limit-reached' | 'repo-limit-reached' | 'provider-unavailable'
+  reason: 'blocked-by-dependency' | 'provider-limit-reached' | 'repo-limit-reached' | 'provider-unavailable'
   detail: string
 }
 

@@ -2,17 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
 import type { AgentCaps, AgentProvider, RunContext } from '../src/agents/types.ts'
 import { RunBus } from '../src/server/bus.ts'
 import { Storage } from '../src/storage/index.ts'
+import { isClean, worktreeDir } from '../src/worktree/index.ts'
 import type { SpawnSpec } from '../src/subprocess/index.ts'
 import { Runner, renderPrompt, renderTaskSpec } from '../src/runner/index.ts'
 
 const T0 = 1_700_000_000_000
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let sandbox: string
 let repo: string
@@ -53,18 +54,18 @@ function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvid
 
 const caps = (): AgentCaps => ({
   id: 'scripted', bin: '/fake', version: '9.9.9',
-  streaming: true, canPinSessionId: true, canResume: false,
+  streaming: true, canPinSessionId: true, canResume: false, canPickModel: true, models: [],
   permissionTiers: ['standard'], help: parseHelp(''),
 })
 
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
-    id: asTaskId(id), boardId: BOARD, revision: 1, column: 'ready', position: 1,
-    subject: '加个 greet 函数', description: '要有测试',
+    id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
+    description: '加个 greet 函数\n\n要有测试',
     acceptance: ['greet.js 存在', '有单测'],
     repoPath: repo, baseBranch: 'main',
-    blockedBy: [], writeScopes: [], createdAt: T0, updatedAt: T0, ...rest,
+    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -72,7 +73,6 @@ function runner(provider: AgentProvider, patch: Partial<ConstructorParameters<ty
   return new Runner({
     storage: store, bus,
     agents: [{ provider, caps: caps() }],
-    worktreeRoot: join(sandbox, 'worktrees'),
     artifactsRoot: join(sandbox, 'artifacts'),
     leaseTtlMs: 60_000,
     timeoutMs: 20_000,
@@ -92,7 +92,7 @@ beforeEach(async () => {
   await capture(['git', '-C', repo, 'commit', '-qm', 'init'])
 
   store = Storage.open(':memory:')
-  store.createBoard({ id: BOARD, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
+  store.createProject({ id: PROJECT, name: '默认', repoPath: repo, baseBranch: 'main', createdAt: T0 })
   bus = new RunBus()
 })
 
@@ -110,9 +110,8 @@ async function settle(runId: string, timeoutMs = 15_000): Promise<void> {
 
 describe('renderTaskSpec / renderPrompt', () => {
   it('把验收标准写成 checklist，并声明约束', () => {
-    const spec = renderTaskSpec(task({ id: 't1', writeScopes: ['src/auth/'] }))
+    const spec = renderTaskSpec(task({ id: 't1' }))
     expect(spec).toContain('- [ ] greet.js 存在')
-    expect(spec).toContain('src/auth/')
     expect(spec).toContain('不要提交或推送')
   })
 
@@ -278,41 +277,115 @@ describe('worktree 隔离', () => {
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
 
-    expect(started.run.worktreePath).toContain('worktrees')
+    // worktree 长在项目自己的目录里：项目目录/.loopkanban/worktrees/<taskId>
+    expect(started.run.worktreePath).toBe(worktreeDir(repo, 't1'))
     expect(started.run.branch).toContain('task/t1')
     // TASK.md 写在 worktree 里，不在主仓库。
     await expect(readFile(join(started.run.worktreePath, 'TASK.md'), 'utf8')).resolves.toContain('验收标准')
     await expect(readFile(join(repo, 'TASK.md'), 'utf8')).rejects.toThrow()
+    // 而主工作区依然干净 —— worktree 目录已被写进本地排除表。
+    expect(await isClean(repo)).toBe(true)
 
     await settle(started.run.id)
+  })
+
+  it('换个 Agent 接着干，还是同一个 worktree —— 它属于任务，不属于谁在跑', async () => {
+    store.createTask(task({ id: 't1' }))
+    const first = await runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+      .start(asTaskId('t1'))
+    if (!first.ok) throw new Error(first.detail)
+    await settle(first.run.id)
+    await writeFile(join(first.run.worktreePath, 'half.txt'), '上一轮干了一半\n', 'utf8')
+
+    // 打回重来：卡回到 ready，换一个 provider 接手。
+    const after = store.getTask(asTaskId('t1'))
+    if (after === null) throw new Error('卡没了')
+    store.commitTask({ ...after, column: 'ready', lease: undefined, revision: after.revision + 1 })
+    const other = scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })])
+    const second = await new Runner({
+      storage: store, bus,
+      agents: [{ provider: { ...other, id: 'codex' }, caps: caps() }],
+      artifactsRoot: join(sandbox, 'artifacts'),
+      leaseTtlMs: 60_000, timeoutMs: 20_000,
+    }).start(asTaskId('t1'))
+    if (!second.ok) throw new Error(second.detail)
+
+    expect(second.run.worktreePath).toBe(first.run.worktreePath)
+    // 上一轮的半成品还在，Agent 不是在空目录里对着评审意见发懵。
+    await expect(readFile(join(second.run.worktreePath, 'half.txt'), 'utf8')).resolves.toContain('干了一半')
+    await settle(second.run.id)
   })
 })
 
-describe('评审意见的生命周期', () => {
-  it('执行失败时意见留着 —— 否则人写的评审凭空丢了，重派又从头做一遍', async () => {
-    store.createTask(task({ id: 't1', feedback: '连字符后面的字母也要大写' }))
-    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: false })], 1))
+describe('讨论的生命周期', () => {
+  /** 给这张卡留一条人类留言。 */
+  const say = (body: string, at = T0) => {
+    store.addComment({ id: `c-${String(at)}`, taskId: asTaskId('t1'), author: 'human', body, at })
+  }
+
+  it('Agent 这一轮的回复进讨论 —— 它就是人接下来要回应的东西', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'finished', ok: true, summary: '改完了：slugify 现在保留中文' }),
+    ]))
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
     await settle(started.run.id)
 
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
-    expect(store.getTask(asTaskId('t1'))?.feedback).toBe('连字符后面的字母也要大写')
+    const comments = store.listComments(asTaskId('t1'))
+    expect(comments).toHaveLength(1)
+    expect(comments[0]).toMatchObject({ author: 'agent', body: '改完了：slugify 现在保留中文' })
+    expect(comments[0]?.runId).toBe(started.run.id)
   })
 
-  it('跑出可验收结果之后才清掉意见，避免下一轮重复投喂', async () => {
-    store.createTask(task({ id: 't1', feedback: '改一下' }))
+  it('失败的那一轮也记 —— 它卡在哪儿正是最该被讨论的', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'finished', ok: false, summary: '依赖装不上，npm 报 403' }),
+    ], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.listComments(asTaskId('t1'))[0]).toMatchObject({
+      author: 'agent', body: '依赖装不上，npm 报 403',
+    })
+  })
+
+  it('讨论不消费：跑完之后先前的留言还在，下一轮连着一起带走', async () => {
+    store.createTask(task({ id: 't1' }))
+    say('连字符后面的字母也要大写')
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true, summary: '好了' })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const comments = store.listComments(asTaskId('t1'))
+    expect(comments.map((c) => c.author)).toEqual(['human', 'agent'])
+    expect(comments[0]?.body).toBe('连字符后面的字母也要大写')
+  })
+
+  it('整条讨论写进 TASK.md —— 只给最后一句会让 Agent 推翻已确认的结论', async () => {
+    store.createTask(task({ id: 't1' }))
+    say('先只改 slugify，别动别的', T0)
+    store.addComment({ id: 'c-a', taskId: asTaskId('t1'), author: 'agent', body: '已改，只动了一个文件', at: T0 + 1 })
+    say('再补个中文的测试', T0 + 2)
+
     const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
-    await settle(started.run.id)
 
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
-    expect(store.getTask(asTaskId('t1'))?.feedback).toBeUndefined()
+    const spec = await readFile(join(started.run.worktreePath, 'TASK.md'), 'utf8')
+    expect(spec).toContain('## 讨论')
+    expect(spec).toContain('先只改 slugify')
+    expect(spec).toContain('已改，只动了一个文件')
+    expect(spec).toContain('再补个中文的测试')
+    await settle(started.run.id)
   })
 
-  it('意见会出现在事件流里，人能看到这一轮是带着什么要求跑的', async () => {
-    store.createTask(task({ id: 't1', feedback: '要保留 Unicode' }))
+  it('最新一条留言出现在事件流里，人能看到这一轮是带着什么要求跑的', async () => {
+    store.createTask(task({ id: 't1' }))
+    say('要保留 Unicode')
     const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
@@ -322,6 +395,36 @@ describe('评审意见的生命周期', () => {
       .filter((e) => e.kind === 'notice')
       .map((e) => JSON.stringify(e.payload))
     expect(notices.join(' ')).toContain('要保留 Unicode')
+  })
+})
+
+describe('一起步就死的执行', () => {
+  it('一句话一个工具都没有就失败：诊断里给一条能照做的线索', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'finished', ok: false, diagnostic: 'UnknownError: 服务端错误' }),
+    ], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const diagnostic = store.getRun(started.run.id)?.diagnostic ?? ''
+    // 原始诊断照留，线索只是附在后面 —— 不替 CLI 下结论。
+    expect(diagnostic).toContain('UnknownError: 服务端错误')
+    expect(diagnostic).toContain('明确指定一个模型')
+  })
+
+  it('干过活的那种失败不给这条线索 —— 它的失败另有原因', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'text', text: '我看了一圈代码' }),
+      JSON.stringify({ kind: 'finished', ok: false, diagnostic: '测试没过' }),
+    ], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.getRun(started.run.id)?.diagnostic).toBe('测试没过')
   })
 })
 

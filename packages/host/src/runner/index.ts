@@ -21,15 +21,15 @@ import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import {
-  acquireLease, asRunId, consumeFeedback, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
-  type RunId, type Task, type TaskId,
+  acquireLease, asRunId, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
+  taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
-import type { Run, Storage } from '../storage/index.ts'
+import type { Run, Storage, TaskComment } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
-import { branchSlug, createWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+import { branchSlug, ensureWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
 
 /** 租期。跑着的 Run 会在到期前续，崩溃的 Run 到期后被回收。 */
 export const DEFAULT_LEASE_TTL_MS = 90_000
@@ -46,12 +46,13 @@ export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000
  */
 const STDERR_KEEP_BYTES = 64 * 1024
 
+/** 多快算"一起步就死"。这个量级的失败不可能是活干砸了，只可能是没跑起来。 */
+const IMMEDIATE_FAILURE_MS = 10_000
+
 export interface RunnerOptions {
   readonly storage: Storage
   readonly bus: RunBus
   readonly agents: readonly DetectedAgent[]
-  /** worktree 的存放根目录，放在仓库外以免污染主工作区。 */
-  readonly worktreeRoot: string
   /** Run 产物（原始日志、last-message）目录。 */
   readonly artifactsRoot: string
   readonly leaseTtlMs?: number
@@ -131,7 +132,7 @@ export class Runner {
       provider: agent.provider.id,
       ttlMs: this.leaseTtl,
       now,
-      completed: new Set(storage.listTasks(task.boardId).filter((t) => t.column === 'done').map((t) => t.id)),
+      completed: new Set(storage.listTasks(task.projectId).filter((t) => t.column === 'done').map((t) => t.id)),
     })
     if (!claimed.ok) return { ok: false, reason: claimed.reason, detail: claimed.detail }
     if (!storage.commitTask(claimed.value)) {
@@ -175,25 +176,30 @@ export class Runner {
 
   /** 真正建（或复用）worktree、写 TASK.md、起进程并接管输出。 */
   private async launch(task: Task, runId: RunId, agent: DetectedAgent, prior?: Run): Promise<Run> {
-    const { storage, artifactsRoot, worktreeRoot } = this.options
+    const { storage, artifactsRoot } = this.options
     const { provider, caps } = agent
 
-    // 续跑复用上次的 worktree：Agent 要能看到自己上次的成果，
-    // 而不是在空目录里对着评审意见发懵。
-    const worktree = prior === undefined
-      ? await createWorktree(task.repoPath, worktreeRoot, task.id, branchSlug(task.id, task.subject), task.baseBranch)
-      : { path: prior.worktreePath, branch: prior.branch }
+    // worktree 属于任务：打回重做、换个 CLI 接着干，看到的都是同一个工作区
+    // 里上一次的成果，而不是在空目录里对着评审意见发懵。`prior` 只决定要不要
+    // 续会话，不决定在哪儿干活。
+    const worktree = await ensureWorktree(
+      task.repoPath, task.id, branchSlug(task.id, taskTitle(task)), task.baseBranch,
+    )
 
     const artifactsDir = join(artifactsRoot, runId)
     await mkdir(artifactsDir, { recursive: true })
-    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task), 'utf8')
+    // 讨论线程一起写进 TASK.md：人和 Agent 的每一轮往来都是这次执行的上下文。
+    const comments = storage.listComments(task.id)
+    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments), 'utf8')
 
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task, prior !== undefined),
+      prompt: renderPrompt(task, comments, prior !== undefined),
       permission: 'standard',
+      // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
+      ...(task.model === undefined ? {} : { model: task.model }),
       // claude 支持预先指定会话 id；codex 只能事后从 thread.started 捞。
       ...(caps.canPinSessionId ? { sessionId: randomUUID() } : {}),
     }
@@ -224,8 +230,12 @@ export class Runner {
       text: `${provider.id} ${caps.version} · pid ${String(handle.pid)}`
         + (resumeSpec === null ? '' : ` · 接续会话 ${String(prior?.agentSessionId)}`),
     })
-    if (task.feedback !== undefined) {
-      this.emit(runId, 'notice', { level: 'info', text: `带着评审意见重做：${task.feedback.slice(0, 200)}` })
+    const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
+    if (lastHuman !== undefined) {
+      this.emit(runId, 'notice', {
+        level: 'info',
+        text: `带着 ${String(comments.length)} 条讨论重做，最新一条：${lastHuman.body.slice(0, 200)}`,
+      })
     }
 
     const renew = setInterval(() => { this.renewLease(task.id, runId) }, this.leaseTtl / RENEW_DIVISOR)
@@ -255,6 +265,11 @@ export class Runner {
     let lastSessionKey: string | undefined
     let finishedOk: boolean | undefined
     let diagnostic: string | undefined
+    /** Agent 这一轮的回复。finished 事件的 summary 优先，没有就退回最后一段正文。 */
+    let answer: string | undefined
+    let lastText: string | undefined
+    /** 这一轮有没有真的干出点什么（说过话或用过工具）。 */
+    let produced = false
 
     const stderrChunks: Buffer[] = []
     let stderrBytes = 0
@@ -284,9 +299,12 @@ export class Runner {
           lastSessionKey = key
           sessionId = event.sessionId
         }
+        if (event.kind === 'text' || event.kind === 'tool') produced = true
+        if (event.kind === 'text' && event.text.trim().length > 0) lastText = event.text
         if (event.kind === 'finished') {
           finishedOk = event.ok
           diagnostic = event.diagnostic
+          answer = event.summary
         }
         this.emit(run.id, event.kind, event as unknown as Record<string, unknown>)
       }
@@ -325,9 +343,18 @@ export class Runner {
       text: `退出 code=${String(outcome.code)} 树已静默=${String(outcome.treeQuiesced)} 改动=${changed ? '有' : '无'}`,
     })
 
-    const failureDetail = diagnostic
-      ?? (stderrText.length > 0 ? stderrText.slice(0, 512) : undefined)
-      ?? `exit=${String(outcome.code)}`
+    const failureDetail = [
+      diagnostic
+        ?? (stderrText.length > 0 ? stderrText.slice(0, 512) : undefined)
+        ?? `exit=${String(outcome.code)}`,
+      // 会话刚建立就死、一句话一个工具都没有 —— 这种形状的失败几乎都出在
+      // CLI 自己那边（默认模型解析不出、配置有问题、没登录），而各家给的
+      // 错误信息又往往含糊到没法照做。给一条能试的线索，不下结论。
+      !produced && this.now - run.startedAt < IMMEDIATE_FAILURE_MS
+        ? '（会话刚建立就失败，没有任何输出：多半是这个 CLI 自己的默认模型或配置有问题，'
+          + '试试在卡上明确指定一个模型，或者手动跑一次同样的命令看它怎么说）'
+        : null,
+    ].filter((part) => part !== null).join(' ')
 
     // 主动取消不是失败：`aborted` 与 `failed` 在执行历史和成功率里必须分开，
     // 否则"我自己按的停止"会被算进失败率。
@@ -340,15 +367,22 @@ export class Runner {
       endedAt: this.now,
     })
 
-    // 评审意见只在真正跑出可验收结果之后才清。
-    // 在交给 Agent 的瞬间就清是错的：那一轮如果失败了，人写的意见就凭空丢了,
-    // 重新派活时 Agent 又会从头做一遍同样的活。
-    if (ok) {
-      const current = storage.getTask(task.id)
-      if (current !== null && current.feedback !== undefined) {
-        storage.commitTask(consumeFeedback(current, this.now))
-      }
+    // Agent 这一轮的回复进讨论。**失败的那一轮也记**：它说到哪儿、卡在哪儿，
+    // 正是人接下来要回应的东西 —— 只记成功的等于把最需要讨论的部分丢掉。
+    const said = (answer ?? lastText ?? '').trim()
+    if (said.length > 0) {
+      storage.addComment({
+        id: `c-${randomUUID().slice(0, 8)}`,
+        taskId: task.id,
+        author: 'agent',
+        body: said,
+        runId: run.id,
+        at: this.now,
+      })
     }
+
+    // 讨论**不消费**：这一轮的答复和人先前的留言都留着，下一轮连着一起带走。
+    // 反馈因此是累积的，而不是每次只剩最后一句。
     // 成功与失败都进 Review：这一轮的分支、日志和诊断都要人判读，判完
     // 要么打回重跑、要么废弃。没有 Failed 列可以让失败的卡自己待着。
     this.release(task.id)
@@ -480,15 +514,25 @@ export class Runner {
   }
 }
 
-/** 投喂给 Agent 的任务规格，写进 worktree 根目录。 */
-export function renderTaskSpec(task: Task): string {
-  const lines = [`# ${task.subject}`, '']
-  if (task.description.trim().length > 0) lines.push(task.description.trim(), '')
-  lines.push('## 验收标准', '')
-  for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
-  if (task.writeScopes.length > 0) {
-    lines.push('', '## 写入范围', '', '只应改动以下路径下的文件：', '')
-    for (const scope of task.writeScopes) lines.push(`- \`${scope}\``)
+/**
+ * 投喂给 Agent 的任务规格，写进 worktree 根目录。
+ *
+ * 讨论线程整段附在后面：人和 Agent 的往来是这张卡真正的上下文，只给最后
+ * 一句会让 Agent 反复推翻自己已经确认过的结论。
+ */
+export function renderTaskSpec(task: Task, comments: readonly TaskComment[] = []): string {
+  const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
+  // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
+  if (task.acceptance.length > 0) {
+    lines.push('## 验收标准', '')
+    for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
+  }
+  if (comments.length > 0) {
+    lines.push('', '## 讨论', '')
+    for (const comment of comments) {
+      lines.push(`### ${comment.author === 'agent' ? 'Agent' : '人'} · ${new Date(comment.at).toISOString()}`, '')
+      lines.push(comment.body.trim(), '')
+    }
   }
   lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
   return `${lines.join('\n')}\n`
@@ -499,22 +543,23 @@ export function renderTaskSpec(task: Task): string {
  * @param task - 目标任务。
  * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
  */
-export function renderPrompt(task: Task, resuming = false): string {
+export function renderPrompt(task: Task, comments: readonly TaskComment[] = [], resuming = false): string {
   const lines: string[] = []
-  if (task.feedback === undefined) {
-    lines.push(`阅读仓库根目录的 TASK.md 并完成其中的任务：${task.subject}`)
+  const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
+  if (lastHuman === undefined) {
+    lines.push(`阅读仓库根目录的 TASK.md 并完成其中的任务：${taskTitle(task)}`)
   } else {
     lines.push(
       resuming
-        ? '你上一轮的成果被评审打回了。工作区里就是你上次的改动，请在此基础上修改：'
-        : `任务「${task.subject}」上一轮被评审打回。工作区里是上次的改动，请在此基础上修改：`,
+        ? '这张卡有了新的反馈。工作区里就是你上次的改动，请在此基础上继续：'
+        : `任务「${taskTitle(task)}」有新的反馈。工作区里是上一轮的改动，请在此基础上继续：`,
       '',
-      task.feedback,
+      lastHuman.body,
       '',
-      '完整需求见仓库根目录的 TASK.md。',
+      '完整需求与此前的往来见仓库根目录的 TASK.md 的「讨论」一节。',
     )
   }
-  lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足。')
+  lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')
   lines.push('不要提交、不要推送、不要改动 TASK.md。')
   return lines.join('\n')
 }

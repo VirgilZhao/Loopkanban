@@ -11,9 +11,9 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { asBoardId, asTaskId, type Task } from '@loopkanban/core'
+import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
 import { createToken } from '../server/auth.ts'
 import { detectAgents } from '../agents/index.ts'
 import { RunBus } from '../server/bus.ts'
@@ -23,6 +23,8 @@ import { Runner } from '../runner/index.ts'
 import { Scheduler } from '../scheduler/index.ts'
 import { installService, planService, uninstallService, type ServicePlan } from '../service/index.ts'
 import { Storage } from '../storage/index.ts'
+import { loadModelCatalog, mergeModels } from '../agents/models-dev.ts'
+import { detectBaseBranch } from '../worktree/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -90,37 +92,45 @@ async function resolveToken(dir: string, rotate: boolean): Promise<string> {
  * 用户第一次打开自动驾驶时它们会被立刻派出去，让 Agent 对着一个陌生仓库
  * 做一堆牛头不对马嘴的活。默认值不该有这种惊吓。
  */
-function seed(storage: Storage, repoPath: string): void {
-  if (storage.listBoards().length > 0) return
+async function seed(storage: Storage, repoPath: string): Promise<void> {
+  if (storage.listProjects().length > 0) return
   const now = Date.now()
-  const boardId = asBoardId('board-default')
-  storage.createBoard({ id: boardId, name: '默认看板', repoPath, baseBranch: 'main', createdAt: now })
+  const projectId = asProjectId('project-default')
+  const baseBranch = await detectBaseBranch(repoPath)
+  storage.createProject({
+    id: projectId,
+    // 目录名就是项目名 —— 用户认得出的是它，不是"默认看板"。
+    name: basename(repoPath),
+    repoPath,
+    baseBranch,
+    createdAt: now,
+  })
 
-  const samples: { id: string; column: Task['column']; subject: string; acceptance: string[] }[] = [
+  const samples: { id: string; column: Task['column']; description: string; acceptance: string[] }[] = [
     {
       id: 't-welcome', column: 'backlog',
-      subject: '把这张卡补上验收标准，它就能拖进 Ready 了',
+      description: '把这张卡改成你自己的任务 —— 卡上写什么，Agent 就照着做什么。',
       acceptance: [],
     },
     {
       id: 't-sample-1', column: 'backlog',
-      subject: '示例：给某个模块补上边界情况的单测',
+      description: '示例：给某个模块补上边界情况的单测',
       acceptance: ['新增测试覆盖空输入与超长输入', '现有测试全部通过'],
     },
     {
       id: 't-sample-2', column: 'backlog',
-      subject: '示例：改掉这两张卡的内容，换成你自己的任务',
-      acceptance: ['需求写清楚', '验收标准可判定'],
+      description: '示例：验收标准是可选的，但写清楚会让 Agent 和你自己都更好判定做没做完。',
+      acceptance: [],
     },
   ]
   for (const [index, sample] of samples.entries()) {
     storage.createTask({
-      id: asTaskId(sample.id), boardId, revision: 1,
+      id: asTaskId(sample.id), projectId, revision: 1,
       column: sample.column, position: index + 1,
-      subject: sample.subject, description: '',
+      description: sample.description,
       acceptance: sample.acceptance,
-      repoPath, baseBranch: 'main',
-      blockedBy: [], writeScopes: [],
+      repoPath, baseBranch,
+      blockedBy: [],
       createdAt: now, updatedAt: now,
     })
   }
@@ -220,12 +230,27 @@ async function main(): Promise<void> {
   const dir = flag('data') ?? dataDir()
   await mkdir(dir, { recursive: true })
   const storage = Storage.open(join(dir, 'loopkanban.db'))
-  seed(storage, process.cwd())
+  await seed(storage, process.cwd())
 
   console.log(C.bold('\n  LOOPKANBAN') + C.dim('  agent dispatch\n'))
 
   // ── 探测本机 CLI ─────────────────────────────────────────
-  const agents = await detectAgents()
+  const detected = await detectAgents()
+
+  /*
+   * 给 claude 与 codex 补上模型清单。
+   *
+   * 这是整个程序**唯一**的对外请求（别处只连 127.0.0.1），所以：一天最多一次、
+   * 结果落盘、`--no-models` 可以彻底关掉，取不到就当没这回事继续跑。
+   * opencode 不在此列 —— 它自己的 `models` 子命令比任何目录都准。
+   */
+  const catalog = process.argv.includes('--no-models')
+    ? {}
+    : await loadModelCatalog({ cachePath: join(dir, 'models-dev.json') })
+  const agents = detected.map((agent) => ({
+    ...agent,
+    caps: { ...agent.caps, models: mergeModels(agent.caps.models, catalog[agent.provider.id] ?? []) },
+  }))
   if (agents.length === 0) {
     console.log(`  ${C.red('✗')} 未探测到任何 Agent CLI（claude / codex / opencode）`)
     console.log(C.dim('    装好其中之一再来，任务需要它们来执行。\n'))
@@ -240,19 +265,18 @@ async function main(): Promise<void> {
     console.log(
       `  ${C.green('●')} ${C.bold(provider.id.padEnd(8))} ${caps.version.padEnd(24)}`
       + C.dim(caps.bin)
+      + (caps.models.length > 0 ? C.dim(`  ${String(caps.models.length)} 个模型`) : '')
       + (missing.length > 0 ? ` ${C.amber(missing.join(' '))}` : ''),
     )
   }
 
   // ── 执行器 ───────────────────────────────────────────────
   const bus = new RunBus()
-  const worktreeRoot = join(dir, 'worktrees')
   const runner = new Runner({
     storage, bus, agents,
-    worktreeRoot,
     artifactsRoot: join(dir, 'runs'),
   })
-  const review = new Review({ storage, worktreeRoot })
+  const review = new Review({ storage })
   const scheduler = new Scheduler({ storage, runner, agents })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
@@ -295,8 +319,8 @@ async function main(): Promise<void> {
   console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
   console.log(C.dim(`    数据 ${join(dir, 'loopkanban.db')}`))
   console.log(scheduler.settings.autopilot
-    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 并发 ${String(scheduler.settings.maxConcurrent)}`)}\n`
-    : C.dim('    自动认领当前关闭，可在界面右上角打开。\n'))
+    ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 每个执行器并发 ${String(scheduler.settings.maxPerProvider)}`)}\n`
+    : C.dim('    自动认领当前关闭，可在界面左侧边栏底部打开。\n'))
 
   if (!process.argv.includes('--no-open')) openBrowser(server.url)
 

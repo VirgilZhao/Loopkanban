@@ -25,13 +25,14 @@ export const DEFAULT_TICK_MS = 3_000
 export interface SchedulerSettings {
   /** 自动认领总开关。默认关 —— 让 Agent 无人值守动代码，得由人明确点头。 */
   readonly autopilot: boolean
-  readonly maxConcurrent: number
+  /** 每个执行器的并发上限 —— 不是全局上限。 */
+  readonly maxPerProvider: number
   readonly maxPerRepo: number
 }
 
 export const DEFAULT_SETTINGS: SchedulerSettings = {
   autopilot: false,
-  maxConcurrent: 2,
+  maxPerProvider: 2,
   maxPerRepo: 1,
 }
 
@@ -71,9 +72,23 @@ export class Scheduler {
     return this.options.now?.() ?? Date.now()
   }
 
-  /** 当前设置，从存储读，进程重启后保持。 */
+  /**
+   * 当前设置，从存储读，进程重启后保持。
+   *
+   * 并发上限从"全局"改成"每个执行器"时字段名跟着换了；旧库里存的是
+   * `maxConcurrent`，照原值搬过来 —— 用户设过的数字不该因为我们改了名字
+   * 就悄悄回到默认值。
+   */
   get settings(): SchedulerSettings {
-    return this.options.storage.getSetting('scheduler', DEFAULT_SETTINGS)
+    const stored = this.options.storage.getSetting<Partial<SchedulerSettings> & { maxConcurrent?: number }>(
+      'scheduler',
+      DEFAULT_SETTINGS,
+    )
+    return {
+      autopilot: stored.autopilot ?? DEFAULT_SETTINGS.autopilot,
+      maxPerProvider: stored.maxPerProvider ?? stored.maxConcurrent ?? DEFAULT_SETTINGS.maxPerProvider,
+      maxPerRepo: stored.maxPerRepo ?? DEFAULT_SETTINGS.maxPerRepo,
+    }
   }
 
   /**
@@ -85,7 +100,7 @@ export class Scheduler {
     const current = this.settings
     const next: SchedulerSettings = {
       autopilot: patch.autopilot ?? current.autopilot,
-      maxConcurrent: clampLimit(patch.maxConcurrent ?? current.maxConcurrent),
+      maxPerProvider: clampLimit(patch.maxPerProvider ?? current.maxPerProvider),
       maxPerRepo: clampLimit(patch.maxPerRepo ?? current.maxPerRepo),
     }
     this.options.storage.setSetting('scheduler', next)
@@ -164,7 +179,7 @@ export class Scheduler {
     const plan = planDispatch({
       tasks: storage.listTasks(),
       availableProviders: agents.map((a) => a.provider.id),
-      limits: { maxConcurrent: settings.maxConcurrent, maxPerRepo: settings.maxPerRepo },
+      limits: { maxPerProvider: settings.maxPerProvider, maxPerRepo: settings.maxPerRepo },
       now: this.now,
     })
 

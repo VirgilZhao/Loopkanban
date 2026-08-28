@@ -4,35 +4,33 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import {
-  acquireLease, asBoardId, asRunId, asTaskId, moveTask, type Task,
+  acquireLease, asProjectId, asRunId, asTaskId, moveTask, type Task,
 } from '@loopkanban/core'
-import { Storage, type Board, type Run } from '../src/storage/index.ts'
+import { Storage, type Project, type Run } from '../src/storage/index.ts'
 import { MIGRATIONS } from '../src/storage/schema.ts'
 
 const T0 = 1_000_000
-const BOARD = asBoardId('b1')
+const PROJECT = asProjectId('b1')
 
 let store: Storage
 
-const board = (): Board => ({
-  id: BOARD, name: '默认看板', repoPath: '/repo', baseBranch: 'main', createdAt: T0,
+const project = (): Project => ({
+  id: PROJECT, name: '默认看板', repoPath: '/repo', baseBranch: 'main', createdAt: T0,
 })
 
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   const { id, ...rest } = patch
   return {
     id: asTaskId(id),
-    boardId: BOARD,
+    projectId: PROJECT,
     revision: 1,
     column: 'ready',
     position: 1,
-    subject: id,
-    description: '描述',
+    description: `${id} 的描述`,
     acceptance: ['有测试'],
     repoPath: '/repo',
     baseBranch: 'main',
     blockedBy: [],
-    writeScopes: [],
     createdAt: T0,
     updatedAt: T0,
     ...rest,
@@ -53,7 +51,7 @@ const run = (patch: Partial<Run> = {}): Run => ({
 
 beforeEach(() => {
   store = Storage.open(':memory:')
-  store.createBoard(board())
+  store.createProject(project())
 })
 
 describe('任务往返', () => {
@@ -62,7 +60,6 @@ describe('任务往返', () => {
       id: 't1',
       preferredProvider: 'codex',
       blockedBy: [asTaskId('dep')],
-      writeScopes: ['src/auth/'],
       acceptance: ['A', 'B'],
       lease: { runId: asRunId('r9'), provider: 'claude', acquiredAt: T0, expiresAt: T0 + 1000 },
     })
@@ -86,7 +83,7 @@ describe('任务往返', () => {
     store.createTask(task({ id: 'c', position: 3 }))
     store.createTask(task({ id: 'a', position: 1 }))
     store.createTask(task({ id: 'b', position: 2 }))
-    expect(store.listTasks(BOARD).map((t) => t.id)).toEqual(['a', 'b', 'c'])
+    expect(store.listTasks(PROJECT).map((t) => t.id)).toEqual(['a', 'b', 'c'])
   })
 })
 
@@ -131,10 +128,10 @@ describe('commitTask 的 compare-and-set', () => {
   })
 
   it('提交一个 revision 落后的值会被拒，数据不被覆盖', () => {
-    store.createTask(task({ id: 't1', revision: 5, subject: '新的' }))
-    const stale = task({ id: 't1', revision: 3, subject: '旧的' })
+    store.createTask(task({ id: 't1', revision: 5, description: '新的' }))
+    const stale = task({ id: 't1', revision: 3, description: '旧的' })
     expect(store.commitTask(stale)).toBe(false)
-    expect(store.getTask(asTaskId('t1'))?.subject).toBe('新的')
+    expect(store.getTask(asTaskId('t1'))?.description).toBe('新的')
   })
 
   it('租约可以被写成 null 来释放', () => {
@@ -344,14 +341,14 @@ describe('迁移', () => {
       // v2 = 建表 + feedback 列，也就是 Failed 列还存在的那个世界。
       const legacy = seedLegacyDb(file, 2)
       legacy.prepare('INSERT INTO boards VALUES (?, ?, ?, ?, ?)')
-        .run(BOARD, '默认看板', '/repo', 'main', T0)
+        .run(PROJECT, '默认看板', '/repo', 'main', T0)
       legacy.prepare(`
         INSERT INTO tasks (
           id, board_id, revision, column_name, position, subject, description,
           acceptance_json, repo_path, base_branch, preferred_provider,
           blocked_by_json, write_scopes_json, lease_json, feedback, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run('t1', BOARD, 1, 'failed', 1, '跑挂了的卡', '', '[]', '/repo', 'main',
+      `).run('t1', PROJECT, 1, 'failed', 1, '跑挂了的卡', '', '[]', '/repo', 'main',
         null, '[]', '[]', null, null, T0, T0)
       legacy.close()
 
@@ -359,7 +356,39 @@ describe('迁移', () => {
       const migrated = store.getTask(asTaskId('t1'))
       expect(migrated?.column).toBe('review')
       // 搬列而已，内容一个字都不该动。
-      expect(migrated?.subject).toBe('跑挂了的卡')
+      expect(migrated?.description).toBe('跑挂了的卡')
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('board → project：旧库改名后，卡还挂在同一个项目上，写入范围列一并退场', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v4 = 改名之前的世界：boards 表、board_id 列、write_scopes_json 都还在。
+      const legacy = seedLegacyDb(file, 4)
+      legacy.prepare('INSERT INTO boards VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '默认看板', '/repo', 'main', T0)
+      legacy.prepare(`
+        INSERT INTO tasks (
+          id, board_id, revision, column_name, position, subject, description,
+          acceptance_json, repo_path, base_branch, preferred_provider,
+          blocked_by_json, write_scopes_json, lease_json, feedback, archived_at,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('t1', PROJECT, 1, 'ready', 1, '老卡', '', '["有测试"]', '/repo', 'main',
+        null, '[]', '["src/auth/"]', null, null, null, T0, T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const projects = store.listProjects()
+      expect(projects).toHaveLength(1)
+      expect(projects[0]?.repoPath).toBe('/repo')
+      // 卡没搬家，只是它挂着的那个东西改了名字。
+      expect(store.getTask(asTaskId('t1'))?.projectId).toBe(PROJECT)
+      expect(store.listTasks(PROJECT).map((t) => t.id)).toEqual(['t1'])
       store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -372,14 +401,14 @@ describe('迁移', () => {
     try {
       const legacy = seedLegacyDb(file, 3)
       legacy.prepare('INSERT INTO boards VALUES (?, ?, ?, ?, ?)')
-        .run(BOARD, '默认看板', '/repo', 'main', T0)
+        .run(PROJECT, '默认看板', '/repo', 'main', T0)
       legacy.prepare(`
         INSERT INTO tasks (
           id, board_id, revision, column_name, position, subject, description,
           acceptance_json, repo_path, base_branch, preferred_provider,
           blocked_by_json, write_scopes_json, lease_json, feedback, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run('t1', BOARD, 1, 'ready', 1, '老卡', '', '["有测试"]', '/repo', 'main',
+      `).run('t1', PROJECT, 1, 'ready', 1, '老卡', '', '["有测试"]', '/repo', 'main',
         null, '[]', '[]', null, null, T0, T0)
       legacy.close()
 

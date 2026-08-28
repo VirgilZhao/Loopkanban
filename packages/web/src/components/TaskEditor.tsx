@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Plus, X } from 'lucide-react'
+import { Button } from '@/components/ui/button.tsx'
+import { Input } from '@/components/ui/input.tsx'
+import { Label } from '@/components/ui/label.tsx'
+import { Textarea } from '@/components/ui/textarea.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Task, TaskEdit } from '@/types.ts'
 
@@ -49,114 +53,116 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
         {locked ? (
-          <p className="cjk-label mb-3 rounded-md border border-sodium-deep/40 bg-sodium/[0.06] p-2 !text-sodium">
+          <p className="rounded-md border border-sodium-deep/40 bg-sodium/[0.06] px-3 py-2 text-sm text-sodium">
             {lockReason}
           </p>
         ) : null}
 
-        <Label>标题</Label>
-        <input
-          value={draft.subject}
-          disabled={locked}
-          onChange={(e) => { setDraft((d) => ({ ...d, subject: e.target.value })) }}
-          className={inputClass}
-        />
-
-        <Label>描述</Label>
-        <textarea
-          value={draft.description}
-          disabled={locked}
-          rows={4}
-          onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
-          className={cn(inputClass, 'resize-y leading-relaxed')}
-        />
-
-        <Label>
-          验收标准
-          <span className="ms-2 !font-normal !text-ink-faint/70">Agent 的完成判据，空着就进不了 Ready</span>
-        </Label>
-        <div className="space-y-1">
-          {draft.acceptance.map((item, index) => (
-            <div key={index} className="flex items-center gap-1">
-              <span className="mono text-[11px] text-ink-faint">□</span>
-              <input
-                value={item}
-                disabled={locked}
-                placeholder="一条可判定的标准"
-                onChange={(e) => { setAcceptance(index, e.target.value) }}
-                className={cn(inputClass, 'my-0 flex-1')}
-              />
-              <IconButton
-                label="删除这条"
-                disabled={locked || draft.acceptance.length === 1}
-                onClick={() => {
-                  setDraft((d) => ({ ...d, acceptance: d.acceptance.filter((_, i) => i !== index) }))
-                }}
-              >
-                <X className="size-2.5" />
-              </IconButton>
-            </div>
-          ))}
-          <IconButton
-            label="新增一条" disabled={locked} wide
-            onClick={() => { setDraft((d) => ({ ...d, acceptance: [...d.acceptance, ''] })) }}
-          >
-            <Plus className="size-2.5" />
-          </IconButton>
-        </div>
-
-        <Label>指定执行器</Label>
-        <div className="flex flex-wrap gap-1">
-          <Chip
-            active={draft.preferredProvider === undefined}
+        <Field label="标题">
+          <Input
+            value={draft.subject}
             disabled={locked}
-            onClick={() => { setDraft((d) => ({ ...d, preferredProvider: undefined })) }}
-          >
-            任意
-          </Chip>
-          {agents.map((agent) => (
-            <Chip
-              key={agent.id}
-              active={draft.preferredProvider === agent.id}
+            onChange={(e) => { setDraft((d) => ({ ...d, subject: e.target.value })) }}
+          />
+        </Field>
+
+        <Field label="描述">
+          <Textarea
+            value={draft.description}
+            disabled={locked}
+            rows={4}
+            onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
+            className="leading-relaxed"
+          />
+        </Field>
+
+        <Field label="验收标准" hint="Agent 的完成判据，空着就进不了 Ready">
+          <div className="space-y-2">
+            {draft.acceptance.map((item, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <Input
+                  value={item}
+                  disabled={locked}
+                  placeholder="一条可判定的标准"
+                  onChange={(e) => { setAcceptance(index, e.target.value) }}
+                />
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="删除这条"
+                  title="删除这条"
+                  disabled={locked || draft.acceptance.length === 1}
+                  onClick={() => {
+                    setDraft((d) => ({ ...d, acceptance: d.acceptance.filter((_, i) => i !== index) }))
+                  }}
+                >
+                  <X />
+                </Button>
+              </div>
+            ))}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
               disabled={locked}
-              title={agent.permissionCaveat?.detail}
-              onClick={() => { setDraft((d) => ({ ...d, preferredProvider: agent.id })) }}
+              onClick={() => { setDraft((d) => ({ ...d, acceptance: [...d.acceptance, ''] })) }}
             >
-              {agent.id}
-              {agent.permissionCaveat === undefined ? null : (
-                <span className="ms-1 !text-sodium">{agent.permissionCaveat.label}</span>
-              )}
+              <Plus />新增一条
+            </Button>
+          </div>
+        </Field>
+
+        <Field label="指定执行器" hint="不指定就由调度器按可用性挑一个">
+          <div className="flex flex-wrap gap-2">
+            <Chip
+              active={draft.preferredProvider === undefined}
+              disabled={locked}
+              onClick={() => { setDraft((d) => ({ ...d, preferredProvider: undefined })) }}
+            >
+              任意
             </Chip>
-          ))}
-        </div>
+            {agents.map((agent) => (
+              <Chip
+                key={agent.id}
+                active={draft.preferredProvider === agent.id}
+                disabled={locked}
+                title={agent.permissionCaveat?.detail}
+                onClick={() => { setDraft((d) => ({ ...d, preferredProvider: agent.id })) }}
+              >
+                {agent.id}
+                {agent.permissionCaveat === undefined ? null : (
+                  <span className="text-sodium">{agent.permissionCaveat.label}</span>
+                )}
+              </Chip>
+            ))}
+          </div>
+        </Field>
 
-        <Label>
-          写入范围
-          <span className="ms-2 !font-normal !text-ink-faint/70">建议性，用于并发冲突预警</span>
-        </Label>
-        <input
-          value={draft.writeScopes.join(', ')}
-          disabled={locked}
-          placeholder="src/auth/, docs/"
-          onChange={(e) => {
-            setDraft((d) => ({ ...d, writeScopes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) }))
-          }}
-          className={cn(inputClass, 'mono !text-[11px]')}
-        />
+        <Field label="写入范围" hint="建议性，用于并发冲突预警">
+          <Input
+            value={draft.writeScopes.join(', ')}
+            disabled={locked}
+            placeholder="src/auth/, docs/"
+            className="mono"
+            onChange={(e) => {
+              setDraft((d) => ({ ...d, writeScopes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) }))
+            }}
+          />
+        </Field>
 
-        <Label>仓库</Label>
-        <p className="mono text-[11px] text-ink-faint">{task.repoPath}</p>
-        <p className="mono text-[11px] text-ink-faint">基线 {task.baseBranch}</p>
+        <Field label="仓库">
+          <p className="mono text-xs text-ink-faint">{task.repoPath}</p>
+          <p className="mono text-xs text-ink-faint">基线 {task.baseBranch}</p>
+        </Field>
       </div>
 
-      <div className="flex flex-none items-center gap-2 border-t border-hairline px-3 py-2">
-        <span className="cjk-label !text-[10px] !text-ink-faint/70">
-          {dirty ? '有未保存的改动' : '已保存'}
-        </span>
+      <div className="flex flex-none items-center gap-2 border-t border-hairline px-4 py-3">
+        <span className="text-xs text-ink-faint">{dirty ? '有未保存的改动' : '已保存'}</span>
         <span className="flex-1" />
-        <button
+        <Button
+          size="sm"
           disabled={busy || locked || !dirty}
           onClick={() => {
             onSave({
@@ -164,51 +170,28 @@ export function TaskEditor({ task, agents, busy, onSave }: Props): React.JSX.Ele
               acceptance: draft.acceptance.map((s) => s.trim()).filter(Boolean),
             })
           }}
-          className={cn(
-            'cjk-label rounded-md border px-2.5 py-1 !text-[11px] transition-colors',
-            'disabled:cursor-not-allowed disabled:opacity-40',
-            dirty ? 'border-sodium !text-sodium hover:bg-sodium/10' : 'border-hairline',
-          )}
         >
           保存
-        </button>
+        </Button>
       </div>
     </div>
   )
 }
 
-/** 裸输入框：只留一条发丝下划线，和整套面板的语言一致。 */
-const inputClass = cn(
-  'my-1 w-full rounded-md border border-hairline bg-void px-2 py-1 text-[12px] text-ink',
-  'placeholder:text-ink-faint/50 focus:border-sodium-deep focus:outline-none',
-  'disabled:cursor-not-allowed disabled:opacity-50',
-)
-
-function Label({ children }: { children: React.ReactNode }): React.JSX.Element {
-  return <h3 className="cjk-label mb-1 mt-4 !text-[10px] first:mt-0">{children}</h3>
-}
-
-function IconButton({ children, onClick, disabled, label, wide }: {
-  children: React.ReactNode
-  onClick: () => void
-  disabled: boolean
+/** 一组「标签 + 说明 + 控件」。说明写在标签下面，和主题预览里的卡片一个语序。 */
+function Field({ label, hint, children }: {
   label: string
-  wide?: boolean
+  hint?: string
+  children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <button
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        'flex h-5 items-center justify-center border border-hairline text-ink-faint transition-colors',
-        'hover:border-sodium hover:text-sodium disabled:opacity-30 disabled:hover:border-hairline',
-        wide ? 'w-full' : 'w-5 flex-none',
-      )}
-    >
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <Label>{label}</Label>
+        {hint === undefined ? null : <p className="text-xs text-ink-faint">{hint}</p>}
+      </div>
       {children}
-    </button>
+    </div>
   )
 }
 
@@ -220,16 +203,15 @@ function Chip({ children, active, disabled, onClick, title }: {
   title?: string
 }): React.JSX.Element {
   return (
-    <button
+    <Button
+      variant="outline"
+      size="sm"
       disabled={disabled}
       onClick={onClick}
-      title={title}
-      className={cn(
-        'chrome-label rounded-md border px-2 py-1 transition-colors disabled:opacity-40',
-        active ? 'border-sodium !text-sodium' : 'border-hairline hover:border-hairline-bright hover:!text-ink-dim',
-      )}
+      {...(title === undefined ? {} : { title })}
+      className={cn(active && 'border-primary bg-primary/10 text-sodium hover:bg-primary/15 hover:text-sodium')}
     >
       {children}
-    </button>
+    </Button>
   )
 }

@@ -3,13 +3,13 @@ import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors,
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
-import { Archive } from 'lucide-react'
 import { api, ApiError } from '@/api.ts'
-import { Autopilot } from '@/components/Autopilot.tsx'
+import { AppSidebar } from '@/components/AppSidebar.tsx'
 import { Column } from '@/components/Column.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
+import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
 import { insertPosition } from '@/lib/position.ts'
 import { cn } from '@/lib/utils.ts'
 import {
@@ -142,8 +142,23 @@ export default function App(): React.JSX.Element {
     return grouped
   }, [tasks, showArchived])
 
+  const counts = useMemo(
+    () => Object.fromEntries(COLUMNS.map((c) => [c, byColumn[c].length])) as Record<ColumnKey, number>,
+    [byColumn],
+  )
+
   const selected = tasks.find((t) => t.id === selectedId) ?? null
   const dragged = tasks.find((t) => t.id === draggingId) ?? null
+
+  // 侧边栏点某一列时把它滚到眼前 —— 列多、屏窄时这是唯一的找法。
+  const columnNodes = useRef(new Map<ColumnKey, HTMLElement>())
+  const registerColumn = useCallback((column: ColumnKey, node: HTMLElement | null) => {
+    if (node === null) columnNodes.current.delete(column)
+    else columnNodes.current.set(column, node)
+  }, [])
+  const jumpToColumn = useCallback((column: ColumnKey) => {
+    columnNodes.current.get(column)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+  }, [])
 
   // 「我的卡为什么不动」——调度器每一轮的跳过原因都摊到卡片上。
   const skipsByTask = useMemo(() => {
@@ -232,146 +247,105 @@ export default function App(): React.JSX.Element {
   const runningCount = byColumn.running.length
 
   return (
-    <div className="flex h-full flex-col">
-      {/* ── 顶栏：产品标识 + 本机 Agent 状态 ───────────────────── */}
-      <header className="flex flex-none items-center gap-4 border-b border-hairline px-4 py-2.5">
-        <div className="flex items-baseline gap-2">
-          <span
-            className="text-[15px] font-semibold tracking-tight text-ink"
-            style={{ fontFamily: 'var(--font-chrome)' }}
-          >
-            OPEN<span className="text-sodium">KANBAN</span>
-          </span>
-          <span className="chrome-label !text-[8px]">agent dispatch</span>
-        </div>
+    <SidebarProvider>
+      <AppSidebar
+        agents={agents}
+        counts={counts}
+        activeColumn={selected?.column ?? null}
+        onNavigate={jumpToColumn}
+        onCreate={createTask}
+        archivedCount={archivedCount}
+        showArchived={showArchived}
+        onToggleArchived={() => { setShowArchived((on) => !on) }}
+        scheduler={scheduler}
+        schedulerBusy={schedulerBusy}
+        running={runningCount}
+        onScheduler={(patch) => { void changeScheduler(patch) }}
+      />
 
-        <div className="h-4 w-px bg-hairline" />
+      <SidebarInset>
+        {/* ── 顶栏：侧边栏开关 + 当前视图 ─────────────────────── */}
+        <header className="flex h-12 flex-none items-center gap-2 border-b border-hairline px-3">
+          <SidebarTrigger />
+          <span className="h-4 w-px bg-hairline" />
+          <h1 className="text-[13px] font-semibold tracking-tight text-ink">看板</h1>
+          <span className="chrome-label !text-[8px]">{tasks.length} tasks</span>
+          <span className="flex-1" />
+          <ThemeToggle />
+        </header>
 
-        {/* 探测到的 CLI —— 没探测到的 provider 不会出现，任务也选不到它。 */}
-        <div className="flex items-center gap-3">
-          {agents.length === 0 ? (
-            <span className="cjk-label !text-lamp-fail">未探测到 Agent CLI</span>
-          ) : agents.map((agent) => (
-            <div
-              key={agent.id}
-              className="flex items-center gap-1.5"
-              title={[agent.bin, agent.version, agent.permissionCaveat?.detail].filter(Boolean).join('\n')}
+        {notice === null ? null : (
+          <div className={cn(
+            'flex flex-none items-center gap-3 border-b px-4 py-2',
+            notice.tone === 'warn'
+              ? 'border-lamp-fail/40 bg-lamp-fail/[0.07]'
+              : 'border-sodium-deep/50 bg-sodium/[0.07]',
+          )}>
+            <span className="lamp" data-state={notice.tone === 'warn' ? 'failed' : 'running'} />
+            <span className={cn('flex-1', notice.tone === 'warn' ? 'text-lamp-fail' : 'text-sodium')}>
+              {notice.text}
+            </span>
+            <button
+              onClick={() => { setNotice(null) }}
+              className="chrome-label rounded-md border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
             >
-              <span className="lamp" data-state="done" />
-              <span className="chrome-label !text-ink-dim">{agent.id}</span>
-              <span className="mono text-[10px] text-ink-faint">
-                {/^[\d.]+/.exec(agent.version)?.[0] ?? agent.version}
-              </span>
-              {agent.canResume ? null : (
-                <span className="cjk-label !text-[10px] !text-lamp-fail">无续跑</span>
-              )}
-              {/* 档位名字对不上实际约束时的警示。悬停看完整说明。 */}
-              {agent.permissionCaveat === undefined ? null : (
-                <span className="cjk-label !text-[10px] !text-sodium">{agent.permissionCaveat.label}</span>
-              )}
-            </div>
-          ))}
-        </div>
+              dismiss
+            </button>
+          </div>
+        )}
 
-        <span className="flex-1" />
-
-        {/* 归档开关。计数常驻 —— 不然被收走的卡就真的无迹可寻了。 */}
-        <button
-          onClick={() => { setShowArchived((on) => !on) }}
-          title={showArchived ? '隐藏归档的卡' : '显示归档的卡'}
-          className={cn(
-            'chrome-label flex items-center gap-1.5 rounded-md border px-2 py-1 transition-colors',
-            showArchived
-              ? 'border-sodium-deep !text-sodium'
-              : 'border-hairline !text-ink-faint hover:border-sodium hover:!text-sodium',
-          )}
+        {/* ── 看板 ───────────────────────────────────────────── */}
+        <DndContext
+          sensors={sensors}
+          onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
+          onDragCancel={() => { setDraggingId(null) }}
+          onDragEnd={(e) => { void handleDragEnd(e) }}
         >
-          <Archive className="size-2.5" />归档
-          <span className="mono text-[10px]">{archivedCount}</span>
-        </button>
+          <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
+            {COLUMNS.map((column, index) => (
+              <Column
+                key={column}
+                column={column}
+                index={index}
+                tasks={byColumn[column]}
+                now={now}
+                selectedId={selectedId}
+                liveTools={liveTools}
+                skips={skipsByTask}
+                onSelect={(task) => { setSelectedId(task.id) }}
+                onNode={registerColumn}
+                onCreate={column === 'backlog' ? createTask : undefined}
+              />
+            ))}
+          </div>
 
-        <ThemeToggle />
+          {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
+          <DragOverlay dropAnimation={null}>
+            {dragged === null ? null : (
+              <div className="rounded-xl border border-sodium bg-panel px-3 py-2.5 shadow-lg">
+                <span className="tag">{dragged.id}</span>
+                <p className="mt-1.5 line-clamp-2 font-medium text-ink">{dragged.subject}</p>
+              </div>
+            )}
+          </DragOverlay>
+        </DndContext>
 
-        {scheduler === null ? null : (
-          <Autopilot
-            settings={scheduler.settings}
-            running={runningCount}
-            busy={schedulerBusy}
-            onChange={(patch) => { void changeScheduler(patch) }}
+        {/* ── 任务详情：弹窗 ─────────────────────────────────── */}
+        {selected === null ? null : (
+          <RunPanel
+            task={selected}
+            agents={agents}
+            onLiveTool={onLiveTool}
+            onChanged={() => { void refresh() }}
+            onError={(code, detail) => {
+              setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
+            }}
+            onClose={() => { setSelectedId(null) }}
           />
         )}
-      </header>
 
-      {notice === null ? null : (
-        <div className={cn(
-          'flex flex-none items-center gap-3 border-b px-4 py-2',
-          notice.tone === 'warn'
-            ? 'border-lamp-fail/40 bg-lamp-fail/[0.07]'
-            : 'border-sodium-deep/50 bg-sodium/[0.07]',
-        )}>
-          <span className="lamp" data-state={notice.tone === 'warn' ? 'failed' : 'running'} />
-          <span className={cn('flex-1', notice.tone === 'warn' ? 'text-lamp-fail' : 'text-sodium')}>
-            {notice.text}
-          </span>
-          <button
-            onClick={() => { setNotice(null) }}
-            className="chrome-label rounded-md border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-
-      {/* ── 看板 ─────────────────────────────────────────────── */}
-      <DndContext
-        sensors={sensors}
-        onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
-        onDragCancel={() => { setDraggingId(null) }}
-        onDragEnd={(e) => { void handleDragEnd(e) }}
-      >
-        <div className="flex min-h-0 flex-1 overflow-x-auto">
-          {COLUMNS.map((column, index) => (
-            <Column
-              key={column}
-              column={column}
-              index={index}
-              tasks={byColumn[column]}
-              now={now}
-              selectedId={selectedId}
-              liveTools={liveTools}
-              skips={skipsByTask}
-              onSelect={(task) => { setSelectedId(task.id) }}
-              onCreate={column === 'backlog' ? createTask : undefined}
-            />
-          ))}
-        </div>
-
-        {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
-        <DragOverlay dropAnimation={null}>
-          {dragged === null ? null : (
-            <div className="rounded-lg border border-sodium bg-panel px-2.5 py-2 shadow-lg">
-              <span className="tag">{dragged.id}</span>
-              <p className="mt-1.5 line-clamp-2 text-ink">{dragged.subject}</p>
-            </div>
-          )}
-        </DragOverlay>
-      </DndContext>
-
-      {/* ── 任务详情：弹窗 ───────────────────────────────────── */}
-      {selected === null ? null : (
-        <RunPanel
-          task={selected}
-          agents={agents}
-          onLiveTool={onLiveTool}
-          onChanged={() => { void refresh() }}
-          onError={(code, detail) => {
-            setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
-          }}
-          onClose={() => { setSelectedId(null) }}
-        />
-      )}
-
-      {stats === null ? null : <StatsBar stats={stats} />}
-    </div>
+        {stats === null ? null : <StatsBar stats={stats} />}
+      </SidebarInset>
+    </SidebarProvider>
   )
 }

@@ -9,46 +9,32 @@ interface Props {
   onChange: (patch: Partial<SchedulerSettings>) => void
 }
 
+/**
+ * 自动驾驶开关，坐在侧边栏底部 —— 它决定 Agent 是否无人值守地动你的代码，
+ * 所以给它一整块地方，而不是挤在工具条里当第七颗按钮。
+ */
 export function Autopilot({ settings, running, busy, onChange }: Props): React.JSX.Element {
   const { autopilot, maxConcurrent } = settings
 
   return (
-    <div className="flex items-center gap-2.5">
-      {/* 并发上限。开着自动驾驶时才有意义，所以关着就淡下去。 */}
-      <div className={cn('flex items-center gap-1', !autopilot && 'opacity-40')}>
-        <span className="chrome-label">limit</span>
-        <Step
-          label="减少并发" disabled={busy || maxConcurrent <= 1}
-          onClick={() => { onChange({ maxConcurrent: maxConcurrent - 1 }) }}
-        >
-          <Minus className="size-2.5" />
-        </Step>
-        <span className="mono w-4 text-center text-[12px] text-ink">{maxConcurrent}</span>
-        <Step
-          label="增加并发" disabled={busy}
-          onClick={() => { onChange({ maxConcurrent: maxConcurrent + 1 }) }}
-        >
-          <Plus className="size-2.5" />
-        </Step>
-      </div>
-
-      {/* 开关本体。它决定 Agent 是否无人值守地动你的代码，所以给它开关该有的分量。 */}
+    <div className="flex flex-col gap-2 rounded-lg border border-sidebar-border bg-sidebar-accent/20 p-2">
+      {/* 开关本体。 */}
       <button
         disabled={busy}
         onClick={() => { onChange({ autopilot: !autopilot }) }}
         title={autopilot ? '关闭后不再自动认领，已在跑的任务不受影响' : '打开后 Ready 里的卡会被自动派给 Agent'}
         className={cn(
-          'flex items-center gap-2 rounded-md border px-2 py-1 transition-colors',
+          'flex w-full items-center gap-2 rounded-md border px-2 py-1.5 transition-colors',
           'disabled:cursor-not-allowed disabled:opacity-50',
           autopilot
             ? 'border-sodium bg-sodium/10 text-sodium'
-            : 'border-hairline text-ink-faint hover:border-hairline-bright hover:text-ink-dim',
+            : 'border-sidebar-border text-ink-faint hover:border-hairline-bright hover:text-ink-dim',
         )}
       >
         {/* 拨杆：开时滑到右侧并点亮。 */}
         <span
           className={cn(
-            'relative h-2.5 w-5 rounded-full border transition-colors',
+            'relative h-2.5 w-5 flex-none rounded-full border transition-colors',
             autopilot ? 'border-sodium bg-sodium/25' : 'border-hairline-bright',
           )}
         >
@@ -60,12 +46,36 @@ export function Autopilot({ settings, running, busy, onChange }: Props): React.J
           />
         </span>
         <span className="chrome-label !text-current">autopilot</span>
+        <span className="flex-1" />
+        <span className="cjk-label !text-[10px] !text-current">{autopilot ? '已开启' : '已关闭'}</span>
       </button>
 
-      <div className="flex items-center gap-1.5">
-        <span className="lamp" data-state={running > 0 ? 'running' : 'idle'} />
-        <span className="chrome-label">running</span>
-        <span className="mono text-[12px] text-ink">{running}</span>
+      <div className="flex items-center gap-1.5 px-0.5">
+        {/* 并发上限。开着自动驾驶时才有意义，所以关着就淡下去。 */}
+        <div className={cn('flex items-center gap-1', !autopilot && 'opacity-40')}>
+          <span className="chrome-label">limit</span>
+          <Step
+            label="减少并发" disabled={busy || maxConcurrent <= 1}
+            onClick={() => { onChange({ maxConcurrent: maxConcurrent - 1 }) }}
+          >
+            <Minus className="size-2.5" />
+          </Step>
+          <span className="mono w-3 text-center text-[12px] text-ink">{maxConcurrent}</span>
+          <Step
+            label="增加并发" disabled={busy}
+            onClick={() => { onChange({ maxConcurrent: maxConcurrent + 1 }) }}
+          >
+            <Plus className="size-2.5" />
+          </Step>
+        </div>
+
+        <span className="flex-1" />
+
+        <div className="flex items-center gap-1.5">
+          <span className="lamp" data-state={running > 0 ? 'running' : 'idle'} />
+          <span className="chrome-label">running</span>
+          <span className="mono text-[12px] text-ink">{running}</span>
+        </div>
       </div>
     </div>
   )

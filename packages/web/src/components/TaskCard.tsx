@@ -41,14 +41,15 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
       onClick={() => { onSelect(task) }}
       style={{ transform: CSS.Translate.toString(transform), transition }}
       className={cn(
-        'group relative cursor-grab overflow-hidden border bg-panel px-2.5 py-2 text-left',
-        'transition-colors duration-150',
-        'hover:border-hairline-bright hover:bg-raised',
-        selected && 'border-sodium-deep bg-raised',
+        // 卡片形制照抄主题预览里的 card：xl 圆角、发丝边、一层浅影。
+        // 不铺底色 —— 让列的面透上来，卡片只靠边和影浮起。
+        'group relative cursor-grab overflow-hidden rounded-xl border border-hairline px-3 py-2.5 text-left',
+        'shadow-sm transition-[border-color,box-shadow] duration-150',
+        'hover:border-hairline-bright hover:shadow-md',
+        selected && 'border-sodium-deep ring-1 ring-sodium-deep/30',
         isDragging && 'z-50 cursor-grabbing opacity-90 shadow-lg',
         // 归档的卡是背景板：看得见、认得出，但不参与任何操作。
-        archived && 'cursor-default border-dashed opacity-45',
-        'rounded-lg',
+        archived && 'cursor-default border-dashed opacity-45 shadow-none',
       )}
     >
       {/* 正在执行的卡片带一条持续扫描的轨 —— 界面里唯一恒动的元素。 */}
@@ -65,7 +66,7 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
         <span className="lamp" data-state={archived ? 'idle' : task.column} />
       </div>
 
-      <p className={cn('mt-1.5 line-clamp-2 text-ink', running && 'ps-1.5')}>{task.subject}</p>
+      <p className={cn('mt-1.5 line-clamp-2 font-medium text-ink', running && 'ps-1.5')}>{task.subject}</p>
 
       {running && liveTool !== undefined ? (
         <p className="mono mt-1.5 flex items-center gap-1.5 ps-1.5 text-[10px] text-sodium">
@@ -89,7 +90,7 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
       )}
 
       <div className={cn(
-        'mt-2 flex items-center gap-3 border-t border-hairline/60 pt-1.5 text-ink-faint',
+        'mt-2 flex items-center gap-3 border-t border-hairline/60 pt-2 text-ink-faint',
         running && 'ps-1.5',
       )}>
         <span className="mono flex items-center gap-1 text-[10px]">

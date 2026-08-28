@@ -290,7 +290,7 @@ async function main(): Promise<void> {
   console.log(C.dim(`    数据 ${join(dir, 'openkanban.db')}`))
   console.log(scheduler.settings.autopilot
     ? `  ${C.amber('▸')} 自动认领${C.dim(` 开启 · 并发 ${String(scheduler.settings.maxConcurrent)}`)}\n`
-    : C.dim('    自动认领当前关闭，可在界面右上角打开。\n'))
+    : C.dim('    自动认领当前关闭，可在界面左侧边栏底部打开。\n'))
 
   if (!process.argv.includes('--no-open')) openBrowser(server.url)
 

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button.tsx'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog.tsx'
+import { Input } from '@/components/ui/input.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
 import {
-  Archive, ArchiveRestore, Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert,
+  Archive, ArchiveRestore, Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert, X,
 } from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
@@ -130,14 +132,21 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [events])
 
-  /** 统一处理验收动作的忙碌态与错误上报。 */
-  const act = async (call: () => Promise<unknown>): Promise<void> => {
+  /**
+   * 统一处理验收动作的忙碌态与错误上报。
+   *
+   * 返回是否成功 —— 保存之后要关掉弹窗，而失败时必须留在原地，
+   * 否则用户的改动连同那条错误一起消失了。
+   */
+  const act = async (call: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true)
     try {
       await call()
       onChanged()
+      return true
     } catch (error) {
       if (error instanceof ApiError) onError(error.code, error.message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -147,9 +156,9 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent
         showCloseButton={false}
-        className="flex h-[82vh] max-h-[820px] w-[860px] max-w-[92vw] flex-col gap-0 overflow-hidden rounded-lg border-hairline bg-panel p-0 sm:max-w-[92vw]"
+        className="flex h-[82vh] max-h-[820px] w-[860px] max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg sm:max-w-[92vw]"
       >
-        <header className="flex items-start gap-2 border-b border-hairline px-3 py-2.5">
+        <header className="flex items-start gap-2 border-b border-hairline px-4 py-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="tag">{task.id}</span>
@@ -157,42 +166,37 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               <span className="chrome-label !text-[9px]">{task.column}</span>
             </div>
             <DialogTitle asChild>
-              <h2 className="mt-1.5 text-[14px] font-medium leading-snug text-ink">{task.subject}</h2>
+              <h2 className="mt-2 text-[15px] font-semibold leading-snug text-ink">{task.subject}</h2>
             </DialogTitle>
-            <DialogDescription className="sr-only">任务详情与执行面板</DialogDescription>
+            <DialogDescription className="mt-1 text-xs text-ink-faint">
+              仓库 <span className="mono">{task.repoPath.split('/').pop()}</span> · 基线{' '}
+              <span className="mono">{task.baseBranch}</span>
+            </DialogDescription>
           </div>
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             disabled={busy || task.column === 'running'}
-            title={task.column === 'running' ? '正在执行的卡片不能归档，先终止执行' : undefined}
+            {...(task.column === 'running' ? { title: '正在执行的卡片不能归档，先终止执行' } : {})}
             onClick={() => {
               void act(() => (archived
                 ? api.unarchive(task.id, task.revision)
                 : api.archive(task.id, task.revision)))
             }}
-            className={cn(
-              'chrome-label flex items-center gap-1 rounded-md border border-hairline px-1.5 py-0.5',
-              'transition-colors hover:border-sodium hover:text-sodium',
-              'disabled:cursor-not-allowed disabled:opacity-40',
-            )}
           >
-            {archived
-              ? <><ArchiveRestore className="size-2.5" />取出</>
-              : <><Archive className="size-2.5" />归档</>}
-          </button>
-          <button
-            onClick={onClose}
-            className="chrome-label rounded-md border border-hairline px-1.5 py-0.5 transition-colors hover:border-hairline-bright hover:text-ink"
-          >
-            esc
-          </button>
+            {archived ? <><ArchiveRestore />取出</> : <><Archive />归档</>}
+          </Button>
+          <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="关闭" title="关闭 · esc">
+            <X />
+          </Button>
         </header>
 
         {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"这一个动作。
             与其把按钮摆在那儿等服务端拒绝，不如直接换成一条说明。 */}
         {archived ? (
-          <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-3 py-2">
-            <Archive className="mt-[2px] size-3 flex-none text-ink-faint" />
-            <p className="min-w-0 text-[11px] leading-snug text-ink-faint">
+          <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-4 py-2.5">
+            <Archive className="mt-[3px] size-3.5 flex-none text-ink-faint" />
+            <p className="min-w-0 text-xs leading-relaxed text-ink-faint">
               已归档{task.archivedAt === undefined ? '' : ` · ${new Date(task.archivedAt).toLocaleString()}`}。
               它留在 {task.column} 列但不出现在看板上，也不会被自动认领。
               取出后回到原位。
@@ -202,17 +206,19 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
 
         {/* 派活 / 取消。只有 ready 的卡能派，running 的能停。 */}
         {!archived && (task.column === 'ready' || task.column === 'running') ? (
-          <div className="flex items-center gap-1.5 border-b border-hairline px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-hairline px-4 py-2.5">
             {task.column === 'ready' ? (
               <>
-                <span className="cjk-label !text-[10px]">派给</span>
+                <span className="text-xs text-ink-faint">派给</span>
                 {agents.length === 0 ? (
                   <span className="cjk-label !text-lamp-fail">没有可用的 Agent CLI</span>
                 ) : agents.map((agent) => (
-                  <button
+                  <Button
                     key={agent.id}
+                    variant="outline"
+                    size="sm"
                     disabled={busy}
-                    title={agent.permissionCaveat?.detail}
+                    {...(agent.permissionCaveat === undefined ? {} : { title: agent.permissionCaveat.detail })}
                     onClick={() => {
                       setBusy(true)
                       void api.run(task.id, agent.id)
@@ -222,43 +228,37 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                         })
                         .finally(() => { setBusy(false) })
                     }}
-                    className={cn(
-                      'chrome-label flex items-center gap-1 rounded-md border border-hairline px-2 py-1',
-                      'transition-colors hover:border-sodium hover:text-sodium',
-                      'disabled:cursor-not-allowed disabled:opacity-40',
-                    )}
                   >
-                    <Play className="size-2.5" />{agent.id}
+                    <Play />{agent.id}
                     {agent.permissionCaveat === undefined ? null : (
-                      <span className="cjk-label !text-[10px] !text-sodium">{agent.permissionCaveat.label}</span>
+                      <span className="text-xs text-sodium">{agent.permissionCaveat.label}</span>
                     )}
-                  </button>
+                  </Button>
                 ))}
               </>
             ) : (
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={busy || latest === undefined}
                 onClick={() => {
                   if (latest === undefined) return
                   setBusy(true)
                   void api.cancel(latest.id).then(() => { onChanged() }).finally(() => { setBusy(false) })
                 }}
-                className={cn(
-                  'chrome-label flex items-center gap-1 rounded-md border border-lamp-fail/50 px-2 py-1 text-lamp-fail',
-                  'transition-colors hover:bg-lamp-fail/10 disabled:opacity-40',
-                )}
+                className="border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
               >
-                <Square className="size-2.5" />终止执行
-              </button>
+                <Square />终止执行
+              </Button>
             )}
           </div>
         ) : null}
 
         {/* 写入范围撞车预警。建议性的 —— Bash 和代码生成器都能绕过它。 */}
         {overlaps.length === 0 ? null : (
-          <div className="flex items-start gap-2 border-b border-lamp-fail/30 bg-lamp-fail/[0.06] px-3 py-2">
-            <TriangleAlert className="mt-[2px] size-3 flex-none text-lamp-fail" />
-            <p className="text-[11px] leading-snug text-lamp-fail">
+          <div className="flex items-start gap-2 border-b border-lamp-fail/30 bg-lamp-fail/[0.06] px-4 py-2.5">
+            <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
+            <p className="text-xs leading-relaxed text-lamp-fail">
               写入范围与正在执行的 <span className="mono">{overlaps.join('、')}</span> 重叠，
               可能撞车。这只是提示，不是锁。
             </p>
@@ -267,13 +267,13 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
 
         {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
         {!archived && task.column === 'review' ? (
-          <div className="border-b border-hairline px-3 py-2">
+          <div className="border-b border-hairline px-4 py-3">
             {/* 失败的执行也停在这一列，所以必须一眼看出这次是成是败 ——
                 否则"通过"按钮会摆在一堆没跑完的活旁边。 */}
             {latest !== undefined && latest.status !== 'completed' ? (
-              <div className="mb-2 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-2 py-1.5">
-                <TriangleAlert className="mt-[2px] size-3 flex-none text-lamp-fail" />
-                <p className="min-w-0 text-[11px] leading-snug text-lamp-fail">
+              <div className="mb-3 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-3 py-2">
+                <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
+                <p className="min-w-0 text-xs leading-relaxed text-lamp-fail">
                   这次执行{latest.status === 'aborted' ? '被终止' : '失败'}了。
                   {latest.diagnostic === undefined ? null : (
                     <span className="mono block break-words">{latest.diagnostic}</span>
@@ -283,24 +283,24 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               </div>
             ) : null}
 
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
               <Action
-                icon={<Check className="size-2.5" />} label="通过" tone="ok" busy={busy}
-                onClick={() => { void act(() => api.accept(task.id, false)) }}
+                icon={<GitMerge />} label="通过并合并" tone="primary" busy={busy}
+                onClick={() => { void act(() => api.accept(task.id, true)) }}
               />
               <Action
-                icon={<GitMerge className="size-2.5" />} label="通过并合并" busy={busy}
-                onClick={() => { void act(() => api.accept(task.id, true)) }}
+                icon={<Check />} label="通过" tone="ok" busy={busy}
+                onClick={() => { void act(() => api.accept(task.id, false)) }}
               />
               <span className="flex-1" />
               <Action
-                icon={<Trash2 className="size-2.5" />} label="废弃" tone="fail" busy={busy}
+                icon={<Trash2 />} label="废弃" tone="fail" busy={busy}
                 onClick={() => { void act(() => api.discard(task.id)) }}
               />
             </div>
 
-            <div className="mt-2 flex gap-1.5">
-              <input
+            <div className="mt-3 flex gap-2">
+              <Input
                 value={feedback}
                 onChange={(event) => { setFeedback(event.target.value) }}
                 onKeyDown={(event) => {
@@ -309,54 +309,65 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                   }
                 }}
                 placeholder="要改什么？写清楚再打回"
-                className={cn(
-                  'min-w-0 flex-1 rounded-md border border-hairline bg-void px-2 py-1 text-[12px]',
-                  'placeholder:text-ink-faint/60 focus:border-sodium-deep focus:outline-none',
-                )}
               />
               <Action
-                icon={<RotateCcw className="size-2.5" />} label="打回" busy={busy || feedback.trim().length === 0}
+                icon={<RotateCcw />} label="打回" busy={busy || feedback.trim().length === 0}
                 onClick={() => {
                   void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
                 }}
               />
             </div>
-            <p className="cjk-label mt-1.5 !text-[10px] !text-ink-faint/70">
+            <p className="mt-2 text-xs leading-relaxed text-ink-faint">
               通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区；
               废弃会删掉分支并把卡退回 Backlog。
             </p>
           </div>
         ) : null}
 
-        <Tabs defaultValue="stream" className="flex min-h-0 flex-1 flex-col gap-0">
-          <TabsList className="h-auto w-full justify-start rounded-none border-b border-hairline bg-transparent p-0">
-            {([['stream', '事件流'], ['diff', 'Diff'], ['spec', '规格'], ['runs', '执行历史']] as const).map(([value, label]) => (
-              <TabsTrigger
-                key={value}
-                value={value}
-                className={cn(
-                  'cjk-label rounded-none border-0 border-b-2 border-transparent px-3 py-1.5',
-                  'data-[state=active]:border-sodium data-[state=active]:!bg-transparent',
-                  'data-[state=active]:!text-sodium data-[state=active]:shadow-none',
-                )}
-              >
-                {label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+        {/* 顺序即翻卡的顺序：先看要做什么，再看做成了什么，最后才是过程。 */}
+        <Tabs defaultValue="spec" className="flex min-h-0 flex-1 flex-col gap-0">
+          <div className="flex-none border-b border-hairline px-4 py-2.5">
+            <TabsList>
+              {([['spec', '规格'], ['diff', 'Diff'], ['stream', '事件流'], ['runs', '执行历史']] as const).map(([value, label]) => (
+                <TabsTrigger key={value} value={value} className="px-3">{label}</TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
+
+          <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
+            {task.feedback === undefined ? null : (
+              <div className="border-b border-sodium-deep/40 bg-sodium/[0.06] px-4 py-3">
+                <p className="mb-1 text-sm font-medium text-sodium">待处理的评审意见</p>
+                <p className="whitespace-pre-wrap text-xs leading-relaxed text-sodium">{task.feedback}</p>
+              </div>
+            )}
+            <TaskEditor
+              task={task}
+              agents={agents}
+              busy={busy}
+              onSave={(edit: TaskEdit) => {
+                // 存完就收工，回到看板；存失败留在原地，让人看见错误再决定。
+                void act(() => api.edit(task.id, task.revision, edit)).then((ok) => { if (ok) onClose() })
+              }}
+            />
+          </TabsContent>
+
+          <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
+            {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
+          </TabsContent>
 
           <TabsContent value="stream" className="mt-0 flex min-h-0 flex-1 flex-col">
             {latest === undefined ? (
               <Empty text="这张卡还没有执行记录" />
             ) : (
               <>
-                <div className="flex items-center gap-2 border-b border-hairline/60 px-3 py-1.5">
+                <div className="flex items-center gap-2 border-b border-hairline/60 px-4 py-2">
                   <span className="chrome-label">{latest.provider}</span>
                   <span className="mono text-[10px] text-ink-faint">{latest.cliVersion}</span>
                   <span className="flex-1" />
                   <span className="mono text-[10px] text-ink-faint">{latest.branch}</span>
                 </div>
-                <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+                <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
                   {events.map((event) => {
                     const style = EVENT_STYLE[event.kind] ?? EVENT_STYLE['raw']
                     return (
@@ -373,7 +384,7 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
                   {events.length === 0 ? <Empty text="等待事件…" /> : null}
                 </div>
                 {toolCounts.length > 0 ? (
-                  <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-hairline/60 px-3 py-1.5">
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-hairline/60 px-4 py-2">
                     {toolCounts.map(([name, count]) => (
                       <span key={name} className="mono text-[10px] text-ink-faint">
                         {name}<span className="text-sodium-deep">×{count}</span>
@@ -385,28 +396,9 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
             )}
           </TabsContent>
 
-          <TabsContent value="diff" className="mt-0 flex min-h-0 flex-1 flex-col">
-            {diff === null ? <Empty text="还没有可看的改动" /> : <DiffView diff={diff} />}
-          </TabsContent>
-
-          <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
-            {task.feedback === undefined ? null : (
-              <div className="border-b border-sodium-deep/40 bg-sodium/[0.06] px-3 py-2">
-                <p className="cjk-label mb-1 !text-[10px] !text-sodium">待处理的评审意见</p>
-                <p className="whitespace-pre-wrap text-[12px] text-sodium">{task.feedback}</p>
-              </div>
-            )}
-            <TaskEditor
-              task={task}
-              agents={agents}
-              busy={busy}
-              onSave={(edit: TaskEdit) => { void act(() => api.edit(task.id, task.revision, edit)) }}
-            />
-          </TabsContent>
-
           <TabsContent value="runs" className="mt-0 min-h-0 flex-1 overflow-y-auto">
             {runs.length === 0 ? <Empty text="暂无执行记录" /> : runs.map((run) => (
-              <div key={run.id} className="border-b border-hairline/60 px-3 py-2">
+              <div key={run.id} className="border-b border-hairline/60 px-4 py-2.5">
                 <div className="flex items-center gap-2">
                   <span className="lamp" data-state={run.status === 'completed' ? 'done' : run.status} />
                   <span className="chrome-label">{run.provider}</span>
@@ -433,34 +425,25 @@ function Action({ icon, label, onClick, busy, tone }: {
   label: string
   onClick: () => void
   busy: boolean
-  tone?: 'ok' | 'fail'
+  /** primary 是这一屏的主动作，实心；ok / fail 只借个色，形制仍是描边。 */
+  tone?: 'primary' | 'ok' | 'fail'
 }): React.JSX.Element {
   return (
-    <button
+    <Button
+      size="sm"
+      variant={tone === 'primary' ? 'default' : 'outline'}
       disabled={busy}
       onClick={onClick}
       className={cn(
-        'cjk-label flex items-center gap-1 rounded-md border border-hairline px-2 py-1 !text-[11px]',
-        'transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-        tone === 'ok' && 'hover:border-lamp-ok hover:!text-lamp-ok',
-        tone === 'fail' && 'hover:border-lamp-fail hover:!text-lamp-fail',
-        tone === undefined && 'hover:border-sodium hover:!text-sodium',
+        tone === 'ok' && 'border-lamp-ok/40 text-lamp-ok hover:bg-lamp-ok/10 hover:text-lamp-ok',
+        tone === 'fail' && 'border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail',
       )}
     >
       {icon}{label}
-    </button>
+    </Button>
   )
 }
 
 function Empty({ text }: { text: string }): React.JSX.Element {
   return <p className="cjk-label p-6 text-center">{text}</p>
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
-  return (
-    <div className="mb-4">
-      <h3 className="cjk-label mb-1.5 border-b border-hairline/50 pb-1 !text-[10px]">{label}</h3>
-      {children}
-    </div>
-  )
 }

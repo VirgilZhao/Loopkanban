@@ -142,6 +142,11 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX idx_attachments_task ON task_attachments(task_id, at);
   `,
+  // 关联卡片：**引用，不是依赖**。blocked_by 拦调度，related 只是"干这张之前
+  // 先看看那几张"，派活时会被展开写进 TASK.md。分成两列而不是给 blocked_by
+  // 加个标记：用到它们的地方（调度判定 vs 渲染规格）从来不重合，混在一列里
+  // 每次都要先过滤一遍，而且写下"参考它"就会连带把自己锁死。旧卡默认没有关联。
+  `ALTER TABLE tasks ADD COLUMN related_json TEXT NOT NULL DEFAULT '[]';`,
 ]
 
 /** 当前代码期望的结构版本。 */

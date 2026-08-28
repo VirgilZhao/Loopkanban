@@ -5,7 +5,7 @@ import type { Column, Task } from '../src/types.ts'
 const task = (id: string, column: Column, position: number): Task => ({
   id, projectId: 'p', revision: 1, column, position,
   description: id, acceptance: [], repoPath: '/r', baseBranch: 'main',
-  blockedBy: [], createdAt: 0, updatedAt: 0,
+  blockedBy: [], relatedTo: [], createdAt: 0, updatedAt: 0,
 })
 
 const board = [

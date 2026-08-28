@@ -24,7 +24,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'ready', position: 1,
     description: id, acceptance: ['ok'], repoPath: '/repo', baseBranch: 'main',
-    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
+    blockedBy: [], relatedTo: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -743,6 +743,28 @@ describe('POST /api/tasks/:id/archive · unarchive', () => {
   })
 })
 
+describe('POST /api/tasks', () => {
+  it('建卡时就能带上关联，同项目的约束一样要过', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const res = await api('/api/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId: PROJECT, description: '照着 t1 再来一张', relatedTo: ['t1'] }),
+    })
+    expect(res.status).toBe(201)
+    const { task: created } = await res.json() as { task: { id: string; relatedTo: string[] } }
+    expect(created.relatedTo).toEqual(['t1'])
+
+    const bad = await api('/api/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId: PROJECT, description: 'x', relatedTo: ['t-nope'] }),
+    })
+    expect(bad.status).toBe(422)
+    expect(await bad.json()).toMatchObject({ error: 'no-such-related-task' })
+  })
+})
+
 describe('PATCH /api/tasks/:id', () => {
   const edit = (id: string, body: unknown) =>
     api(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
@@ -771,6 +793,53 @@ describe('PATCH /api/tasks/:id', () => {
     const cleared = store.getTask(asTaskId('t1'))
     expect(cleared?.model).toBeUndefined()
     expect(cleared?.preferredProvider).toBeUndefined()
+  })
+
+  it('关联同项目的卡：存下来，去重、去掉自指', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    const res = await edit('t1', { expectedRevision: 1, relatedTo: ['t2', 't2', 't1'] })
+    expect(res.status).toBe(422)
+    // 自指是明确的拒绝，不是悄悄过滤 —— 界面上要能说清为什么没存下去。
+    expect(await res.json()).toMatchObject({ error: 'self-related' })
+
+    const ok = await edit('t1', { expectedRevision: 1, relatedTo: ['t2', 't2'] })
+    expect(ok.status).toBe(200)
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual(['t2'])
+  })
+
+  it('关联跨项目、或指向不存在的卡，一律拒绝', async () => {
+    const other = asProjectId('p-other')
+    store.createProject({
+      id: other, name: '另一个', repoPath: '/other', baseBranch: 'main', createdAt: T0,
+    })
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 'x1', column: 'backlog', projectId: other, repoPath: '/other' }))
+
+    const cross = await edit('t1', { expectedRevision: 1, relatedTo: ['x1'] })
+    expect(cross.status).toBe(422)
+    expect(await cross.json()).toMatchObject({ error: 'no-such-related-task' })
+
+    const ghost = await edit('t1', { expectedRevision: 1, relatedTo: ['t-nope'] })
+    expect(ghost.status).toBe(422)
+    // 一条都没存进去 —— 拒绝是整批的。
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual([])
+  })
+
+  it('空数组就是取消全部关联', async () => {
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.createTask(task({ id: 't1', column: 'backlog', relatedTo: [asTaskId('t2')] }))
+    const res = await edit('t1', { expectedRevision: 1, relatedTo: [] })
+    expect(res.status).toBe(200)
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual([])
+  })
+
+  it('正在执行的卡改不动关联 —— 它和改需求是同一件事', async () => {
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.createTask(task({ id: 't1', column: 'running' }))
+    const res = await edit('t1', { expectedRevision: 1, relatedTo: ['t2'] })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'task-running' })
   })
 })
 
@@ -1156,6 +1225,16 @@ describe('DELETE /api/tasks/:id', () => {
     expect((await del('t1', { expectedRevision: 1 })).status).toBe(200)
   })
 
+  it('别的卡对它的关联一并摘掉 —— 悬空的关联会变成一段没法照做的需求', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 't2', column: 'ready', relatedTo: [asTaskId('t1')] }))
+    store.createTask(task({ id: 't3', column: 'ready', blockedBy: [asTaskId('t1')] }))
+
+    expect((await del('t1', { expectedRevision: 1 })).status).toBe(200)
+    expect(store.getTask(asTaskId('t2'))?.relatedTo).toEqual([])
+    expect(store.getTask(asTaskId('t3'))?.blockedBy).toEqual([])
+  })
+
   it('Agent 动过仓库的卡返回 422，库里原样不动', async () => {
     store.createTask(task({ id: 't1', column: 'review' }))
     const res = await del('t1', { expectedRevision: 1 })
@@ -1186,6 +1265,52 @@ describe('DELETE /api/tasks/:id', () => {
     expect((await del('t1', { expectedRevision: 99 })).status).toBe(409)
     expect((await del('t1', {})).status).toBe(400)
     expect((await del('ghost', { expectedRevision: 1 })).status).toBe(404)
+  })
+})
+
+describe('GET /api/runs/:id/log', () => {
+  const RUN = asRunId('run-log')
+
+  beforeEach(() => {
+    store.createTask(task({ id: 't1' }))
+    store.createRun({
+      id: RUN, taskId: asTaskId('t1'), provider: 'claude', cliVersion: '2.1.247',
+      worktreePath: '/wt', branch: 'task/t1', status: 'running', startedAt: T0,
+    })
+  })
+
+  it('一次性读出事件，并给出下次接着问的游标', async () => {
+    store.appendEvent(RUN, 'text', { text: '第一句' }, T0)
+    store.appendEvent(RUN, 'text', { text: '第二句' }, T0 + 1)
+
+    const res = await api(`/api/runs/${RUN}/log`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { events: { seq: number }[]; lastSeq: number; truncated: boolean }
+    expect(body.events).toHaveLength(2)
+    expect(body.lastSeq).toBe(2)
+    expect(body.truncated).toBe(false)
+
+    // 拿着游标再问，只会拿到新增的那条 —— 轮询的调用方不必每次重读全部历史。
+    store.appendEvent(RUN, 'text', { text: '第三句' }, T0 + 2)
+    const next = await api(`/api/runs/${RUN}/log?after=${String(body.lastSeq)}`)
+    const tail = await next.json() as { events: { seq: number }[] }
+    expect(tail.events.map((event) => event.seq)).toEqual([3])
+  })
+
+  it('事件太多时只回最近的一段，并明说截断了', async () => {
+    for (let index = 0; index < 260; index += 1) {
+      store.appendEvent(RUN, 'text', { text: String(index) }, T0 + index)
+    }
+    const body = await (await api(`/api/runs/${RUN}/log`)).json() as
+      { events: { seq: number }[]; truncated: boolean; lastSeq: number }
+    expect(body.truncated).toBe(true)
+    // 留的是最新的那一段：Agent 要的是"现在到哪儿了"。
+    expect(body.events[0]?.seq).toBe(61)
+    expect(body.lastSeq).toBe(260)
+  })
+
+  it('没有这次执行就是 404，而不是一个空日志', async () => {
+    expect((await api('/api/runs/run-nope/log')).status).toBe(404)
   })
 })
 

@@ -23,7 +23,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
   return {
     id: asTaskId(id), projectId: PROJECT, revision: 1, column: 'review', position: 1,
     description: '加个 slugify', acceptance: ['有测试'],
-    repoPath: repo, baseBranch: 'main', blockedBy: [],
+    repoPath: repo, baseBranch: 'main', blockedBy: [], relatedTo: [],
     createdAt: T0, updatedAt: T0, ...rest,
   }
 }

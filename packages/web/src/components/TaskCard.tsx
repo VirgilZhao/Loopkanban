@@ -1,6 +1,8 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, Paperclip, PauseCircle } from 'lucide-react'
+import {
+  Archive, CircleAlert, FolderGit2, Link2, ListChecks, Lock, Paperclip, PauseCircle,
+} from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { taskClockFrom } from '@/lib/task.ts'
@@ -135,6 +137,13 @@ export function TaskCard({
             <Paperclip className="size-3" />{attachments}
           </span>
         )}
+        {/* 关联用普通色，依赖那把锁是警示色：一个是"还有东西要读"，
+            另一个是"这张卡现在动不了"，两者不该长得一样。 */}
+        {task.relatedTo.length > 0 ? (
+          <span className="mono flex items-center gap-1 text-[10px]" title={t('card.related')}>
+            <Link2 className="size-3" />{task.relatedTo.length}
+          </span>
+        ) : null}
         {projectName === undefined ? null : (
           <span className="flex min-w-0 items-center gap-1 truncate text-[10px]">
             <FolderGit2 className="size-3 flex-none" />{projectName}

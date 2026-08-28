@@ -116,6 +116,7 @@ interface TaskRow {
   preferred_provider: string | null
   model: string | null
   blocked_by_json: string
+  related_json: string
   lease_json: string | null
   archived_at: number | null
   created_at: number
@@ -163,6 +164,7 @@ function toTask(row: TaskRow): Task {
     ...(preferred === null ? {} : { preferredProvider: preferred }),
     ...(row.model === null ? {} : { model: row.model }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
+    relatedTo: (JSON.parse(row.related_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
@@ -388,14 +390,14 @@ export class Storage {
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
         acceptance_json, repo_path, base_branch, preferred_provider, model,
-        blocked_by_json, lease_json, archived_at,
+        blocked_by_json, related_json, lease_json, archived_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
-      JSON.stringify(task.blockedBy),
+      JSON.stringify(task.blockedBy), JSON.stringify(task.relatedTo),
       task.lease === undefined ? null : JSON.stringify(task.lease),
       task.archivedAt ?? null,
       task.createdAt, task.updatedAt,
@@ -429,14 +431,14 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
-        blocked_by_json = ?, lease_json = ?,
+        blocked_by_json = ?, related_json = ?, lease_json = ?,
         archived_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
       next.preferredProvider ?? null, next.model ?? null,
-      JSON.stringify(next.blockedBy),
+      JSON.stringify(next.blockedBy), JSON.stringify(next.relatedTo),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.archivedAt ?? null,
       next.updatedAt,
@@ -458,7 +460,7 @@ export class Storage {
    *
    * @param id - 要删的任务。
    * @param expectedRevision - 调用方读到的 revision，CAS 凭据。
-   * @param cascade - 摘掉这条依赖之后的下游任务新值（见 `dropDependency`）。
+   * @param cascade - 摘掉指向它的引用之后，那些卡的新值（见 `dropReferences`）。
    * @returns 是否删成功；false 表示期间已被他人改动，调用方应重读后重试。
    */
   deleteTask(id: TaskId, expectedRevision: number, cascade: readonly Task[] = []): boolean {

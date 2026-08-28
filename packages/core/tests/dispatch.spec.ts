@@ -17,7 +17,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     acceptance: ['ok'],
     repoPath: '/repo',
     baseBranch: 'main',
-    blockedBy: [],
+    blockedBy: [], relatedTo: [],
     createdAt: T0,
     updatedAt: T0,
     ...rest,

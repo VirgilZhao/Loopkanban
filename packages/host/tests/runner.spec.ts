@@ -68,7 +68,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     description: '加个 greet 函数\n\n要有测试',
     acceptance: ['greet.js 存在', '有单测'],
     repoPath: repo, baseBranch: 'main',
-    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
+    blockedBy: [], relatedTo: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -120,6 +120,84 @@ describe('renderTaskSpec / renderPrompt', () => {
 
   it('prompt 指向 TASK.md 而不是把长文堆进命令行', () => {
     expect(renderPrompt(task({ id: 't1' }))).toContain('TASK.md')
+  })
+
+  it('没有关联时不摆一个空的「关联任务」节', () => {
+    expect(renderTaskSpec(task({ id: 't1' }))).not.toContain('## 关联任务')
+    expect(renderPrompt(task({ id: 't1' }))).not.toContain('关联')
+  })
+
+  it('关联的卡整段展开：状态、正文、验收标准都在', () => {
+    const other = task({
+      id: 't2', column: 'done',
+      description: '统一错误码\n\n所有接口的错误都走同一份表',
+      acceptance: ['errors.ts 导出 CODES'],
+    })
+    const spec = renderTaskSpec(task({ id: 't1', relatedTo: [other.id] }), [], [], [other])
+    expect(spec).toContain('## 关联任务')
+    expect(spec).toContain('t2')
+    expect(spec).toContain('已完成')
+    // 光给一串 id 等于没给：Agent 没有任何办法查到那张卡长什么样。
+    expect(spec).toContain('所有接口的错误都走同一份表')
+    expect(spec).toContain('errors.ts 导出 CODES')
+  })
+
+  it('关联卡的身份要写明是参考，否则 Agent 会顺手把它们的验收标准也做掉', () => {
+    const other = task({ id: 't2', description: '另一张卡' })
+    const spec = renderTaskSpec(task({ id: 't1', relatedTo: [other.id] }), [], [], [other])
+    expect(spec).toContain('参考资料')
+    expect(renderPrompt(task({ id: 't1' }), [], false, [], [other])).toContain('参考资料')
+  })
+
+  it('太长的关联描述只截前一段，并且明说截了', () => {
+    const other = task({ id: 't2', description: `长${'字'.repeat(4000)}` })
+    const spec = renderTaskSpec(task({ id: 't1' }), [], [], [other])
+    expect(spec).toContain('只截取前一段')
+    expect(spec.length).toBeLessThan(3000)
+  })
+
+  it('prompt 里点名关联的卡 —— TASK.md 里有正文，但 prompt 才是必读的那份', () => {
+    const other = task({ id: 't2', description: '统一错误码' })
+    const prompt = renderPrompt(task({ id: 't1', relatedTo: [other.id] }), [], false, [], [other])
+    expect(prompt).toContain('t2')
+    expect(prompt).toContain('统一错误码')
+    expect(prompt).toContain('关联任务')
+  })
+})
+
+describe('关联任务', () => {
+  it('派活时读的是此刻的库 —— 关联卡改过需求，这次执行看到的就是新的那份', async () => {
+    store.createTask(task({ id: 't2', column: 'done', description: '统一错误码' }))
+    store.createTask(task({ id: 't1', relatedTo: [asTaskId('t2')] }))
+
+    const ref = store.getTask(asTaskId('t2'))
+    if (ref === null) throw new Error('setup')
+    store.commitTask({ ...ref, revision: ref.revision + 1, description: '错误码改走 errors.ts' })
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const spec = await readFile(join(worktreeDir(repo, 't1'), 'TASK.md'), 'utf8')
+    expect(spec).toContain('## 关联任务')
+    expect(spec).toContain('错误码改走 errors.ts')
+    expect(spec).not.toContain('统一错误码')
+  })
+
+  it('关联指向一张已经不在的卡时跳过它，而不是在规格里留一行查无此卡', async () => {
+    store.createTask(task({ id: 't1', relatedTo: [asTaskId('t-gone')] }))
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const spec = await readFile(join(worktreeDir(repo, 't1'), 'TASK.md'), 'utf8')
+    expect(spec).not.toContain('## 关联任务')
+    expect(spec).not.toContain('t-gone')
   })
 })
 

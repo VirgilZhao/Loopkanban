@@ -532,6 +532,9 @@ export default function App(): React.JSX.Element {
           <RunPanel
             task={selected}
             project={projectById.get(selected.projectId) ?? null}
+            // 只给同项目的卡：关联跨不了项目 —— 任务在这个项目派生的 worktree
+            // 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
+            siblings={tasks.filter((t) => t.projectId === selected.projectId && t.id !== selected.id)}
             agents={agents}
             onChanged={() => {
               // 动过一次（保存、派活、留言、归档……）就不再是"没写过的新卡"，

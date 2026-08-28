@@ -10,7 +10,7 @@ npx loopkanban
 启动后自动打开浏览器。规划文档见 [docs/PRD.md](docs/PRD.md)。
 
 需要 Node ≥ 22.5（用到内置的 `node:sqlite`），以及本机已装 `claude`、`codex`、
-`opencode` 其中之一。发布包 148 KB、**零运行时依赖**。
+`opencode` 其中之一。发布包 216 KB、**零运行时依赖**。
 
 想让它一直活着（自动认领的意义就在于你不用盯着）：
 
@@ -32,12 +32,42 @@ loopkanban service install   # 确认无误再装
 - **worktree 隔离**。Agent 不碰你的主工作区，跑飞了删掉分支即可。
 - **卡片可以带附件**。截图、PDF、Word 拖进卡里，派活时它们会被拷进工作区并在
   TASK.md 里点名交给 CLI —— 说不清楚的需求，给它看。
+- **卡片可以互相关联**。在规格里挑几张同项目的卡，派活时它们的正文会被整段写进
+  TASK.md 的「关联任务」一节 —— 接口是上一张定的、命名沿用那次改造，Agent 照着
+  已经定下来的东西做。关联是**引用不是依赖**：它不拦这张卡的执行（那是
+  `blockedBy` 的事），所以参考一张永远不会做完的卡也没关系。
+- **Agent 可以用这个看板**。`loopkanban mcp` 起一个 MCP server，查任务、建卡、
+  改需求、认领执行、跟进日志都能从 Agent 那边发起 —— 见下面「接给 Agent 用」。
 - **只监听 `127.0.0.1`**。远程访问走 SSH 端口转发。
 - **文件浏览与命令行**。顶栏可以从看板切到「文件浏览」：逛项目仓库、切到某张卡
   的 worktree 看 Agent 到底改了什么，底下还挂着一个命令行，命令就跑在你正看着的
   那个目录里。路径带围栏 —— 只能落在已登记项目的仓库里面，且判定画在 `realpath`
   上，一条指向外面的符号链接爬不出去。命令用的是你自己的 shell 与环境（**不清洗
   凭证**，否则 `git push` 会神秘地失败），每条一个新进程，超时按进程组整棵收掉。
+
+## 接给 Agent 用（MCP）
+
+看板先跑着，然后把 MCP server 接到你的 CLI 上：
+
+```bash
+claude mcp add loopkanban -- loopkanban mcp
+```
+
+它连的是**正在跑的那个看板**（地址与 token 从数据目录里读，所以看板得开着；
+数据目录不在默认位置时给 `--data <dir>`，或用 `LOOPKANBAN_URL` / `LOOPKANBAN_TOKEN`
+直接指）。给出来的工具：
+
+| 工具 | 干什么 |
+|---|---|
+| `list_projects` / `list_agents` | 有哪些项目、本机装了哪些 CLI |
+| `list_tasks` / `get_task` | 列卡、读一张卡的全部需求（关联的卡连正文一起展开） |
+| `create_task` / `update_task` / `comment_task` | 建卡、改需求与关联、在讨论里留话 |
+| `move_task` | 在 Backlog 与 Ready 之间搬 |
+| `claim_task` / `run_status` / `cancel_run` | 认领执行、跟进、终止 |
+
+**验收通过与废弃不给。** 领域层堵死了 `running → done` 就是不让干活的人自己判定
+活干完了；把它接到 MCP 上等于给这道门配一把从里面开的钥匙。认领之后卡照样进
+Review 等人判读。
 
 ## 结构
 
@@ -51,7 +81,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 433 个测试
+pnpm test            # 589 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

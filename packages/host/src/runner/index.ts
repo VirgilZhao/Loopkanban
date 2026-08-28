@@ -46,6 +46,9 @@ export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000
  */
 const STDERR_KEEP_BYTES = 64 * 1024
 
+/** 多快算"一起步就死"。这个量级的失败不可能是活干砸了，只可能是没跑起来。 */
+const IMMEDIATE_FAILURE_MS = 10_000
+
 export interface RunnerOptions {
   readonly storage: Storage
   readonly bus: RunBus
@@ -265,6 +268,8 @@ export class Runner {
     /** Agent 这一轮的回复。finished 事件的 summary 优先，没有就退回最后一段正文。 */
     let answer: string | undefined
     let lastText: string | undefined
+    /** 这一轮有没有真的干出点什么（说过话或用过工具）。 */
+    let produced = false
 
     const stderrChunks: Buffer[] = []
     let stderrBytes = 0
@@ -294,6 +299,7 @@ export class Runner {
           lastSessionKey = key
           sessionId = event.sessionId
         }
+        if (event.kind === 'text' || event.kind === 'tool') produced = true
         if (event.kind === 'text' && event.text.trim().length > 0) lastText = event.text
         if (event.kind === 'finished') {
           finishedOk = event.ok
@@ -337,9 +343,18 @@ export class Runner {
       text: `退出 code=${String(outcome.code)} 树已静默=${String(outcome.treeQuiesced)} 改动=${changed ? '有' : '无'}`,
     })
 
-    const failureDetail = diagnostic
-      ?? (stderrText.length > 0 ? stderrText.slice(0, 512) : undefined)
-      ?? `exit=${String(outcome.code)}`
+    const failureDetail = [
+      diagnostic
+        ?? (stderrText.length > 0 ? stderrText.slice(0, 512) : undefined)
+        ?? `exit=${String(outcome.code)}`,
+      // 会话刚建立就死、一句话一个工具都没有 —— 这种形状的失败几乎都出在
+      // CLI 自己那边（默认模型解析不出、配置有问题、没登录），而各家给的
+      // 错误信息又往往含糊到没法照做。给一条能试的线索，不下结论。
+      !produced && this.now - run.startedAt < IMMEDIATE_FAILURE_MS
+        ? '（会话刚建立就失败，没有任何输出：多半是这个 CLI 自己的默认模型或配置有问题，'
+          + '试试在卡上明确指定一个模型，或者手动跑一次同样的命令看它怎么说）'
+        : null,
+    ].filter((part) => part !== null).join(' ')
 
     // 主动取消不是失败：`aborted` 与 `failed` 在执行历史和成功率里必须分开，
     // 否则"我自己按的停止"会被算进失败率。

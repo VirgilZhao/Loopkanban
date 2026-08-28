@@ -398,6 +398,36 @@ describe('讨论的生命周期', () => {
   })
 })
 
+describe('一起步就死的执行', () => {
+  it('一句话一个工具都没有就失败：诊断里给一条能照做的线索', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'finished', ok: false, diagnostic: 'UnknownError: 服务端错误' }),
+    ], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const diagnostic = store.getRun(started.run.id)?.diagnostic ?? ''
+    // 原始诊断照留，线索只是附在后面 —— 不替 CLI 下结论。
+    expect(diagnostic).toContain('UnknownError: 服务端错误')
+    expect(diagnostic).toContain('明确指定一个模型')
+  })
+
+  it('干过活的那种失败不给这条线索 —— 它的失败另有原因', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'text', text: '我看了一圈代码' }),
+      JSON.stringify({ kind: 'finished', ok: false, diagnostic: '测试没过' }),
+    ], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.getRun(started.run.id)?.diagnostic).toBe('测试没过')
+  })
+})
+
 describe('崩溃恢复', () => {
   it('reconcile 把上次留下的 running Run 标记为 aborted', () => {
     store.createTask(task({ id: 't1' }))

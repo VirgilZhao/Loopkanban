@@ -392,7 +392,13 @@ export function RunPanel({
               onSend={(body) => {
                 setBusy(true)
                 void api.comment(task.id, body)
-                  .then(({ comments: next }) => { setComments(next); onChanged() })
+                  .then(({ comments: next }) => {
+                    setComments(next)
+                    onChanged()
+                    // 说完就收工，回到看板 —— 话已经带给下一轮了，留在这儿没事可做。
+                    // 失败则留在原地，让人看见错误再决定（同保存）。
+                    onClose()
+                  })
                   .catch((error: unknown) => {
                     if (error instanceof ApiError) onError(error.code, error.message)
                   })

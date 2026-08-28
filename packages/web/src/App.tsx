@@ -12,6 +12,7 @@ import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
+import { maybe, useT, type Translate } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
 import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
@@ -27,26 +28,11 @@ const CLOCK_MS = 5_000
  * 领域错误码 → 用户能照做的说明。
  *
  * 拖拽被拒时卡片会弹回原位，如果不解释清楚，用户只会觉得"拖不动"。
- * 所以这里给的不是错误名，而是下一步该做什么。
+ * 所以这里给的不是错误名，而是下一步该做什么。文案在 `lib/i18n` 的
+ * `err.*` 里，两种语言各一份；没有对应文案的码原样端出来。
  */
-const ERROR_HINT: Record<string, string> = {
-  'illegal-transition': '不允许这样跨列。流转顺序是 Backlog → Ready → Running → Review → Done。',
-  'blocked-by-dependency': '它依赖的任务还没完成。',
-  'lease-held': '这张卡正被某个 Agent 持有，等它跑完或超时释放。',
-  'revision-conflict': '这张卡刚被改动过，已为你重新加载。',
-  'provider-unavailable': '这个 Agent CLI 本机没有探测到。装好它，或者换一个。',
-  'launch-failed': '起进程失败。多半是 worktree 建不出来 —— 检查仓库路径和基线分支。',
-  'no-runner': '当前实例没有启用执行器，只能看板不能派活。',
-  'dirty-worktree': '你的主工作区有未提交改动，先处理干净再合并。改动已经提交在任务分支上，不会丢。',
-  'wrong-branch': '你的主工作区不在基线分支上。改动已经提交在任务分支上，切回去再合并即可。',
-  'no-run': '这张卡还没有执行记录。',
-  'no-worktree': '这次执行没留下工作区（多半是起进程就失败了），没有东西可验收 —— 去讨论里说一句让它重跑，或者废弃。',
-  'task-archived': '这张卡已归档。要动它先取消归档 —— 归档的卡是冻结的，不会被自动认领。',
-  'already-archived': '这张卡已经归档了。',
-  'not-archived': '这张卡没有归档。',
-  'not-deletable': '只有 Backlog 与 Ready 的卡能删 —— 再往后 Agent 已经动过仓库了。要删就先废弃回想法池。',
-  'no-project': '还没有项目。先在左侧新增一个 —— 任务得知道自己在哪个仓库里干活。',
-  'task-not-found': '这张卡已经不在了，可能刚被删掉。',
+function explain(t: Translate, code: string, detail: string): string {
+  return maybe(t, `err.${code}`, `${code} · ${detail}`)
 }
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
@@ -60,6 +46,7 @@ function notify(title: string, body: string): void {
 }
 
 export default function App(): React.JSX.Element {
+  const t = useT()
   const [tasks, setTasks] = useState<Task[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   // 看哪一堆卡：概览（全部）或某个项目。
@@ -131,9 +118,9 @@ export default function App(): React.JSX.Element {
       previous.set(task.id, task.column)
       if (first || before === undefined || before === task.column) continue
       if (task.column !== 'review' || task.archivedAt !== undefined) continue
-      notify('待验收', taskTitle(task))
+      notify(t('notify.review'), taskTitle(task))
     }
-  }, [tasks])
+  }, [tasks, t])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -212,10 +199,10 @@ export default function App(): React.JSX.Element {
         await refresh()
         setSelectedId(task.id)
       } catch (error) {
-        if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+        if (error instanceof ApiError) setNotice({ text: explain(t, error.code, error.message), tone: 'warn' })
       }
     })()
-  }, [refresh, activeProject])
+  }, [refresh, activeProject, t])
 
   const changeScheduler = useCallback(async (patch: Parameters<typeof api.setScheduler>[0]) => {
     setSchedulerBusy(true)
@@ -227,11 +214,11 @@ export default function App(): React.JSX.Element {
       setScheduler(await api.setScheduler(patch))
       await refresh()
     } catch (error) {
-      if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+      if (error instanceof ApiError) setNotice({ text: explain(t, error.code, error.message), tone: 'warn' })
     } finally {
       setSchedulerBusy(false)
     }
-  }, [refresh])
+  }, [refresh, t])
 
   const handleDragEnd = useCallback(async (event: DragEndEvent) => {
     setDraggingId(null)
@@ -262,13 +249,13 @@ export default function App(): React.JSX.Element {
     } catch (error) {
       if (error instanceof ApiError) {
         setNotice({
-          text: ERROR_HINT[error.code] ?? `${error.code} · ${error.message}`,
+          text: explain(t, error.code, error.message),
           tone: error.status === 409 ? 'info' : 'warn',
         })
       }
       await refresh()
     }
-  }, [tasks, refresh])
+  }, [tasks, refresh, t])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
   const runningCount = byColumn.running.length
@@ -290,7 +277,7 @@ export default function App(): React.JSX.Element {
           setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, name } : p)))
           void api.renameProject(project.id, name)
             .catch((error: unknown) => {
-              if (error instanceof ApiError) setNotice({ text: `${error.code} · ${error.message}`, tone: 'warn' })
+              if (error instanceof ApiError) setNotice({ text: explain(t, error.code, error.message), tone: 'warn' })
               void refresh()
             })
         }}
@@ -311,14 +298,16 @@ export default function App(): React.JSX.Element {
           <SidebarTrigger />
           <span className="h-4 w-px bg-hairline" />
           <h1 className="flex-none whitespace-nowrap text-[13px] font-semibold tracking-tight text-ink">
-            {view.kind === 'overview' ? '概览' : projectById.get(view.id)?.name ?? '项目'}
+            {view.kind === 'overview' ? t('header.overview') : projectById.get(view.id)?.name ?? t('header.project')}
           </h1>
           {view.kind === 'overview' ? (
-            <span className="chrome-label !text-[8px]">所有项目</span>
+            <span className="chrome-label !text-[8px]">{t('header.allProjects')}</span>
           ) : (
             <span className="mono min-w-0 flex-1 truncate text-[10px] text-ink-faint" title={projectById.get(view.id)?.repoPath}>
               {projectById.get(view.id)?.repoPath}
-              <span className="ms-2">基线 {projectById.get(view.id)?.baseBranch}</span>
+              <span className="ms-2">
+                {t('header.base', { branch: projectById.get(view.id)?.baseBranch ?? '' })}
+              </span>
             </span>
           )}
           <span className="flex-1" />
@@ -340,7 +329,7 @@ export default function App(): React.JSX.Element {
               onClick={() => { setNotice(null) }}
               className="chrome-label rounded-md border border-current/30 px-1.5 py-0.5 opacity-70 transition-opacity hover:opacity-100"
             >
-              dismiss
+              {t('header.dismiss')}
             </button>
           </div>
         )}
@@ -392,7 +381,7 @@ export default function App(): React.JSX.Element {
             agents={agents}
             onChanged={() => { void refresh() }}
             onError={(code, detail) => {
-              setNotice({ text: ERROR_HINT[code] ?? `${code} · ${detail}`, tone: 'warn' })
+              setNotice({ text: explain(t, code, detail), tone: 'warn' })
             }}
             onClose={() => { setSelectedId(null) }}
           />

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
 
@@ -35,12 +36,11 @@ function draftOf(task: Task): Draft {
 }
 
 export function TaskEditor({ task, project, agents, busy, onSave }: Props): React.JSX.Element {
+  const t = useT()
   const [draft, setDraft] = useState(() => draftOf(task))
   // 两种冻结，同一套只读：正在执行的、以及归档的。字段上的 disabled 全靠它。
   const locked = task.column === 'running' || task.archivedAt !== undefined
-  const lockReason = task.column === 'running'
-    ? '正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。'
-    : '已归档，内容冻结。要改先从归档里取出。'
+  const lockReason = task.column === 'running' ? t('editor.lockedRunning') : t('editor.lockedArchived')
 
   // 卡片被外部改动（留言回队列、执行完成）后重置表单，避免拿着旧值去覆盖新状态。
   useEffect(() => { setDraft(draftOf(task)) }, [task.id, task.revision])
@@ -73,13 +73,13 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
 
         {/* 卡片没有标题字段：一句话的活写一句话，复杂的活写一段。
             要显示"叫什么"的地方（分支名、提交信息、通知）取第一行。 */}
-        <Field label="任务内容" hint="第一行会被当作这张卡的名字">
+        <Field label={t('editor.description')} hint={t('editor.descriptionHint')}>
           <Textarea
             value={draft.description}
             disabled={locked}
             rows={6}
             autoFocus={draft.description.trim().length === 0}
-            placeholder="要 Agent 做什么？"
+            placeholder={t('editor.descriptionPlaceholder')}
             onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
             // Textarea 用的是 field-sizing:content，高度跟着内容走、rows 说了不算，
             // 所以要给它更大的起始高度得抬 min-h（rows 只在不支持的浏览器上兜底）。
@@ -89,8 +89,8 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
 
         {/* 验收标准是可选的，所以默认收起来 —— 没写的时候它不该占着屏幕。 */}
         <Collapsible
-          label="验收标准"
-          hint="可选。写了 Agent 就照着做、你就照着验；不写也能派活"
+          label={t('editor.acceptance')}
+          hint={t('editor.acceptanceHint')}
           count={draft.acceptance.filter((item) => item.trim().length > 0).length}
           defaultOpen={task.acceptance.length > 0}
         >
@@ -100,14 +100,14 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
                 <Input
                   value={item}
                   disabled={locked}
-                  placeholder="一条可判定的标准"
+                  placeholder={t('editor.acceptancePlaceholder')}
                   onChange={(e) => { setAcceptance(index, e.target.value) }}
                 />
                 <Button
                   variant="outline"
                   size="icon-sm"
-                  aria-label="删除这条"
-                  title="删除这条"
+                  aria-label={t('editor.acceptanceRemove')}
+                  title={t('editor.acceptanceRemove')}
                   disabled={locked || draft.acceptance.length === 1}
                   onClick={() => {
                     setDraft((d) => ({ ...d, acceptance: d.acceptance.filter((_, i) => i !== index) }))
@@ -124,12 +124,12 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
               disabled={locked}
               onClick={() => { setDraft((d) => ({ ...d, acceptance: [...d.acceptance, ''] })) }}
             >
-              <Plus />新增一条
+              <Plus />{t('editor.acceptanceAdd')}
             </Button>
           </div>
         </Collapsible>
 
-        <Field label="指定执行器" hint="不指定就由调度器按可用性挑一个">
+        <Field label={t('editor.provider')} hint={t('editor.providerHint')}>
           <div className="flex flex-wrap gap-2">
             <Chip
               active={draft.preferredProvider === undefined}
@@ -140,7 +140,7 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
                 setDraft((d) => ({ ...d, preferredProvider: undefined, model: undefined }))
               }}
             >
-              任意
+              {t('editor.providerAny')}
             </Chip>
             {agents.map((agent) => (
               <Chip
@@ -168,20 +168,18 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
         {/* 只有选定了执行器、且那个 CLI 认 --model 时才出现这一栏。
             能不能指定模型是**探测**出来的，不是写死的。 */}
         {picked === undefined ? null : !picked.canPickModel ? (
-          <Field label="模型">
-            <p className="text-xs text-ink-faint">
-              这个版本的 {picked.id} 没有 <span className="mono">--model</span> 参数，
-              只能用它自己的默认模型。
-            </p>
+          <Field label={t('editor.model')}>
+            <p className="text-xs text-ink-faint">{t('editor.modelUnsupported', { provider: picked.id })}</p>
           </Field>
         ) : options.length === 0 ? (
-          <Field label="模型">
-            <p className="text-xs text-ink-faint">
-              没能列出 {picked.id} 的可选模型（离线或它报不出来），这次只能用它自己的默认。
-            </p>
+          <Field label={t('editor.model')}>
+            <p className="text-xs text-ink-faint">{t('editor.modelUnknown', { provider: picked.id })}</p>
           </Field>
         ) : (
-          <Field label="模型" hint={`${String(picked.models.length)} 个可选；不选就用 ${picked.id} 自己的默认`}>
+          <Field
+            label={t('editor.model')}
+            hint={t('editor.modelHint', { count: picked.models.length, provider: picked.id })}
+          >
             {/* 只可选、不可填：能选的都是探测出来的，手打一个 CLI 不认的名字
                 只会在派活那一刻才炸。卡上原有的模型即使不在清单里也留着，
                 免得打开一张老卡就把它的选择悄悄抹掉。 */}
@@ -199,26 +197,26 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
                 'disabled:cursor-not-allowed disabled:opacity-50',
               )}
             >
-              <option value="">（默认模型）</option>
+              <option value="">{t('editor.modelDefault')}</option>
               {options.map((model) => <option key={model} value={model}>{model}</option>)}
             </select>
           </Field>
         )}
 
-        <Field label="项目" hint="任务在它派生出来的 worktree 里执行，做完再合回基线">
+        <Field label={t('editor.project')} hint={t('editor.projectHint')}>
           <div className="rounded-md border border-hairline px-3 py-2">
             <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
               <FolderGit2 className="size-3.5 flex-none text-ink-faint" />
-              {project?.name ?? '未知项目'}
+              {project?.name ?? t('panel.unknownProject')}
             </p>
             <p className="mono mt-1 break-all text-xs text-ink-faint">{task.repoPath}</p>
-            <p className="mono text-xs text-ink-faint">基线 {task.baseBranch}</p>
+            <p className="mono text-xs text-ink-faint">{t('editor.baseline', { branch: task.baseBranch })}</p>
           </div>
         </Field>
       </div>
 
       <div className="flex flex-none items-center gap-2 border-t border-hairline px-4 py-3">
-        <span className="text-xs text-ink-faint">{dirty ? '有未保存的改动' : '已保存'}</span>
+        <span className="text-xs text-ink-faint">{dirty ? t('editor.dirty') : t('editor.saved')}</span>
         <span className="flex-1" />
         <Button
           size="sm"
@@ -230,7 +228,7 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
             })
           }}
         >
-          保存
+          {t('editor.save')}
         </Button>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { RunStats } from '@/types.ts'
 
@@ -9,6 +10,7 @@ function duration(ms: number | null): string {
 }
 
 export function StatsBar({ stats }: { stats: RunStats }): React.JSX.Element | null {
+  const t = useT()
   if (stats.totalRuns === 0) return null
 
   const rate = stats.completed + stats.failed === 0
@@ -19,11 +21,11 @@ export function StatsBar({ stats }: { stats: RunStats }): React.JSX.Element | nu
     <footer className="flex flex-none flex-wrap items-center gap-x-5 gap-y-1 border-t border-hairline px-4 py-1.5">
       <Cell label="runs" value={String(stats.totalRuns)} />
       <Cell
-        label="成功率"
+        label={t('stats.successRate')}
         value={rate === null ? '—' : `${String(Math.round(rate * 100))}%`}
         tone={rate !== null && rate < 0.6 ? 'warn' : undefined}
       />
-      <Cell label="失败" value={String(stats.failed)} tone={stats.failed > 0 ? 'warn' : undefined} />
+      <Cell label={t('stats.failed')} value={String(stats.failed)} tone={stats.failed > 0 ? 'warn' : undefined} />
 
       <span className="h-3 w-px bg-hairline" />
 
@@ -39,9 +41,9 @@ export function StatsBar({ stats }: { stats: RunStats }): React.JSX.Element | nu
 
       {/* 成本只有 claude 报，codex 不报 —— 所以这是"已知部分"，不是全部。 */}
       <Cell
-        label="已知成本"
+        label={t('stats.cost')}
         value={stats.costUsd > 0 ? `$${stats.costUsd.toFixed(2)}` : '—'}
-        title="只有会上报成本的 CLI 才计入"
+        title={t('stats.costHint')}
       />
       <Cell label="tokens" value={`${compact(stats.inputTokens)} / ${compact(stats.outputTokens)}`} />
     </footer>

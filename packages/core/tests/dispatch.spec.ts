@@ -68,7 +68,7 @@ describe('planDispatch', () => {
     // claude 已经两个在跑，它的额度满了；codex 一个都没跑，照派不误。
     expect(result.dispatches.map((d) => d.taskId)).toEqual(['b'])
     expect(result.skipped).toEqual([
-      { taskId: 'a', reason: 'provider-limit-reached', detail: 'claude 并发已满 (2)' },
+      { taskId: 'a', reason: 'provider-limit-reached', detail: 'claude 并发已满 (2)', params: ['claude', '2'] },
     ])
   })
 

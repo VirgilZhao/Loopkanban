@@ -1,4 +1,5 @@
 import { Minus, Plus } from 'lucide-react'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { SchedulerSettings } from '@/types.ts'
 
@@ -14,6 +15,7 @@ interface Props {
  * 所以给它一整块地方，而不是挤在工具条里当第七颗按钮。
  */
 export function Autopilot({ settings, running, busy, onChange }: Props): React.JSX.Element {
+  const t = useT()
   const { autopilot, maxPerProvider } = settings
 
   return (
@@ -22,7 +24,7 @@ export function Autopilot({ settings, running, busy, onChange }: Props): React.J
       <button
         disabled={busy}
         onClick={() => { onChange({ autopilot: !autopilot }) }}
-        title={autopilot ? '关闭后不再自动认领，已在跑的任务不受影响' : '打开后 Ready 里的卡会被自动派给 Agent'}
+        title={autopilot ? t('autopilot.turnOff') : t('autopilot.turnOn')}
         className={cn(
           'flex w-full items-center gap-2 rounded-md border px-2 py-1.5 transition-colors',
           'disabled:cursor-not-allowed disabled:opacity-50',
@@ -47,23 +49,23 @@ export function Autopilot({ settings, running, busy, onChange }: Props): React.J
         </span>
         <span className="chrome-label !text-current">autopilot</span>
         <span className="flex-1" />
-        <span className="cjk-label !text-[10px] !text-current">{autopilot ? '已开启' : '已关闭'}</span>
+        <span className="cjk-label !text-[10px] !text-current">{autopilot ? t('autopilot.on') : t('autopilot.off')}</span>
       </button>
 
       <div className="flex items-center gap-1.5 px-0.5">
         {/* 并发上限。开着自动驾驶时才有意义，所以关着就淡下去。 */}
         <div className={cn('flex items-center gap-1', !autopilot && 'opacity-40')}>
           {/* 上限是按执行器算的：claude 排满了不该顺带把 codex 也堵住。 */}
-          <span className="chrome-label" title="每个执行器的并发上限">limit / agent</span>
+          <span className="chrome-label" title={t('autopilot.limitHint')}>limit / agent</span>
           <Step
-            label="减少每个执行器的并发" disabled={busy || maxPerProvider <= 1}
+            label={t('autopilot.less')} disabled={busy || maxPerProvider <= 1}
             onClick={() => { onChange({ maxPerProvider: maxPerProvider - 1 }) }}
           >
             <Minus className="size-2.5" />
           </Step>
           <span className="mono w-3 text-center text-[12px] text-ink">{maxPerProvider}</span>
           <Step
-            label="增加每个执行器的并发" disabled={busy}
+            label={t('autopilot.more')} disabled={busy}
             onClick={() => { onChange({ maxPerProvider: maxPerProvider + 1 }) }}
           >
             <Plus className="size-2.5" />

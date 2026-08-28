@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ChevronRight, CornerLeftUp, Folder, FolderGit2, House } from 'lucide-react'
 import { api } from '@/api.ts'
 import { Button } from '@/components/ui/button.tsx'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { DirListing } from '@/types.ts'
 
@@ -19,6 +20,7 @@ interface Props {
  * 句柄不给路径，而服务端要的正是路径。
  */
 export function DirectoryPicker({ start, onPick, onCancel }: Props): React.JSX.Element {
+  const t = useT()
   const [listing, setListing] = useState<DirListing | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
@@ -41,8 +43,8 @@ export function DirectoryPicker({ start, onPick, onCancel }: Props): React.JSX.E
         <Button
           variant="outline"
           size="icon-sm"
-          aria-label="上一级"
-          title="上一级"
+          aria-label={t('picker.up')}
+          title={t('picker.up')}
           disabled={busy || listing?.parent === null || listing === null}
           onClick={() => { if (listing?.parent != null) open(listing.parent) }}
         >
@@ -51,8 +53,8 @@ export function DirectoryPicker({ start, onPick, onCancel }: Props): React.JSX.E
         <Button
           variant="outline"
           size="icon-sm"
-          aria-label="回到家目录"
-          title="回到家目录"
+          aria-label={t('picker.home')}
+          title={t('picker.home')}
           disabled={busy}
           onClick={() => { open() }}
         >
@@ -67,9 +69,9 @@ export function DirectoryPicker({ start, onPick, onCancel }: Props): React.JSX.E
         {error !== null ? (
           <p className="p-4 text-center text-xs text-lamp-fail">{error}</p>
         ) : listing === null ? (
-          <p className="p-4 text-center text-xs text-ink-faint">读取中…</p>
+          <p className="p-4 text-center text-xs text-ink-faint">{t('picker.loading')}</p>
         ) : listing.entries.length === 0 ? (
-          <p className="p-4 text-center text-xs text-ink-faint">这个目录下没有子文件夹</p>
+          <p className="p-4 text-center text-xs text-ink-faint">{t('picker.emptyDir')}</p>
         ) : listing.entries.map((entry) => (
           <button
             key={entry.path}
@@ -96,15 +98,15 @@ export function DirectoryPicker({ start, onPick, onCancel }: Props): React.JSX.E
         {/* 只有 git 仓库能当项目，但这里不拦 —— 拦了用户就不知道自己错在哪，
             让服务端把话说清楚。 */}
         <p className="min-w-0 flex-1 text-xs text-ink-faint">
-          {listing?.isRepo === true ? '当前目录是 git 仓库，可以直接选它。' : '进到某个仓库里再选它。'}
+          {listing?.isRepo === true ? t('picker.isRepo') : t('picker.notRepo')}
         </p>
-        <Button variant="ghost" size="sm" onClick={onCancel}>返回</Button>
+        <Button variant="ghost" size="sm" onClick={onCancel}>{t('picker.back')}</Button>
         <Button
           size="sm"
           disabled={busy || listing === null}
           onClick={() => { if (listing !== null) onPick(listing.path) }}
         >
-          选择这个目录
+          {t('picker.pick')}
         </Button>
       </div>
     </div>

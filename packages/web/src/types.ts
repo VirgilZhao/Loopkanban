@@ -164,7 +164,10 @@ export interface SchedulerSettings {
 export interface Skip {
   taskId: string
   reason: 'blocked-by-dependency' | 'provider-limit-reached' | 'repo-limit-reached' | 'provider-unavailable'
+  /** 服务端自己的中文渲染。界面按 reason + params 自己组句，这条只作兜底。 */
   detail: string
+  /** 句子里可变的那几段，按 reason 定序。见 core 的 `Skip`。 */
+  params?: string[]
 }
 
 export interface TickReport {
@@ -180,11 +183,16 @@ export interface SchedulerState {
   lastTick: TickReport | null
 }
 
-/** 列的展示信息。顺序即流转顺序。 */
-export const COLUMN_META: Record<Column, { label: string; hint: string; lamp: string }> = {
-  backlog: { label: 'Backlog', hint: '想法池 · Agent 不可领', lamp: 'idle' },
-  ready:   { label: 'Ready',   hint: '队列 · 等待认领', lamp: 'idle' },
-  running: { label: 'Running', hint: 'Agent 执行中', lamp: 'running' },
-  review:  { label: 'Review',  hint: '等待人工验收 · 成败都在这儿', lamp: 'review' },
-  done:    { label: 'Done',    hint: '已合并', lamp: 'done' },
+/**
+ * 列的展示信息。顺序即流转顺序。
+ *
+ * 列名两种语言下都念 Backlog / Ready / …，所以它留在这儿；那句说明会跟着
+ * 语言变，去 `lib/i18n` 里的 `column.*.hint`。
+ */
+export const COLUMN_META: Record<Column, { label: string; lamp: string }> = {
+  backlog: { label: 'Backlog', lamp: 'idle' },
+  ready:   { label: 'Ready',   lamp: 'idle' },
+  running: { label: 'Running', lamp: 'running' },
+  review:  { label: 'Review',  lamp: 'review' },
+  done:    { label: 'Done',    lamp: 'done' },
 }

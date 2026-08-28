@@ -2,6 +2,7 @@ import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, PauseCircle } from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
+import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { LiveLine, Skip, Task } from '@/types.ts'
 
@@ -27,6 +28,7 @@ interface Props {
 }
 
 export function TaskCard({ task, now, selected, live, skip, projectName, onSelect }: Props): React.JSX.Element {
+  const t = useT()
   const archived = task.archivedAt !== undefined
   // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
   // 只换来一条错误提示。
@@ -79,7 +81,7 @@ export function TaskCard({ task, now, selected, live, skip, projectName, onSelec
 
       {/* 卡片正文就是描述本身：任务没有独立标题，两行放不下的用省略号收住。 */}
       {task.description.trim().length === 0 ? (
-        <p className={cn('mt-1.5 text-ink-faint/70 italic', running && 'ps-1.5')}>还没写内容</p>
+        <p className={cn('mt-1.5 text-ink-faint/70 italic', running && 'ps-1.5')}>{t('card.empty')}</p>
       ) : (
         <p className={cn('mt-1.5 line-clamp-2 whitespace-pre-wrap text-ink', running && 'ps-1.5')}>
           {task.description.trim()}
@@ -99,7 +101,7 @@ export function TaskCard({ task, now, selected, live, skip, projectName, onSelec
 
       {leaseExpired ? (
         <p className="mono mt-1.5 flex items-center gap-1 ps-1.5 text-[10px] text-lamp-fail">
-          <CircleAlert className="size-3" /> 租约已过期 · 待回收
+          <CircleAlert className="size-3" /> {t('card.leaseExpired')}
         </p>
       ) : null}
 
@@ -107,7 +109,7 @@ export function TaskCard({ task, now, selected, live, skip, projectName, onSelec
       {skip === undefined ? null : (
         <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-ink-faint">
           <PauseCircle className="mt-[2px] size-3 flex-none" />
-          <span className="min-w-0">{skip.detail}</span>
+          <span className="min-w-0">{skipMessage(t, skip)}</span>
         </p>
       )}
 

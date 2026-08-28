@@ -2,6 +2,7 @@ import { CircleCheck, CircleDashed, Eye, Inbox, LoaderCircle, Plus } from 'lucid
 import { useDroppable } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { Button } from '@/components/ui/button.tsx'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import { COLUMN_META, type Column as ColumnKey, type LiveLine, type Skip, type Task } from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
@@ -33,6 +34,7 @@ interface Props {
 export function Column({
   column, tasks, now, index, selectedId, live, skips, onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
+  const t = useT()
   const { setNodeRef, isOver } = useDroppable({ id: column })
   const meta = COLUMN_META[column]
   const Icon = COLUMN_ICON[column]
@@ -53,14 +55,14 @@ export function Column({
         <Icon className={cn('mt-px size-4 flex-none text-ink-faint', column === 'running' && 'text-sodium')} />
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-semibold leading-none text-ink">{meta.label}</h2>
-          <p className="mt-1.5 truncate text-xs text-ink-faint">{meta.hint}</p>
+          <p className="mt-1.5 truncate text-xs text-ink-faint">{t(`column.${column}.hint`)}</p>
         </div>
         {onCreate === undefined ? null : (
           <Button
             variant="outline"
             size="icon-xs"
-            aria-label="新建任务"
-            title="新建任务"
+            aria-label={t('sidebar.newTask')}
+            title={t('sidebar.newTask')}
             onClick={onCreate}
           >
             <Plus />

@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { DiffView as Diff } from '@/types.ts'
 
@@ -35,12 +36,13 @@ function parseDiff(patch: string): FileDiff[] {
 }
 
 export function DiffView({ diff }: { diff: Diff }): React.JSX.Element {
+  const t = useT()
   const files = useMemo(() => parseDiff(diff.patch), [diff.patch])
 
   if (diff.patch.trim().length === 0) {
     return (
       <div className="p-6 text-center">
-        <p className="cjk-label">这次执行没有产生任何改动</p>
+        <p className="cjk-label">{t('diff.empty')}</p>
         <p className="mono mt-2 text-[10px] text-ink-faint">{diff.branch}</p>
       </div>
     )
@@ -89,9 +91,7 @@ export function DiffView({ diff }: { diff: Diff }): React.JSX.Element {
       ))}
 
       {diff.truncated ? (
-        <p className="cjk-label p-3 !text-lamp-fail">
-          改动过大，这里只显示了前一部分。完整补丁在产物目录里。
-        </p>
+        <p className="cjk-label p-3 !text-lamp-fail">{t('diff.truncated')}</p>
       ) : null}
     </div>
   )

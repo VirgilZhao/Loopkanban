@@ -51,7 +51,16 @@ export type SkipReason =
 export interface Skip {
   readonly taskId: TaskId
   readonly reason: SkipReason
+  /** 服务端自己的中文渲染，日志与 CLI 用。界面自己按 reason + params 组句。 */
   readonly detail: string
+  /**
+   * 句子里可变的那几段，按 reason 定序：
+   * `blocked-by-dependency` 未完成的依赖；`provider-unavailable` 指定的执行器
+   * （没指定就是空的）；两个 limit 则是 [谁, 上限]。
+   *
+   * 界面要用两种语言说同一句话，靠拆开 detail 去猜是行不通的。
+   */
+  readonly params: readonly string[]
 }
 
 export interface DispatchPlan {
@@ -130,7 +139,12 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
   for (const task of candidates) {
     const unmet = task.blockedBy.filter((id) => !completed.has(id))
     if (unmet.length > 0) {
-      skipped.push({ taskId: task.id, reason: 'blocked-by-dependency', detail: `依赖未完成: ${unmet.join(', ')}` })
+      skipped.push({
+        taskId: task.id,
+        reason: 'blocked-by-dependency',
+        detail: `依赖未完成: ${unmet.join(', ')}`,
+        params: [unmet.join(', ')],
+      })
       continue
     }
 
@@ -142,6 +156,7 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
         detail: task.preferredProvider === undefined
           ? '本机没有探测到任何可用的 Agent CLI'
           : `指定的 ${task.preferredProvider} 未探测到`,
+        params: task.preferredProvider === undefined ? [] : [task.preferredProvider],
       })
       continue
     }
@@ -152,6 +167,7 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
         taskId: task.id,
         reason: 'provider-limit-reached',
         detail: `${provider} 并发已满 (${String(limits.maxPerProvider)})`,
+        params: [provider, String(limits.maxPerProvider)],
       })
       continue
     }
@@ -162,6 +178,7 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
         taskId: task.id,
         reason: 'repo-limit-reached',
         detail: `${task.repoPath} 并发已满 (${String(limits.maxPerRepo)})`,
+        params: [task.repoPath, String(limits.maxPerRepo)],
       })
       continue
     }

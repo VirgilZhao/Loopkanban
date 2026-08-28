@@ -2,6 +2,7 @@ import * as React from 'react'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { PanelLeft } from 'lucide-react'
 
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils'
 
 /**
@@ -294,13 +295,15 @@ function SidebarSeparator({ className, ...props }: React.ComponentProps<'div'>) 
 
 function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<'button'>) {
   const { toggle, open } = useSidebar()
+  const t = useT()
+  const label = open ? t('sidebar.collapse') : t('sidebar.expand')
 
   return (
     <button
       type="button"
       data-slot="sidebar-trigger"
-      aria-label={open ? '收起侧边栏' : '展开侧边栏'}
-      title={`${open ? '收起' : '展开'}侧边栏 · ⌘B`}
+      aria-label={label}
+      title={`${label} · ⌘B`}
       onClick={(event) => {
         onClick?.(event)
         toggle()

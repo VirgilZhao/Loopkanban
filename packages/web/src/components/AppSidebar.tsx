@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Archive, Bot, FolderGit2, LayoutGrid, Plus, Trash2 } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
+import { LanguageToggle } from '@/components/LanguageToggle.tsx'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
   SidebarHeader, SidebarMenu, SidebarMenuAction, SidebarMenuBadge, SidebarMenuButton,
   SidebarMenuItem, SidebarSeparator,
 } from '@/components/ui/sidebar.tsx'
+import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import type { Agent, Project, SchedulerState, SchedulerSettings } from '@/types.ts'
 
@@ -42,6 +44,7 @@ export function AppSidebar({
   onCreate, canCreate, archivedCount, showArchived, onToggleArchived,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
+  const t = useT()
   /** 每个执行器有几个位子。调度器没起来时按 1 显示，别在界面上编一个数字。 */
   const limitPerAgent = scheduler?.settings.maxPerProvider ?? 1
   // 正在改名的那个项目。双击名字进入，回车 / 失焦落定，Esc 放弃。
@@ -53,12 +56,13 @@ export function AppSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <div className={cn(
-              'flex h-12 w-full items-center gap-2 overflow-hidden rounded-md p-2',
-              'group-data-[state=collapsed]/sidebar:size-8! group-data-[state=collapsed]/sidebar:p-2! group-data-[state=collapsed]/sidebar:justify-center',
+              'flex h-12 w-full items-center gap-2.5 overflow-hidden rounded-md p-2',
+              'group-data-[state=collapsed]/sidebar:size-8! group-data-[state=collapsed]/sidebar:p-0! group-data-[state=collapsed]/sidebar:justify-center',
             )}>
+              {/* 标记的高度就是右边两行字的高度 —— 一个方块配一行字会显得它在往上飘。 */}
               <span className={cn(
-                'flex size-4 flex-none items-center justify-center rounded-[3px]',
-                'bg-sidebar-primary text-[9px] font-bold text-sidebar-primary-foreground',
+                'flex size-8 flex-none items-center justify-center rounded-md',
+                'bg-sidebar-primary text-[13px] font-bold tracking-tight text-sidebar-primary-foreground',
               )}>
                 LK
               </span>
@@ -69,8 +73,10 @@ export function AppSidebar({
                 >
                   LOOP<span className="text-sodium">KANBAN</span>
                 </span>
-                <span className="chrome-label !text-[8px]">agent dispatch</span>
+                <span className="chrome-label !text-[8px]">{t('sidebar.tagline')}</span>
               </div>
+              {/* 语言开关挨着标题 —— 它换的正是这块牌子底下所有的字。 */}
+              <LanguageToggle className="ms-auto group-data-[state=collapsed]/sidebar:hidden" />
             </div>
           </SidebarMenuItem>
 
@@ -79,10 +85,10 @@ export function AppSidebar({
               variant="primary"
               onClick={onCreate}
               disabled={!canCreate}
-              title={canCreate ? '新建任务' : '先选一个项目 —— 任务得知道自己在哪个仓库里干活'}
+              title={canCreate ? t('sidebar.newTask') : t('sidebar.newTaskBlocked')}
             >
               <Plus />
-              <span>新建任务</span>
+              <span>{t('sidebar.newTask')}</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -97,10 +103,10 @@ export function AppSidebar({
                 <SidebarMenuButton
                   isActive={view.kind === 'overview'}
                   onClick={() => { onView({ kind: 'overview' }) }}
-                  title="所有项目的任务"
+                  title={t('sidebar.overviewHint')}
                 >
                   <LayoutGrid />
-                  <span>概览</span>
+                  <span>{t('sidebar.overview')}</span>
                   <SidebarMenuBadge>{total}</SidebarMenuBadge>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -111,11 +117,11 @@ export function AppSidebar({
         {/* 项目：点进去只看这一个仓库的卡。 */}
         <SidebarGroup>
           <div className="flex items-center gap-1">
-            <SidebarGroupLabel className="flex-1">项目</SidebarGroupLabel>
+            <SidebarGroupLabel className="flex-1">{t('sidebar.projects')}</SidebarGroupLabel>
             <button
               type="button"
-              aria-label="新增项目"
-              title="新增项目"
+              aria-label={t('sidebar.addProject')}
+              title={t('sidebar.addProject')}
               onClick={onNewProject}
               className={cn(
                 'flex size-5 flex-none items-center justify-center rounded-md text-sidebar-foreground/70',
@@ -130,9 +136,9 @@ export function AppSidebar({
             <SidebarMenu>
               {projects.length === 0 ? (
                 <SidebarMenuItem>
-                  <SidebarMenuButton onClick={onNewProject} title="新增项目">
+                  <SidebarMenuButton onClick={onNewProject} title={t('sidebar.addProject')}>
                     <Plus />
-                    <span className="text-sidebar-foreground/70">还没有项目</span>
+                    <span className="text-sidebar-foreground/70">{t('sidebar.noProjects')}</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               ) : projects.map((project) => (
@@ -151,7 +157,7 @@ export function AppSidebar({
                     isActive={view.kind === 'project' && view.id === project.id}
                     onClick={() => { onView({ kind: 'project', id: project.id }) }}
                     onDoubleClick={() => { setRenaming(project.id) }}
-                    title={`${project.repoPath}\n基线 ${project.baseBranch}\n双击改名`}
+                    title={t('sidebar.projectHint', { path: project.repoPath, branch: project.baseBranch })}
                   >
                     <FolderGit2 />
                     <span>{project.name}</span>
@@ -164,8 +170,8 @@ export function AppSidebar({
                   )}
                   {renaming === project.id ? null : (
                     <SidebarMenuAction
-                      aria-label={`删除项目 ${project.name}`}
-                      title="删除项目"
+                      aria-label={t('sidebar.deleteProjectNamed', { name: project.name })}
+                      title={t('sidebar.deleteProject')}
                       onClick={() => { onDeleteProject(project) }}
                       className="hover:!text-lamp-fail"
                     >
@@ -182,7 +188,7 @@ export function AppSidebar({
 
         {/* 本机探测到的 CLI。没探测到的 provider 不会出现，任务也选不到它。 */}
         <SidebarGroup>
-          <SidebarGroupLabel>本机 Agent</SidebarGroupLabel>
+          <SidebarGroupLabel>{t('sidebar.agents')}</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {agents.length === 0 ? (
@@ -193,7 +199,7 @@ export function AppSidebar({
                   )}>
                     <Bot className="size-4 flex-none" />
                     <span className="cjk-label truncate !text-lamp-fail group-data-[state=collapsed]/sidebar:hidden">
-                      未探测到 Agent CLI
+                      {t('sidebar.noAgents')}
                     </span>
                   </div>
                 </SidebarMenuItem>
@@ -209,7 +215,7 @@ export function AppSidebar({
                     title={[
                       agent.bin,
                       agent.version,
-                      `占用 ${String(running)} / ${String(limitPerAgent)} 个执行位`,
+                      t('sidebar.slots', { running, limit: limitPerAgent }),
                       agent.permissionCaveat?.detail,
                     ].filter(Boolean).join('\n')}
                   >
@@ -221,7 +227,7 @@ export function AppSidebar({
                     {/* 档位名字对不上实际约束、或者不支持续跑，都要在这儿说出来。 */}
                     {agent.canResume ? null : (
                       <span className="cjk-label !text-[10px] !text-lamp-fail group-data-[state=collapsed]/sidebar:hidden">
-                        无续跑
+                        {t('sidebar.noResume')}
                       </span>
                     )}
                     {agent.permissionCaveat === undefined ? null : (
@@ -252,10 +258,10 @@ export function AppSidebar({
                 <SidebarMenuButton
                   isActive={showArchived}
                   onClick={onToggleArchived}
-                  title={showArchived ? '隐藏归档的卡' : '显示归档的卡'}
+                  title={showArchived ? t('sidebar.hideArchived') : t('sidebar.showArchived')}
                 >
                   <Archive />
-                  <span>归档</span>
+                  <span>{t('sidebar.archive')}</span>
                   <SidebarMenuBadge>{archivedCount}</SidebarMenuBadge>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -278,7 +284,7 @@ export function AppSidebar({
             {/* 收起时至少留一盏灯：自动驾驶是否开着，任何时候都不该看不见。 */}
             <div
               className="hidden justify-center py-1 group-data-[state=collapsed]/sidebar:flex"
-              title={scheduler.settings.autopilot ? '自动驾驶开启' : '自动驾驶关闭'}
+              title={scheduler.settings.autopilot ? t('sidebar.autopilotOn') : t('sidebar.autopilotOff')}
             >
               <span
                 className="lamp"

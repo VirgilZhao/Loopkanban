@@ -7,15 +7,9 @@ import {
 } from '@/components/ui/dialog.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
+import { maybe, useT } from '@/lib/i18n.tsx'
 import { basename } from '@/lib/path.ts'
 import type { Project } from '@/types.ts'
-
-/** 服务端拒绝新增项目时的理由 → 用户照做得了的说明。 */
-const HINT: Record<string, string> = {
-  'not-a-repo': '这个目录不是 git 仓库。任务要在它派生出来的 worktree 上干活，不是仓库就派生不出来。',
-  'path-not-absolute': '要绝对路径 —— 服务端不该去猜它相对于谁。',
-  'project-exists': '这个目录已经是一个项目了。',
-}
 
 interface Props {
   onCreated: (project: Project) => void
@@ -24,6 +18,7 @@ interface Props {
 }
 
 export function NewProjectDialog({ onCreated, onClose, onSubmit }: Props): React.JSX.Element {
+  const t = useT()
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
   const [browsing, setBrowsing] = useState(false)
@@ -37,8 +32,9 @@ export function NewProjectDialog({ onCreated, onClose, onSubmit }: Props): React
     void onSubmit({ name: name.trim(), path: path.trim() })
       .then((project) => { onCreated(project) })
       .catch((failure: unknown) => {
+        // 服务端拒绝时给一句用户照做得了的说明；没有对应文案就用它自己的话。
         const code = (failure as { code?: string }).code ?? ''
-        setError(HINT[code] ?? (failure as Error).message)
+        setError(maybe(t, `newProject.err.${code}`, (failure as Error).message))
       })
       .finally(() => { setBusy(false) })
   }
@@ -48,10 +44,8 @@ export function NewProjectDialog({ onCreated, onClose, onSubmit }: Props): React
       <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
         <DialogContent className="sm:max-w-[560px]">
           <DialogHeader>
-            <DialogTitle>选择项目文件夹</DialogTitle>
-            <DialogDescription>
-              逛的是跑着 LoopKanban 的那台机器上的目录。带 git 标记的才能当项目。
-            </DialogDescription>
+            <DialogTitle>{t('newProject.pickTitle')}</DialogTitle>
+            <DialogDescription>{t('newProject.pickHint')}</DialogDescription>
           </DialogHeader>
           <DirectoryPicker
             start={path.trim().length > 0 ? path.trim() : undefined}
@@ -73,27 +67,25 @@ export function NewProjectDialog({ onCreated, onClose, onSubmit }: Props): React
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent className="sm:max-w-[480px]">
         <DialogHeader>
-          <DialogTitle>新增项目</DialogTitle>
-          <DialogDescription>
-            一个项目就是本机上的一个 git 仓库。任务在它派生的 worktree 里执行，做完再合回来。
-          </DialogDescription>
+          <DialogTitle>{t('newProject.title')}</DialogTitle>
+          <DialogDescription>{t('newProject.hint')}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="project-name">项目名称</Label>
+            <Label htmlFor="project-name">{t('newProject.name')}</Label>
             <Input
               id="project-name"
               value={name}
               autoFocus
-              placeholder="给它一个你认得出的名字"
+              placeholder={t('newProject.namePlaceholder')}
               onChange={(event) => { setName(event.target.value) }}
               onKeyDown={(event) => { if (event.key === 'Enter') submit() }}
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="project-path">项目文件夹</Label>
+            <Label htmlFor="project-path">{t('newProject.folder')}</Label>
             <div className="flex gap-2">
               <Input
                 id="project-path"
@@ -105,12 +97,12 @@ export function NewProjectDialog({ onCreated, onClose, onSubmit }: Props): React
               />
               {/* 手打路径也留着 —— 粘贴一个已知路径比一层层点进去快。 */}
               <Button variant="outline" size="sm" className="h-9" onClick={() => { setBrowsing(true) }}>
-                <FolderOpen />选择…
+                <FolderOpen />{t('newProject.browse')}
               </Button>
             </div>
             <p className="flex items-start gap-1.5 text-xs text-ink-faint">
               <FolderGit2 className="mt-px size-3.5 flex-none" />
-              本机上的绝对路径。基线分支取仓库当前所在的分支，不用填。
+              {t('newProject.pathHint')}
             </p>
           </div>
 
@@ -122,13 +114,13 @@ export function NewProjectDialog({ onCreated, onClose, onSubmit }: Props): React
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onClose}>取消</Button>
+          <Button variant="ghost" size="sm" onClick={onClose}>{t('newProject.cancel')}</Button>
           <Button
             size="sm"
             disabled={busy || name.trim().length === 0 || path.trim().length === 0}
             onClick={submit}
           >
-            新增
+            {t('newProject.submit')}
           </Button>
         </DialogFooter>
       </DialogContent>

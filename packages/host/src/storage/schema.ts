@@ -153,6 +153,31 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE tasks ADD COLUMN done_at INTEGER;
   UPDATE tasks SET done_at = updated_at WHERE column_name = 'done';
   `,
+  // 卡片开出去的 Pull Request。**一张卡可以有多条** —— Done 里再说一句就是
+  // 下一轮，那一轮合上去的是另一条 PR；把它们都记着，"这张卡到底改进主干
+  // 几次、分别是哪几条"才有得查。
+  //
+  // 记的是**投影**而不是真相：真相在 GitHub 上，这里存的是最后一次问到的
+  // 状态，用来渲染界面、以及判断"合上了没有、要不要把卡收进 Done"。
+  `
+  CREATE TABLE task_prs (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT    NOT NULL REFERENCES tasks(id),
+    number      INTEGER NOT NULL,
+    url         TEXT    NOT NULL,
+    -- 开这条 PR 时的任务分支与基线。分支名会随卡片标题变，所以要记当时那个。
+    branch      TEXT    NOT NULL,
+    base_branch TEXT    NOT NULL,
+    -- 'open' | 'merged' | 'closed'
+    state       TEXT    NOT NULL,
+    -- 'mergeable' | 'conflicting' | 'unknown'
+    mergeable   TEXT    NOT NULL,
+    merged_at   INTEGER,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX idx_prs_task_number ON task_prs(task_id, number);
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

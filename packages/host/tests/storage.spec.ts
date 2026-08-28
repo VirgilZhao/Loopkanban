@@ -539,3 +539,49 @@ describe('迁移', () => {
     }
   })
 })
+
+describe('Pull Request', () => {
+  beforeEach(() => { store.createTask(task({ id: 't1', column: 'review' })) })
+
+  const pr = (patch: Record<string, unknown> = {}) => ({
+    id: 'pr-1', taskId: asTaskId('t1'), number: 7, url: 'https://github.com/acme/demo/pull/7',
+    branch: 'task/t1', baseBranch: 'main', state: 'open' as const, mergeable: 'unknown' as const,
+    createdAt: T0, updatedAt: T0, ...patch,
+  })
+
+  it('同一条 PR 刷多少次都只有一行，状态覆盖成最新的', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ state: 'merged', mergedAt: T0 + 99, updatedAt: T0 + 99 }))
+
+    const found = store.listPullRequests(asTaskId('t1'))
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatchObject({ state: 'merged', mergedAt: T0 + 99 })
+  })
+
+  it('刷新不动 createdAt —— 那是"这条 PR 什么时候进视野"，被推到现在顺序就乱了', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ createdAt: T0 + 5000, updatedAt: T0 + 5000 }))
+    expect(store.listPullRequests(asTaskId('t1'))[0]?.createdAt).toBe(T0)
+  })
+
+  it('一张卡可以有多条，新的排在前面 —— 每一轮合上去的是不同的一条', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ id: 'pr-2', number: 9 }))
+    expect(store.listPullRequests(asTaskId('t1')).map((row) => row.number)).toEqual([9, 7])
+  })
+
+  it('只有还开着的才进巡检，合过的不必再问', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ id: 'pr-2', number: 9, state: 'merged' }))
+    expect(store.listOpenPullRequests().map((row) => row.number)).toEqual([7])
+    expect(store.listAllPullRequests()).toHaveLength(2)
+  })
+
+  it('删卡时 PR 记录跟着走 —— 留着一堆指向空卡的行只是垃圾', () => {
+    store.upsertPullRequest(pr())
+    const current = store.getTask(asTaskId('t1')) as Task
+    store.commitTask({ ...current, column: 'ready', revision: current.revision + 1 })
+    expect(store.deleteTask(asTaskId('t1'), current.revision + 1)).toBe(true)
+    expect(store.listAllPullRequests()).toEqual([])
+  })
+})

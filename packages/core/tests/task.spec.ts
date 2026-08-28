@@ -44,12 +44,15 @@ describe('canTransition', () => {
     expect(canTransition('review', 'ready')).toBe(true)
     // 废弃成果、回想法池重新想需求：无租约状态之间的整理，该放行。
     expect(canTransition('review', 'backlog')).toBe(true)
+    // Done 里再说一句就是"再改一版"：卡回队列重跑，成果与 PR 记录都留着。
+    expect(canTransition('done', 'ready')).toBe(true)
   })
 
   it('拦住乱跳 —— 否则「租约属于谁」无法推理', () => {
     expect(canTransition('backlog', 'running')).toBe(false)
     expect(canTransition('ready', 'done')).toBe(false)
-    expect(canTransition('done', 'ready')).toBe(false)
+    // done 只开去 ready 那一个口子 —— 倒回想法池等于把做完的事说成没做过。
+    expect(canTransition('done', 'backlog')).toBe(false)
     expect(canTransition('running', 'done')).toBe(false)
     // running → ready 是系统回收租约的专属通道，人不能走。
     expect(canTransition('running', 'ready')).toBe(false)

@@ -94,6 +94,41 @@ export interface Task {
 }
 
 /**
+ * 一条从卡片开出去的 Pull Request。
+ *
+ * 一张卡可以有多条 —— Done 里再说一句就是下一轮，那一轮会开出另一条。
+ * 状态是**上一次问到的样子**，真相在 GitHub 上：合没合上以那边为准，
+ * 界面只负责如实显示最后一次问到的结果。
+ */
+export interface PullRequest {
+  id: string
+  taskId: string
+  number: number
+  url: string
+  /** 开这条 PR 时的任务分支。卡片标题改过之后分支名会变，所以记的是当时那个。 */
+  branch: string
+  baseBranch: string
+  state: 'open' | 'merged' | 'closed'
+  /** `unknown` 是 GitHub 还在后台算，不等于"没冲突"。 */
+  mergeable: 'mergeable' | 'conflicting' | 'unknown'
+  mergedAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
+/** 这个仓库能不能走 PR 那条路，以及走不通时卡在哪儿。 */
+export interface PrCapability {
+  /** 本机有没有 gh。 */
+  gh: boolean
+  remote: string | null
+  /** `owner/repo`；认不出来时为 null。 */
+  repo: string | null
+  ready: boolean
+  reason?: string
+  detail?: string
+}
+
+/**
  * 卡片带着的一个附件：图片、PDF、Word 文档之类。
  *
  * 内容不走 JSON —— 要拿它去 `/api/attachments/<id>`，那也是 `<img>` 的 src。

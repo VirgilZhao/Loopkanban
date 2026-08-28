@@ -279,7 +279,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         const event = storage.lastEvent(runId)
         if (event !== null) live[task.id] = { kind: event.kind, payload: event.payload, at: event.at }
       }
-      sendJson(res, 200, { projects: storage.listProjects(), tasks, live, attachments }, extraHeaders)
+      // 卡面上要标出"这张卡合过哪几条 PR"，所以一次读完全部 —— 一张卡问
+      // 一次的话，Done 列有多少张卡就是多少个请求。
+      const prs: Record<string, unknown[]> = {}
+      for (const pr of storage.listAllPullRequests()) {
+        (prs[pr.taskId] ??= []).push(pr)
+      }
+      sendJson(res, 200, { projects: storage.listProjects(), tasks, live, attachments, prs }, extraHeaders)
       return
     }
 
@@ -788,10 +794,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           body: text,
           at: Date.now(),
         })
-        // 在 Review 里留言就是"再改一版"：卡自动回队列，下一次执行带着
-        // 整条讨论走。别的列只是留个话，不动卡的位置。
+        // 在 Review **或 Done** 里留言就是"再改一版"：卡自动回队列，下一次
+        // 执行带着整条讨论走。Done 也算，是因为"合上去才发现还差一条"本来
+        // 就是这张卡的下一轮 —— 另开一张新卡会把讨论、worktree、已经合过的
+        // PR 全丢掉，而那些正是接着干最需要的东西。别的列只是留个话，
+        // 不动卡的位置。
         let moved = false
-        if (current.column === 'review') {
+        if (current.column === 'review' || current.column === 'done') {
           const next = moveTask(current, {
             expectedRevision: current.revision, to: 'ready', now: Date.now(),
           })
@@ -1220,6 +1229,78 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       sendJson(res, 200, { file: found.file }, extraHeaders)
       return
+    }
+
+    /*
+     * ── Pull Request ────────────────────────────────────────
+     *
+     * GET  列出这张卡的 PR，外加"这个仓库能不能开 PR"。
+     * POST 开一条：提交 → 跟上基线 → 推 → gh pr create。合不合由人在 GitHub
+     *      上决定，我们只在它真的合上之后把卡收进 Done。
+     * POST …/sync 问一遍现在怎么样了，顺带做那次收尾。
+     */
+    const prSync = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/prs\/sync$/)
+    if (method === 'POST' && prSync !== null) {
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+      const taskId = asTaskId(decodeURIComponent(prSync))
+      if (storage.getTask(taskId) === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const result = await review.syncPullRequests(taskId)
+      sendJson(res, 200, {
+        prs: storage.listPullRequests(taskId),
+        collected: result.collected,
+        task: storage.getTask(taskId),
+      }, extraHeaders)
+      return
+    }
+
+    const prsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/prs$/)
+    if (prsOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(prsOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, {
+          prs: storage.listPullRequests(taskId),
+          capability: await review.pullRequestCapability(task.repoPath),
+        }, extraHeaders)
+        return
+      }
+
+      if (method === 'POST') {
+        const result = await review.openPullRequest(taskId)
+        if (!result.ok) {
+          /*
+           * 冲突是**有下一步**的失败：改动已经提交在分支上，冲突原样留在
+           * 工作区里，卡也已经回了队列。既然本机就有 Agent，直接把这一轮派
+           * 出去 —— 让用户回看板再点一次"派活"，只是把一个我们已经知道该做
+           * 的动作推给他。派不出去（没装 CLI、卡刚被人动过）也不改变结论：
+           * 冲突这件事本身已经如实报了。
+           */
+          let dispatched: string | undefined
+          if (result.reason === 'merge-conflict' && result.requeued === true && runner !== undefined) {
+            const started = await runner.start(taskId)
+            if (started.ok) dispatched = started.run.id
+          }
+          sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {
+            error: result.reason,
+            detail: result.detail,
+            ...(result.files === undefined ? {} : { files: result.files }),
+            ...(result.requeued === undefined ? {} : { requeued: result.requeued }),
+            ...(dispatched === undefined ? {} : { dispatched }),
+          })
+          return
+        }
+        sendJson(res, 201, {
+          pr: result.pr,
+          created: result.created,
+          commit: result.commit,
+          prs: storage.listPullRequests(taskId),
+          task: storage.getTask(taskId),
+        }, extraHeaders)
+        return
+      }
     }
 
     /*

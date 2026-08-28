@@ -183,6 +183,37 @@ export async function currentBranch(path: string): Promise<string | null> {
   return code !== 0 || name.length === 0 ? null : name
 }
 
+/** 派活时写进 worktree 根目录的任务规格。它是这次执行的**输入**，不是产出。 */
+export const TASK_SPEC = 'TASK.md'
+
+/**
+ * 根上那份 TASK.md 是不是我们写的。
+ *
+ * 判据是"没被跟踪"：仓库自己就有一份 TASK.md 的话，它是用户的文件，
+ * 该不该进提交轮不到我们决定。
+ *
+ * @param path - 工作区路径。
+ */
+async function ownsTaskSpec(path: string): Promise<boolean> {
+  const { stdout, code } = await capture(['git', '-C', path, 'ls-files', '--', TASK_SPEC], 60_000)
+  return code === 0 && stdout.trim().length === 0
+}
+
+/**
+ * `git add -A`，但把我们自己写的那份 TASK.md 挡在外面。
+ *
+ * 它是交给 Agent 的需求书，不是 Agent 干出来的活。跟着一起提交，它就会
+ * 出现在分支上、出现在 PR 的 diff 里，最后连同整条讨论线程一起合进主干 ——
+ * 那是这个工具的内部记录，不该落在用户的仓库里。
+ *
+ * @param path - 工作区路径。
+ * @param extra - 额外的 `git add` 参数（例如 `--intent-to-add`）。
+ */
+async function stageAll(path: string, extra: readonly string[] = []): Promise<void> {
+  const args = ['add', '-A', ...extra]
+  await git(path, await ownsTaskSpec(path) ? [...args, '--', `:!${TASK_SPEC}`] : args)
+}
+
 /**
  * 把 worktree 里的全部改动提交到它自己的分支。
  *
@@ -192,12 +223,175 @@ export async function currentBranch(path: string): Promise<string | null> {
  * @param worktree - 目标 worktree。
  * @param message - 提交信息。
  * @returns 新提交的 sha；没有任何改动时返回 null。
+ * @throws 工作区里还有没解开的冲突时抛 —— 调用方要么让人去解，要么明确放弃。
  */
 export async function commitAll(worktree: Worktree, message: string): Promise<string | null> {
-  await git(worktree.path, ['add', '-A'])
-  if ((await git(worktree.path, ['diff', '--cached', '--name-only'])).trim().length === 0) return null
+  // 冲突还没解就提交，等于把 `<<<<<<<` 那几行一并提交进分支 —— `git add -A`
+  // 会把冲突文件当成"已解决"，git 自己那道"有未合并路径"的拦截就失效了。
+  // 这一步必须在 add 之前，而且必须抛：调用方要么让人去解，要么明确放弃。
+  const unresolved = await unresolvedConflicts(worktree.path)
+  if (unresolved.length > 0) {
+    throw new Error(`工作区里还有没解开的冲突：${unresolved.join('、')}`)
+  }
+  await stageAll(worktree.path)
+  // 合并冲突解到一半的工作区里，暂存区可能与 HEAD 一模一样（冲突全被解成了
+  // 原样），但那次合并还没落成提交。此时"没有改动"是错的判断：不提交的话
+  // MERGE_HEAD 会一直挂着，分支上永远看不到基线那边的东西，PR 也永远显示冲突。
+  const staged = (await git(worktree.path, ['diff', '--cached', '--name-only'])).trim().length > 0
+  if (!staged && !(await isMerging(worktree.path))) return null
   await git(worktree.path, ['commit', '-m', message])
   return (await git(worktree.path, ['rev-parse', 'HEAD'])).trim()
+}
+
+/** 这个工作区是不是停在一次没做完的合并里（有冲突要解，或解完了还没提交）。 */
+export async function isMerging(path: string): Promise<boolean> {
+  const dir = (await git(path, ['rev-parse', '--git-dir'])).trim()
+  const gitDir = isAbsolute(dir) ? dir : resolve(join(path, dir))
+  return access(join(gitDir, 'MERGE_HEAD')).then(() => true, () => false)
+}
+
+/**
+ * 索引里还处于"未合并"状态的文件（相对工作区根）。没有冲突就是空数组。
+ *
+ * 注意它**不等于"还没解开"**：文件一直挂在这个状态里，直到有人 `git add`
+ * 它 —— 而解冲突的人（或 Agent）只被要求改文件，不许提交也不必暂存。
+ * 要判"解没解开"看 {@link unresolvedConflicts}。
+ */
+export async function conflictedFiles(path: string): Promise<string[]> {
+  // **必须用 `-z`**：默认输出会把非 ASCII 的文件名整段 C 转义并加上引号
+  // （`"\344\270\255\346\226\207.ts"`），拿那串东西去 readFile 只会
+  // ENOENT —— 于是"还没解开的冲突"被判成已解决，冲突标记就跟着提交进去了。
+  // `-z` 用 NUL 分隔，路径一律原样输出，连带文件名里有换行的也稳。
+  const out = await git(path, ['diff', '-z', '--name-only', '--diff-filter=U'])
+  return out.split('\0').filter((line) => line.length > 0)
+}
+
+/**
+ * 真正还没解开的冲突：正文里仍然留着冲突标记的那些文件。
+ *
+ * 判据落在**内容**而不是索引状态上，因为这个项目里解冲突的分工是"人/Agent
+ * 只改文件，提交归看板"—— 改完的文件在索引里照样是未合并的，拿索引当判据
+ * 会让每一次收尾都被自己挡下。
+ *
+ * 三条标记要一起看：只找 `<<<<<<<` 会把一份正在讲解冲突的文档误判成没解开。
+ * 文件读不出来（一边删了、二进制）当作已解决 —— `git add -A` 会照实记下
+ * 那个决定。
+ *
+ * @param path - 工作区路径。
+ */
+export async function unresolvedConflicts(path: string): Promise<string[]> {
+  const unmerged = await conflictedFiles(path)
+  const left: string[] = []
+  for (const file of unmerged) {
+    const text = await readFile(join(path, file), 'utf8').catch(() => '')
+    if (/^<{7} /m.test(text) && /^={7}$/m.test(text) && /^>{7} /m.test(text)) left.push(file)
+  }
+  return left
+}
+
+/** 仓库配置的远端名字，按 git 自己的顺序。没有远端就是空数组。 */
+export async function listRemotes(repoPath: string): Promise<string[]> {
+  const { stdout, code } = await capture(['git', '-C', repoPath, 'remote'], 60_000)
+  if (code !== 0) return []
+  return stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+}
+
+/**
+ * 推送用的远端：有 `origin` 就是它，否则第一个；一个都没有返回 null。
+ *
+ * 不猜第二个名字（`upstream` 之类）：多远端的仓库里，推错地方是没法悄悄
+ * 撤销的事，而 `origin` 是绝大多数仓库唯一的答案。
+ */
+export async function defaultRemote(repoPath: string): Promise<string | null> {
+  const remotes = await listRemotes(repoPath)
+  if (remotes.includes('origin')) return 'origin'
+  return remotes[0] ?? null
+}
+
+export type GitRefusal = 'push-failed' | 'fetch-failed' | 'merge-conflict' | 'merge-failed'
+
+export interface GitFailure {
+  readonly ok: false
+  readonly reason: GitRefusal
+  readonly detail: string
+  /** 冲突未解的文件；只有 `merge-conflict` 有。 */
+  readonly files?: readonly string[]
+}
+
+/**
+ * 把分支推到远端。
+ *
+ * 从 worktree 里推而不是主仓库：两者共用同一份 ref 与远端配置，但 worktree
+ * 一定停在这条任务分支上，不必担心主工作区当时在哪儿。
+ *
+ * `--force-with-lease` 不用：任务分支只有我们在写，普通推送失败就说明远端
+ * 上那条分支被别人动过 —— 那时该让人看见，而不是替他覆盖掉。
+ *
+ * @param worktree - 任务的工作区。
+ * @param remote - 远端名。
+ */
+export async function pushBranch(
+  worktree: Worktree, remote: string,
+): Promise<{ ok: true } | GitFailure> {
+  const { stdout, stderr, code } = await capture(
+    ['git', '-C', worktree.path, 'push', '-u', remote, `${worktree.branch}:${worktree.branch}`],
+    120_000,
+  )
+  if (code !== 0) {
+    return { ok: false, reason: 'push-failed', detail: (stderr.trim() || stdout.trim()).slice(0, 800) }
+  }
+  return { ok: true }
+}
+
+/** 拉一条远端分支的最新状态。取不到（网络、权限、分支还不存在）时如实报出来。 */
+export async function fetchBranch(
+  repoPath: string, remote: string, branch: string,
+): Promise<{ ok: true } | GitFailure> {
+  const { stdout, stderr, code } = await capture(
+    ['git', '-C', repoPath, 'fetch', remote, branch], 120_000,
+  )
+  if (code !== 0) {
+    return { ok: false, reason: 'fetch-failed', detail: (stderr.trim() || stdout.trim()).slice(0, 800) }
+  }
+  return { ok: true }
+}
+
+/**
+ * 把基线合进任务分支 —— 也就是「冲突提前在自己的工作区里发生」。
+ *
+ * 冲突留在工作区里**不 abort**：那正是要解的东西，抹掉它等于让下一轮
+ * Agent 从头再撞一次同样的冲突。解冲突的人（或 Agent）只需要改文件，
+ * 提交由我们在下一次 {@link commitAll} 里完成 —— 与"Agent 不提交"这条
+ * 一贯的规矩一致。
+ *
+ * @param worktree - 任务的工作区，必须停在任务分支上。
+ * @param ref - 要合进来的基线 ref，例如 `origin/main` 或 `main`。
+ * @returns 干净合上（`merged` 表示这次真的产生了合并提交），或冲突/失败。
+ */
+export async function mergeIntoBranch(
+  worktree: Worktree, ref: string,
+): Promise<{ ok: true; merged: boolean } | GitFailure> {
+  const behind = (await git(worktree.path, ['rev-list', '--count', `HEAD..${ref}`])).trim()
+  if (behind === '0') return { ok: true, merged: false }
+
+  const { stdout, stderr, code } = await capture(
+    ['git', '-C', worktree.path, 'merge', '--no-edit', ref], 120_000,
+  )
+  if (code === 0) return { ok: true, merged: true }
+
+  const files = await conflictedFiles(worktree.path)
+  if (files.length > 0) {
+    return {
+      ok: false,
+      reason: 'merge-conflict',
+      detail: `与 ${ref} 有冲突：${files.join('、')}`,
+      files,
+    }
+  }
+  // 非冲突的失败（工作区脏、ref 不存在）：把合并状态收干净再报，
+  // 否则工作区会停在一个既没冲突、也没合完的半途里。
+  await capture(['git', '-C', worktree.path, 'merge', '--abort'], 60_000)
+  return { ok: false, reason: 'merge-failed', detail: (stderr.trim() || stdout.trim()).slice(0, 800) }
 }
 
 export type MergeRefusal = 'dirty-worktree' | 'wrong-branch'
@@ -252,7 +446,9 @@ export async function mergeBranch(
 
 /** worktree 相对基线分支的完整 diff（含未提交改动）。 */
 export async function worktreeDiff(worktree: Worktree, baseBranch: string): Promise<string> {
-  await git(worktree.path, ['add', '-A', '--intent-to-add'])
+  // 与 commitAll 用同一套暂存规则 —— diff 页要显示的是"这次会提交什么"，
+  // 把一份根本不会进提交的 TASK.md 摆在里面，人对着它验收就是在看错东西。
+  await stageAll(worktree.path, ['--intent-to-add'])
   return git(worktree.path, ['diff', baseBranch, '--stat'])
     .then(async (stat) => `${stat}\n${await git(worktree.path, ['diff', baseBranch])}`)
 }

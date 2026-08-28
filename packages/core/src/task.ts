@@ -96,7 +96,12 @@ const ALLOWED: Readonly<Record<Column, readonly Column[]>> = {
   running: ['review'],
   // 验收后：通过、打回重做、或者废弃成果回想法池重新想需求。
   review: ['done', 'ready', 'backlog'],
-  done: [],
+  // Done 不是死路：在讨论里对一张已完成的卡再说一句，就是"再改一版"——
+  // 合上去的东西发现漏了一条、PR 合完才想起来还差个测试，本来就是同一张卡
+  // 的下一轮。开一张新卡等于把上下文（讨论、worktree、已经合过的 PR）全丢掉，
+  // 而这些恰恰是接着干最需要的东西。**只开去 ready 这一个口子**：done 不该
+  // 能直接倒回 backlog，那不是"接着干"，那是把一件已完成的事伪装成没做过。
+  done: ['ready'],
 }
 
 /**

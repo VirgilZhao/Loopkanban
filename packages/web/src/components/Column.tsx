@@ -1,10 +1,13 @@
-import { CircleCheck, CircleDashed, Eye, Inbox, LoaderCircle, Plus } from 'lucide-react'
+import { CircleCheck, CircleDashed, Eye, Inbox, LoaderCircle, Plus, TriangleAlert } from 'lucide-react'
 import { useDroppable } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { Button } from '@/components/ui/button.tsx'
 import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
-import { COLUMN_META, type Column as ColumnKey, type LiveLine, type Skip, type Task } from '@/types.ts'
+import {
+  COLUMN_META, type Column as ColumnKey, type LiveLine, type PullRequest, type RunFailure,
+  type Skip, type Task,
+} from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
 
 /** 列头的图标，与侧边栏导航同一套 —— 两处指的是同一件东西。 */
@@ -25,6 +28,10 @@ interface Props {
   live: Record<string, LiveLine>
   /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
   attachments: Record<string, number>
+  /** 每张卡开过哪些 PR；一条都没有的卡不在里面。 */
+  prs: Record<string, PullRequest[]>
+  /** 上一轮没跑成的卡的收场。只有 Review 那一列会有。 */
+  failures: Record<string, RunFailure>
   skips: Map<string, Skip>
   onSelect: (task: Task) => void
   /** 概览里同一列会来自不同仓库，给出项目名让卡片自报家门；单项目视图下不传。 */
@@ -34,7 +41,8 @@ interface Props {
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, live, attachments, skips, onSelect, projectName, onCreate,
+  column, tasks, now, index, selectedId, live, attachments, prs, failures, skips,
+  onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const t = useT()
   const { setNodeRef, isOver } = useDroppable({ id: column })
@@ -44,6 +52,9 @@ export function Column({
   // 让它转下去就是在演一个已经死掉的进程。空列同理：一个空转的转圈是假信号。
   const spinning = column === 'running'
     && tasks.some((task) => task.lease !== undefined && task.lease.expiresAt > now)
+  // 这一列里有几张是没跑成的。列头写一个数，是因为 Review 会长 —— 标记在卡上，
+  // 而那张卡可能在滚动条下面。
+  const broken = tasks.filter((task) => failures[task.id] !== undefined).length
 
   return (
     <section
@@ -79,6 +90,17 @@ export function Column({
             <Plus />
           </Button>
         )}
+        {broken === 0 ? null : (
+          <span
+            title={t('column.review.failed', { n: broken })}
+            className={cn(
+              'mono flex h-6 items-center justify-center gap-1 rounded-md px-1.5',
+              'border border-lamp-fail/40 bg-lamp-fail/[0.07] text-xs tabular-nums text-lamp-fail',
+            )}
+          >
+            <TriangleAlert className="size-3" />{broken}
+          </span>
+        )}
         <span className={cn(
           'mono flex h-6 min-w-6 items-center justify-center rounded-md border border-hairline px-1.5',
           'text-xs tabular-nums text-ink-faint',
@@ -101,6 +123,8 @@ export function Column({
             selected={selectedId === task.id}
             live={live[task.id]}
             attachments={attachments[task.id]}
+            prs={prs[task.id]}
+            failure={failures[task.id]}
             skip={skips.get(task.id)}
             projectName={projectName?.(task.projectId)}
             onSelect={onSelect}

@@ -10,7 +10,7 @@ npx loopkanban
 启动后自动打开浏览器。规划文档见 [docs/PRD.md](docs/PRD.md)。
 
 需要 Node ≥ 22.5（用到内置的 `node:sqlite`），以及本机已装 `claude`、`codex`、
-`opencode` 其中之一。发布包 148 KB、**零运行时依赖**。
+`opencode` 其中之一。发布包 296 KB、**零运行时依赖**。
 
 想让它一直活着（自动认领的意义就在于你不用盯着）：
 
@@ -30,8 +30,29 @@ loopkanban service install   # 确认无误再装
 - **不绑定 CLI 版本**。启动时解析 `--help` 得出能力矩阵，装的是什么版本就用
   什么版本；不支持的能力在界面上直接灰掉，不会等到运行时才失败。
 - **worktree 隔离**。Agent 不碰你的主工作区，跑飞了删掉分支即可。
+- **一键测试环境**。Review 里的卡上有个按钮：把这次改动在**它自己的 worktree
+  里跑起来**，端口由看板分配（命令里写 `{{port}}` 或读 `PORT`），起来了就给你
+  一条 `127.0.0.1` 的链接，日志实时贴在下面。验完关掉面板就行 —— 一分钟后它
+  自己收掉整棵进程树；验收、打回、废弃时立刻收（那一刻 worktree 正要被删）；
+  最长跑 30 分钟。启动命令配在项目上，比如 `pnpm install && pnpm dev` ——
+  worktree 是一份干净的源码副本，装依赖也归这条命令管。
 - **卡片可以带附件**。截图、PDF、Word 拖进卡里，派活时它们会被拷进工作区并在
   TASK.md 里点名交给 CLI —— 说不清楚的需求，给它看。
+- **验收走 PR**。仓库有 GitHub 远端、本机装了 `gh`（用你自己的登录态，同样零
+  API Key）时，「通过并合并」会提交改动、把基线合进任务分支、推上去并开一条 PR。
+  **合不合始终是你在 GitHub 上的决定** —— 我们只在它真的合上之后把卡收进 Done，
+  卡上列着它合过的每一条 PR（一张卡可以有好几条）。合基线时撞上冲突，冲突就留在
+  这张卡自己的工作区里，卡自动回队列并派一轮去解 —— 那是 Agent 干的活，不是你的。
+  没有远端或没装 `gh` 时这颗按钮退回本地合并，并把原因写在按钮下面。
+- **做完了还能接着改**。Review 与 Done 的卡都能在讨论里再说一句，说完就回队列跑
+  下一轮 —— 合完才发现还差一条，本来就是同一张卡的事，不必另开一张把讨论、工作区
+  和已经合过的 PR 全丢掉。
+- **卡片可以互相关联**。在规格里挑几张同项目的卡，派活时它们的正文会被整段写进
+  TASK.md 的「关联任务」一节 —— 接口是上一张定的、命名沿用那次改造，Agent 照着
+  已经定下来的东西做。关联是**引用不是依赖**：它不拦这张卡的执行（那是
+  `blockedBy` 的事），所以参考一张永远不会做完的卡也没关系。
+- **Agent 可以用这个看板**。`loopkanban mcp` 起一个 MCP server，查任务、建卡、
+  改需求、认领执行、跟进日志都能从 Agent 那边发起 —— 见下面「接给 Agent 用」。
 - **只监听 `127.0.0.1`**。远程访问走 SSH 端口转发。
 - **文件浏览与命令行**。顶栏可以从看板切到「文件浏览」：逛项目仓库、切到某张卡
   的 worktree 看 Agent 到底改了什么，底下还挂着一个命令行，命令就跑在你正看着的
@@ -39,11 +60,35 @@ loopkanban service install   # 确认无误再装
   上，一条指向外面的符号链接爬不出去。命令用的是你自己的 shell 与环境（**不清洗
   凭证**，否则 `git push` 会神秘地失败），每条一个新进程，超时按进程组整棵收掉。
 
+## 接给 Agent 用（MCP）
+
+看板先跑着，然后把 MCP server 接到你的 CLI 上：
+
+```bash
+claude mcp add loopkanban -- loopkanban mcp
+```
+
+它连的是**正在跑的那个看板**（地址与 token 从数据目录里读，所以看板得开着；
+数据目录不在默认位置时给 `--data <dir>`，或用 `LOOPKANBAN_URL` / `LOOPKANBAN_TOKEN`
+直接指）。给出来的工具：
+
+| 工具 | 干什么 |
+|---|---|
+| `list_projects` / `list_agents` | 有哪些项目、本机装了哪些 CLI |
+| `list_tasks` / `get_task` | 列卡、读一张卡的全部需求（关联的卡连正文一起展开） |
+| `create_task` / `update_task` / `comment_task` | 建卡、改需求与关联、在讨论里留话 |
+| `move_task` | 在 Backlog 与 Ready 之间搬 |
+| `claim_task` / `run_status` / `cancel_run` | 认领执行、跟进、终止 |
+
+**验收通过与废弃不给。** 领域层堵死了 `running → done` 就是不让干活的人自己判定
+活干完了；把它接到 MCP 上等于给这道门配一把从里面开的钥匙。认领之后卡照样进
+Review 等人判读。
+
 ## 结构
 
 ```
 packages/core   纯领域逻辑，无 IO，时间由参数传入 —— 状态机、CAS、租约、调度决策
-packages/host   Node 侧：CLI 探测与执行、worktree、SQLite、HTTP + SSE、验收
+packages/host   Node 侧：CLI 探测与执行、worktree、SQLite、HTTP + SSE、验收与 PR
 packages/web    React + Vite + shadcn/ui，产物由 host 托管
 ```
 
@@ -51,7 +96,7 @@ packages/web    React + Vite + shadcn/ui，产物由 host 托管
 
 ```bash
 pnpm install
-pnpm test            # 433 个测试
+pnpm test            # 757 个测试
 pnpm run typecheck
 pnpm run build       # 打出 dist/loopkanban.js 与 dist/web/
 

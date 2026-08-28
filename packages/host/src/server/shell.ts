@@ -134,8 +134,12 @@ export function tilde(path: string): string {
  * 用非交互的 `-c`：登录 shell（`-lc`）会加载用户的 rc 文件，那里面常有
  * `nvm use`、欢迎横幅之类的东西，输出会混进命令结果里，而且每条命令都要
  * 重跑一遍。PATH 从 host 进程继承，跟 Agent CLI 探测到的是同一份，行为一致。
+ *
+ * 导出是给测试环境用的（`testenv/`）：那边起的也是用户亲手配的一条命令，
+ * 两处对"用哪个 shell、加不加载 rc"必须是同一个答案，否则同一条命令在
+ * 命令行里跑得通、一键试跑却起不来，而人根本无从分辨差别在哪。
  */
-function shellArgv(script: string): string[] {
+export function shellArgv(script: string): string[] {
   if (process.platform === 'win32') return ['cmd.exe', '/d', '/s', '/c', script]
   return [process.env['SHELL'] ?? '/bin/sh', '-c', script]
 }

@@ -1,14 +1,11 @@
 import { useEffect, useState } from 'react'
 import { FileText, X } from 'lucide-react'
-import { api, ApiError } from '@/api.ts'
+import { api, ApiError, taskFileUrl } from '@/api.ts'
 import { Button } from '@/components/ui/button.tsx'
+import { FileView } from '@/components/FileView.tsx'
 import { maybe, useT } from '@/lib/i18n.tsx'
-import { renderMarkdown } from '@/lib/markdown.tsx'
 import { resolveFrom } from '@/lib/path.ts'
 import type { FilePreview as Preview } from '@/types.ts'
-
-/** 按 Markdown 渲染的扩展名。别的都当纯文本，原样等宽显示。 */
-const MARKDOWN = /\.(md|markdown|mdx)$/i
 
 /** 字节数写成人看的样子。单位不分语言，不必进文案表。 */
 function humanSize(bytes: number): string {
@@ -25,6 +22,9 @@ function humanSize(bytes: number): string {
  * 并排还顺带省掉了两件麻烦事：底下那栏不必置 inert（它没被挡住），焦点也不必
  * 抢过来（没有藏起来的东西）。esc 仍然先关预览而不是整张卡，那一下由
  * `RunPanel` 统一拦，它才同时看得见两栏。
+ *
+ * 正文怎么显示不在这里决定 —— 那是 `FileView` 的事，文件浏览页用的是同一个，
+ * 两处才不会一个渲染一个是原文。
  */
 export function FilePreviewPane({ taskId, path, onOpen, onClose }: {
   taskId: string
@@ -52,8 +52,6 @@ export function FilePreviewPane({ taskId, path, onOpen, onClose }: {
     return () => { cancelled = true }
   }, [taskId, path, t])
 
-  const markdown = file !== null && MARKDOWN.test(file.name)
-
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col border-s border-hairline bg-panel">
       <header className="flex flex-none items-start gap-2 border-b border-hairline px-4 py-3">
@@ -69,30 +67,24 @@ export function FilePreviewPane({ taskId, path, onOpen, onClose }: {
         </Button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        {failed !== null ? (
-          <p className="p-6 text-center text-xs leading-relaxed text-lamp-fail">{failed}</p>
-        ) : file === null ? (
-          <p className="cjk-label p-6 text-center">{t('preview.loading')}</p>
-        ) : markdown ? (
-          <div className="text-[13px]">
-            {/* 文档里的相对链接是相对这份文档说的，接好了再往下传。 */}
-            {renderMarkdown(file.content, {
-              onOpenFile: (next) => { onOpen(resolveFrom(file.path, next)) },
-            })}
-          </div>
-        ) : (
-          <pre className="mono whitespace-pre-wrap break-words text-[11px] leading-relaxed text-ink-dim">
-            {file.content}
-          </pre>
-        )}
-      </div>
-
-      {file?.truncated === true ? (
-        <p className="cjk-label flex-none border-t border-hairline px-4 py-2 !text-lamp-fail">
-          {t('preview.truncated')}
-        </p>
-      ) : null}
+      {failed !== null ? (
+        <p className="p-6 text-center text-xs leading-relaxed text-lamp-fail">{failed}</p>
+      ) : file === null ? (
+        <p className="cjk-label p-6 text-center">{t('preview.loading')}</p>
+      ) : (
+        <FileView
+          name={file.name}
+          kind={file.kind}
+          content={file.content}
+          doc={file.doc}
+          truncated={file.truncated}
+          // PDF 与图片的字节走这个口子。用**服务端回的那条路径**去问，不是
+          // 用户点的那条 —— 它可能是相对的，也可能落在了另一个根上。
+          rawUrl={taskFileUrl(taskId, file.path)}
+          // 文档里的相对链接是相对这份文档说的，接好了再往下传。
+          onOpenFile={(next) => { onOpen(resolveFrom(file.path, next)) }}
+        />
+      )}
     </div>
   )
 }

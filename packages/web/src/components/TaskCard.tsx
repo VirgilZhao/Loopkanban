@@ -1,11 +1,14 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Archive, CircleAlert, FolderGit2, ListChecks, Lock, Paperclip, PauseCircle } from 'lucide-react'
+import {
+  Archive, CircleAlert, FolderGit2, GitPullRequest, Link2, ListChecks, Lock, Paperclip,
+  PauseCircle, TriangleAlert,
+} from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { taskClockFrom } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { LiveLine, Skip, Task } from '@/types.ts'
+import type { LiveLine, PullRequest, RunFailure, Skip, Task } from '@/types.ts'
 
 /** 把毫秒时长压成人能扫一眼的形式。 */
 function since(from: number, now: number): string {
@@ -23,22 +26,35 @@ interface Props {
   live?: LiveLine | undefined
   /** 调度器这一轮为什么没派它。 */
   skip?: Skip | undefined
+  /**
+   * 上一轮执行没跑成时的收场。**Review 那一列的卡才有** —— 成败同处一列，
+   * 不写出来的话，"干完了等你验"和"压根没跑起来"在看板上长得一模一样。
+   */
+  failure?: RunFailure | undefined
   /** 所属项目名。只有概览里才给 —— 单项目视图下每张卡都一样，写了是噪音。 */
   projectName?: string | undefined
   /** 挂了几个附件。0 就不显示那枚回形针。 */
   attachments?: number | undefined
+  /** 这张卡开过的 PR，新的在前。一条都没有就不显示那枚标记。 */
+  prs?: PullRequest[] | undefined
   onSelect: (task: Task) => void
 }
 
 export function TaskCard({
-  task, now, selected, live, skip, projectName, attachments, onSelect,
+  task, now, selected, live, skip, failure, projectName, attachments, prs, onSelect,
 }: Props): React.JSX.Element {
   const t = useT()
+  // Done 的卡最该一眼看出"是怎么进主干的"：合过几条 PR。还开着的那些
+  // 也算进这个数，但颜色不给亮的 —— 开着不等于合上了。
+  const merged = prs?.filter((pr) => pr.state === 'merged') ?? []
   const archived = task.archivedAt !== undefined
+  // Done 的卡同样拖不动：那一列是终点（领域层不给它任何出口），顺序也不再由
+  // position 决定，而是按完成时间从新到旧排。留着拖拽只会让人拖完看见它弹回去。
+  const fixed = archived || task.column === 'done'
   // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
   // 只换来一条错误提示。
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: task.id, disabled: archived,
+    id: task.id, disabled: fixed,
   })
   const running = task.column === 'running'
   const leaseExpired = task.lease !== undefined && task.lease.expiresAt <= now
@@ -56,6 +72,8 @@ export function TaskCard({
         'group relative cursor-grab overflow-hidden rounded-xl border border-hairline px-3 py-2.5 text-left',
         'shadow-sm transition-[border-color,box-shadow] duration-150',
         'hover:border-hairline-bright hover:shadow-md',
+        // 拖不动的卡不摆出"可以抓"的手势。
+        fixed && 'cursor-default',
         selected && 'border-sodium-deep ring-1 ring-sodium-deep/30',
         isDragging && 'z-50 cursor-grabbing opacity-90 shadow-lg',
         // 归档的卡是背景板：看得见、认得出，但不参与任何操作。
@@ -64,7 +82,9 @@ export function TaskCard({
     >
       {/* 正在执行的卡片带一条持续扫描的轨 —— 与 Running 列头那个转圈一起，是界面里仅有的恒动元素。 */}
       {running && !leaseExpired ? <span className="scan-rail" aria-hidden /> : null}
-      {leaseExpired ? <span className="absolute inset-y-0 start-0 w-0.5 bg-lamp-fail" aria-hidden /> : null}
+      {leaseExpired || failure !== undefined
+        ? <span className="absolute inset-y-0 start-0 w-0.5 bg-lamp-fail" aria-hidden />
+        : null}
 
       <div className={cn('flex items-center gap-2', running && 'ps-1.5')}>
         <span className="tag">{task.id}</span>
@@ -110,6 +130,22 @@ export function TaskCard({
         </p>
       ) : null}
 
+      {/* 这一轮跑挂了。诊断挂在 title 上 —— 卡片是扫视用的，一行说清"它没跑成"
+          就够，为什么挂的要去弹窗里读日志。 */}
+      {failure === undefined ? null : (
+        <p
+          title={failure.diagnostic ?? t('card.runFailedHint')}
+          className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-lamp-fail"
+        >
+          <TriangleAlert className="mt-[2px] size-3 flex-none" />
+          <span className="min-w-0 truncate">
+            {failure.status === 'aborted'
+              ? t('card.runAborted', { provider: failure.provider })
+              : t('card.runFailed', { provider: failure.provider })}
+          </span>
+        </p>
+      )}
+
       {/* 「我的卡为什么不动」——调度器跳过它的原因直接写在卡上。 */}
       {skip === undefined ? null : (
         <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-ink-faint">
@@ -135,6 +171,22 @@ export function TaskCard({
             <Paperclip className="size-3" />{attachments}
           </span>
         )}
+        {prs === undefined || prs.length === 0 ? null : (
+          <span
+            className={cn('mono flex items-center gap-1 text-[10px]', merged.length > 0 && 'text-lamp-ok')}
+            title={prs.map((pr) => `#${String(pr.number)} ${pr.state}`).join('\n')}
+          >
+            <GitPullRequest className="size-3" />
+            {merged.length > 0 ? merged.map((pr) => `#${String(pr.number)}`).join(' ') : prs.length}
+          </span>
+        )}
+        {/* 关联用普通色，依赖那把锁是警示色：一个是"还有东西要读"，
+            另一个是"这张卡现在动不了"，两者不该长得一样。 */}
+        {task.relatedTo.length > 0 ? (
+          <span className="mono flex items-center gap-1 text-[10px]" title={t('card.related')}>
+            <Link2 className="size-3" />{task.relatedTo.length}
+          </span>
+        ) : null}
         {projectName === undefined ? null : (
           <span className="flex min-w-0 items-center gap-1 truncate text-[10px]">
             <FolderGit2 className="size-3 flex-none" />{projectName}

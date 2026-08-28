@@ -14,13 +14,14 @@ import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar.tsx'
-import { maybe, useT, type MessageKey, type Translate } from '@/lib/i18n.tsx'
+import { explain, useT, type MessageKey } from '@/lib/i18n.tsx'
 import { insertPosition } from '@/lib/position.ts'
-import { isUntouchedDraft, taskTitle } from '@/lib/task.ts'
+import { doneOrder, isUntouchedDraft, projectActivity, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type RunStats,
-  type SchedulerState, type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type PullRequest,
+  type RunFailure,
+  type RunStats, type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
@@ -38,17 +39,6 @@ const PAGES: readonly { key: Page; label: MessageKey }[] = [
   { key: 'tasks', label: 'header.tabTasks' },
   { key: 'files', label: 'header.tabFiles' },
 ]
-
-/**
- * 领域错误码 → 用户能照做的说明。
- *
- * 拖拽被拒时卡片会弹回原位，如果不解释清楚，用户只会觉得"拖不动"。
- * 所以这里给的不是错误名，而是下一步该做什么。文案在 `lib/i18n` 的
- * `err.*` 里，两种语言各一份；没有对应文案的码原样端出来。
- */
-function explain(t: Translate, code: string, detail: string): string {
-  return maybe(t, `err.${code}`, `${code} · ${detail}`)
-}
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
 function notify(title: string, body: string): void {
@@ -75,6 +65,13 @@ export default function App(): React.JSX.Element {
   const [live, setLive] = useState<Record<string, LiveLine>>({})
   // 每张卡挂了几个附件，跟着看板轮询一起来 —— 卡上那枚回形针靠它。
   const [attachments, setAttachments] = useState<Record<string, number>>({})
+  // 每张卡开过哪些 PR，同样跟着轮询来 —— Done 的卡要在卡面上标出它是靠
+  // 哪几条 PR 进主干的，不必点开。
+  const [prs, setPrs] = useState<Record<string, PullRequest[]>>({})
+  // Review 里上一轮没跑成的卡。那一列成败同处，不标出来就得一张张点开看。
+  const [failures, setFailures] = useState<Record<string, RunFailure>>({})
+  // 看板自己的那条通知：拖拽被拒、改项目、探测 CLI。**任务弹窗里的错误不走
+  // 这儿** —— 那条横幅在弹窗背后，说了也看不见，它自己会显示（见 RunPanel）。
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -94,7 +91,10 @@ export default function App(): React.JSX.Element {
   const creating = useRef(false)
 
   const refresh = useCallback(async () => {
-    const [{ tasks: loaded, projects: known, live: lines, attachments: clips }, state, summary] = await Promise.all([
+    const [
+      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls, failures: broken },
+      state, summary,
+    ] = await Promise.all([
       api.state(),
       api.scheduler().catch(() => null),
       api.stats().catch(() => null),
@@ -103,6 +103,8 @@ export default function App(): React.JSX.Element {
     setProjects(known)
     setLive(lines)
     setAttachments(clips)
+    setPrs(pulls)
+    setFailures(broken)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -195,6 +197,10 @@ export default function App(): React.JSX.Element {
       grouped[task.column].push(task)
     }
     for (const list of Object.values(grouped)) list.sort((a, b) => a.position - b.position)
+    // Done 是唯一不按 position 排的列：那里的 position 是这张卡在 Review 里
+    // 留下的残值，只反映当初排队的先后，作为"完成清单"的顺序毫无意义。
+    // 按完成时间从新到旧 —— 刚做完的在最上面，往下就是越来越旧的历史。
+    grouped.done.sort((a, b) => doneOrder(b) - doneOrder(a))
     return grouped
   }, [tasks, showArchived, view])
 
@@ -209,15 +215,8 @@ export default function App(): React.JSX.Element {
     return counted
   }, [tasks])
 
-  /** 侧边栏上的项目计数。归档的卡不算 —— 归档就是从视野里拿走。 */
-  const projectCounts = useMemo(() => {
-    const counted: Record<string, number> = {}
-    for (const task of tasks) {
-      if (task.archivedAt !== undefined) continue
-      counted[task.projectId] = (counted[task.projectId] ?? 0) + 1
-    }
-    return counted
-  }, [tasks])
+  /** 侧边栏上每个项目的计数、活动灯和 review 角标。 */
+  const activity = useMemo(() => projectActivity(tasks), [tasks])
 
   const projectById = useMemo(
     () => new Map(projects.map((project) => [project.id, project])),
@@ -372,7 +371,7 @@ export default function App(): React.JSX.Element {
         onRefreshAgents={() => { void refreshAgents() }}
         runningByAgent={runningByAgent}
         projects={projects}
-        counts={projectCounts}
+        activity={activity}
         total={tasks.filter((t) => t.archivedAt === undefined).length}
         view={view}
         onView={setView}
@@ -504,6 +503,8 @@ export default function App(): React.JSX.Element {
                 selectedId={selectedId}
                 live={live}
                 attachments={attachments}
+                prs={prs}
+                failures={failures}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
                 // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
@@ -532,6 +533,9 @@ export default function App(): React.JSX.Element {
           <RunPanel
             task={selected}
             project={projectById.get(selected.projectId) ?? null}
+            // 只给同项目的卡：关联跨不了项目 —— 任务在这个项目派生的 worktree
+            // 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
+            siblings={tasks.filter((t) => t.projectId === selected.projectId && t.id !== selected.id)}
             agents={agents}
             onChanged={() => {
               // 动过一次（保存、派活、留言、归档……）就不再是"没写过的新卡"，
@@ -539,9 +543,6 @@ export default function App(): React.JSX.Element {
               // 等它 —— 否则刚保存的卡会被当成空白草稿收走。
               draftId.current = null
               void refresh()
-            }}
-            onError={(code, detail) => {
-              setNotice({ text: explain(t, code, detail), tone: 'warn' })
             }}
             onClose={() => { closeTask(selected) }}
           />

@@ -46,8 +46,6 @@ const zh = {
   'files.loading': '读取中…',
   'files.empty': '这个目录是空的',
   'files.pickFile': '点左边的文件看内容',
-  'files.binary': '二进制文件 · 不显示内容',
-  'files.truncated': '文件过大，这里只显示了前一部分。',
   'files.noProject': '还没有项目。先在左侧新增一个 —— 文件浏览要知道逛哪个仓库。',
 
   // ── 命令行 ─────────────────────────────────────────────
@@ -60,6 +58,35 @@ const zh = {
   'term.send': '发给正在跑的命令',
   'term.clear': '清空',
   'term.clearHint': '清空这块屏 —— 不影响正在跑的命令',
+
+  // ── 一键测试环境 ───────────────────────────────────────
+  'testenv.title': '测试环境',
+  'testenv.start': '启动测试环境',
+  'testenv.stop': '停止',
+  'testenv.edit': '改启动命令',
+  'testenv.cancelEdit': '不改了',
+  'testenv.save': '保存',
+  'testenv.commandLabel': '启动命令',
+  'testenv.commandPlaceholder': 'pnpm install && pnpm dev',
+  'testenv.needCommand': '这个项目还没配启动命令。写一条能把它跑起来的命令 —— 卡片的 worktree 是一份干净的源码副本，装依赖也写在这条命令里。',
+  'testenv.commandHint': '跑在这张卡自己的 worktree 里。端口由看板分配，命令里写 {{port}} 或读环境变量 PORT。',
+  'testenv.status.starting': '启动中',
+  'testenv.status.ready': '就绪',
+  'testenv.status.running': '运行中',
+  'testenv.status.exited': '已停止',
+  'testenv.logsEmpty': '还没有输出',
+  'testenv.logTitle': '测试环境日志',
+  'testenv.showLog': '看日志 —— 在右边开一栏',
+  'testenv.hideLog': '合上日志那一栏',
+  'testenv.autostop': '关掉这个面板一分钟后自动收掉，最多跑 30 分钟。验收、打回、废弃时也会立刻停。',
+  'testenv.noPort': '这条命令没有监听端口 —— 日志就是它的全部产出。',
+  'testenv.exited': '进程自己退出了（{code}）。上面的日志里有原因。',
+  'testenv.stoppedBy.manual': '已停止。',
+  'testenv.stoppedBy.idle': '没人看着，已经自动收掉了。再点一次启动就能回来。',
+  'testenv.stoppedBy.expired': '跑满 30 分钟，自动收掉了。要接着验就再启动一次。',
+  'testenv.stoppedBy.verdict': '这张卡判完了，环境跟着收掉 —— 它的工作区马上就不在了。',
+  'testenv.stoppedBy.shutdown': '看板退出，环境跟着收掉了。',
+
   'term.empty': '还没跑过命令。',
   'term.hint': '这是个真会话：`cd` 留得住，长命令边跑边出，ctrl+c 打断。vim / top 这类要终端的程序在这儿跑不起来。',
   'term.cwd': '工作目录 {path}',
@@ -91,6 +118,9 @@ const zh = {
   'sidebar.addProject': '新增项目',
   'sidebar.noProjects': '还没有项目',
   'sidebar.projectHint': '{path}\n基线 {branch}\n双击改名',
+  'sidebar.projectRunning': '{n} 张卡正在跑',
+  'sidebar.projectQueued': '{n} 张卡排着队等执行位',
+  'sidebar.projectReview': '{n} 张卡等你看一眼',
   'sidebar.deleteProjectNamed': '删除项目 {name}',
   'sidebar.deleteProject': '删除项目',
   'sidebar.agents': '本机 Agent',
@@ -130,10 +160,15 @@ const zh = {
   'column.running.hint': 'Agent 执行中',
   'column.review.hint': '等待人工验收 · 成败都在这儿',
   'column.done.hint': '已合并',
+  'column.review.failed': '{n} 张这一轮没跑成',
 
   // ── 卡片 ───────────────────────────────────────────────
   'card.empty': '还没写内容',
+  'card.related': '关联的卡片数 —— 派活时会作为参考写进 TASK.md',
   'card.leaseExpired': '租约已过期 · 待回收',
+  'card.runFailed': '这一轮跑挂了 · {provider}',
+  'card.runAborted': '这一轮被终止 · {provider}',
+  'card.runFailedHint': '点开看日志：这张卡停在 Review 不是因为干完了，是因为没跑成',
   'card.draftCleanupFailed': '那张没写内容的新卡没能删掉，它还留在想法池里，请手动删一下。',
 
   // ── 调度器为什么没派它 ─────────────────────────────────
@@ -168,6 +203,7 @@ const zh = {
   'panel.accept': '通过',
   'panel.discard': '废弃',
   'panel.acceptNote': '通过只把改动提交到分支 {branch}，不动你的主工作区；废弃会删掉分支并把卡退回 Backlog。要它再改一版，去讨论里说 —— 留言会把卡送回队列。',
+  'panel.errorDismiss': '知道了',
   'panel.rounds': '第 {n} 轮',
   'panel.roundsHint': '这个会话跑过的轮次 —— 每派出去跑一次 +1，第二轮起接的是同一个 Agent 会话',
   'panel.round': '#{n}',
@@ -181,6 +217,27 @@ const zh = {
   'panel.waiting': '等待事件…',
   'panel.noRuns': '暂无执行记录',
   'panel.inProgress': '进行中',
+  'panel.branchHint': 'Agent 干活的那条分支 —— 改动都在它上面，合的也是它',
+
+  // ── Pull Request ───────────────────────────────────────
+  'pr.title': 'Pull Request',
+  'pr.refresh': '刷新状态',
+  'pr.opened': '已开出 #{n}。',
+  'pr.reused': '这条分支已经有 PR #{n}，改动推上去了。',
+  'pr.willOpen': '按下就把改动提交到分支、把基线合进来、推上 {repo}，并开一条冲着 {base} 的 PR。合不合由你在 GitHub 上决定 —— 合上之后这张卡自动进 Done。',
+  'pr.fallback': '开不了 PR（{detail}），所以这颗按钮走的是本地合并：把分支合回主工作区的基线。',
+  'pr.pendingHint': 'PR 已经开好了，去 GitHub 上检查一遍、自己合。合上之后这张卡会自动收进 Done —— 等不及就点上面的刷新，立刻问一次。',
+  'pr.conflictingHint': 'GitHub 说这条 PR 有冲突 —— 基线在这期间又往前走了。再点一次「通过并合并」，冲突会被拉回这张卡的工作区，交给它自己去解。',
+  'pr.conflicting': '有冲突',
+  'pr.conflict': '与基线有冲突：{files}。',
+  'pr.conflictHandoff': '冲突留在工作区里，这张卡已经回到队列去解 —— 派它跑一轮，解完再点一次「通过并合并」。',
+  'pr.conflictDispatched': '冲突留在工作区里，已经派了一轮去解 —— 解完再点一次「通过并合并」。',
+  'pr.conflictStuck': '工作区里还有没解开的冲突，这张卡仍然停在 Review —— 去讨论里让它接着解，或者自己解完再点一次。',
+  'pr.collected': 'PR 已合并，这张卡收进 Done 了。',
+  'pr.stillOpen': '还没合上。',
+  'pr.state.open': '开着',
+  'pr.state.merged': '已合并',
+  'pr.state.closed': '已关闭',
 
   // ── 讨论 ───────────────────────────────────────────────
   'talk.you': '你',
@@ -191,6 +248,13 @@ const zh = {
   'talk.nextRound': '下一轮交给',
   'talk.sendFailed': '发不出去，稍后再试',
   'talk.send': '发送',
+  'talk.attach': '带上文件',
+  'talk.attachDropActive': '松手就传上去',
+  'talk.attachUploading': '正在上传 {name}',
+  'talk.attachRemove': '不带这个了',
+  'talk.attachFull': '一条留言最多带 {max} 个文件',
+  'talk.attachFailed': '这个文件没传上去，稍后再试',
+  'talk.attachRemoveFailed': '这个文件撤不掉，稍后再试',
 
   // ── 规格表单 ───────────────────────────────────────────
   'editor.lockedRunning': '正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。',
@@ -212,6 +276,13 @@ const zh = {
   'editor.modelHint': '{count} 个可选；不选就用 {provider} 自己的默认',
   'editor.modelDefault': '（默认模型）',
   // ── 附件 ───────────────────────────────────────────────
+  'editor.related': '关联任务',
+  'editor.relatedHint': '同项目的卡。派活时它们的正文会被写进 TASK.md 当参考 —— 是引用，不拦这张卡的执行',
+  'editor.relatedAdd': '＋ 关联一张卡',
+  'editor.relatedRemove': '取消这条关联',
+  'editor.relatedNone': '这个项目里还没有别的卡可以关联',
+  'editor.relatedAllPicked': '这个项目里的卡都关联上了',
+  'editor.relatedGone': '这张卡已经不在了',
   'editor.attachments': '附件',
   'editor.attachmentsHint': '图片、PDF、Word 都行。派活时会拷进工作区，并在 TASK.md 里点名交给 Agent',
   'editor.attachmentsDrop': '把文件拖到这儿，或点击选择',
@@ -238,6 +309,13 @@ const zh = {
   'preview.close': '关闭预览 · esc',
   'preview.loading': '读取中…',
   'preview.truncated': '文件太大，这里只显示了前一部分。完整的那份在本机磁盘上。',
+  'preview.rendered': '预览',
+  'preview.source': '原文',
+  'preview.binary': '这个格式在这儿看不了。',
+  'preview.legacyDoc': '旧版 .doc 是二进制私有格式。在 Word 里另存为 .docx 就能看了。',
+  'preview.noRaw': '这份文件要浏览器自己打开，而这里拿不到它的地址。',
+  'preview.emptyDoc': '这份文档是空的。',
+  'preview.docTruncated': '文档太长，这里只显示了前一部分。',
 
   // ── 新增 / 删除项目 ───────────────────────────────────
   'newProject.pickTitle': '选择项目文件夹',
@@ -305,6 +383,14 @@ const zh = {
   'err.dirty-worktree': '你的主工作区有未提交改动，先处理干净再合并。改动已经提交在任务分支上，不会丢。',
   'err.wrong-branch': '你的主工作区不在基线分支上。改动已经提交在任务分支上，切回去再合并即可。',
   'err.no-run': '这张卡还没有执行记录。',
+  'err.gh-missing': '本机没找到 gh。开 PR 用的是你自己登录好的 GitHub CLI —— 装上它并 `gh auth login`，或者改用本地合并。',
+  'err.no-remote': '这个仓库没有配置远端，推不上去，也就开不了 PR。',
+  'err.not-github': '这个远端不是 GitHub，开不了 PR —— gh 只认 GitHub（含企业版）。',
+  'err.gh-failed': 'gh 那边出错了。多半是没登录或没权限：在终端里跑一次 `gh auth status` 看它怎么说。',
+  'err.push-failed': '推不上去。远端上那条分支可能被别人动过，或者你没有推送权限 —— 改动已经提交在任务分支上，不会丢。',
+  'err.fetch-failed': '拉不到远端的基线分支。检查网络与远端配置。',
+  'err.merge-failed': '把基线合进任务分支时失败了（不是冲突）。去那个工作区里跑一次 git status 看它停在哪儿。',
+  'err.merge-conflict': '与基线有冲突。冲突留在这张卡的工作区里，解完再点一次「通过并合并」。',
   'err.no-worktree': '这次执行没留下工作区（多半是起进程就失败了），没有东西可验收 —— 去讨论里说一句让它重跑，或者废弃。',
   'err.task-archived': '这张卡已归档。要动它先取消归档 —— 归档的卡是冻结的，不会被自动认领。',
   'err.already-archived': '这张卡已经归档了。',
@@ -315,11 +401,15 @@ const zh = {
   'err.no-such-branch': '这个仓库里没有这条分支，可能刚被删掉。',
   'err.task-running': '这张卡正在执行，内容和附件都冻结着。要改先终止执行。',
   'err.too-many-attachments': '附件太多了。删掉几个再传 —— 一次给 Agent 塞几十份材料，它反而抓不住重点。',
+  'err.attachment-sent': '这个文件已经跟着留言发出去了 —— 讨论是一份记录，撤不回来。要更正就再留一条。',
   'err.no-attachments': '当前实例没有配置附件存储，传不了文件。',
   'err.attachment-not-found': '这个附件已经不在了，可能刚被删掉。',
   'err.attachment-gone': '这个附件的文件已经不在磁盘上了 —— 重新传一份。',
   'err.path-outside-workspace': '这条路径不在这张卡够得着的地方（它的工作区与项目仓库），不给看。',
   'err.not-text': '这是个二进制文件，在这儿预览只会是一屏乱码。',
+  'err.bad-document': '这份 Word 文档读不出来 —— 可能是坏了、加了密、正文大到翻不动，也可能本来就是别的东西改了扩展名。',
+  'err.too-large': '这份文档太大了，读进来翻会把标签页顶住。在本机打开它。',
+  'err.not-inlineable': '这个格式不能直接在浏览器里打开。',
   'err.unreadable': '这个文件读不动 —— 多半是权限不够。它确实在那儿，但当前用户打不开它。',
   /* 文档预览与文件浏览共用这一条，所以两种成因都要说到：它可能刚被删掉或
      改了名，也可能是那次执行的工作区整个清掉了。 */
@@ -330,6 +420,8 @@ const zh = {
   'err.empty-command': '得先写一条命令。',
   'err.no-such-shell': '这个终端会话已经不在了 —— 多半是离开太久被回收了。重新连接会开一个新的。',
   'err.shell-busy': '还有一条命令在跑。等它跑完，或者按 ctrl+c 打断它。',
+  'err.no-testenv': '当前实例没有启用测试环境，起不了。',
+  'err.no-test-command': '这个项目还没配启动命令 —— 在上面填一条，比如 `pnpm install && pnpm dev`。',
 }
 
 export type MessageKey = keyof typeof zh
@@ -361,8 +453,6 @@ const en: Record<MessageKey, string> = {
   'files.loading': 'Loading\u2026',
   'files.empty': 'This directory is empty',
   'files.pickFile': 'Pick a file on the left to read it',
-  'files.binary': 'Binary file \u00b7 not shown',
-  'files.truncated': 'This file is too large to show in full; only the first part is here.',
   'files.noProject': 'No projects yet. Add one on the left — the file browser has to know which repo to show.',
 
   'term.title': 'Shell',
@@ -374,6 +464,35 @@ const en: Record<MessageKey, string> = {
   'term.send': 'Send to the running command',
   'term.clear': 'Clear',
   'term.clearHint': 'Clear the screen — the running command is unaffected',
+
+  // ── One-click test environment ─────────────────────────
+  'testenv.title': 'Test environment',
+  'testenv.start': 'Start it up',
+  'testenv.stop': 'Stop',
+  'testenv.edit': 'Edit the start command',
+  'testenv.cancelEdit': 'Never mind',
+  'testenv.save': 'Save',
+  'testenv.commandLabel': 'Start command',
+  'testenv.commandPlaceholder': 'pnpm install && pnpm dev',
+  'testenv.needCommand': 'This project has no start command yet. Write one that gets it running — the card’s worktree is a clean copy of the source, so installing dependencies belongs in this command too.',
+  'testenv.commandHint': 'Runs in this card’s own worktree. The board picks the port: write {{port}} in the command, or read the PORT environment variable.',
+  'testenv.status.starting': 'starting',
+  'testenv.status.ready': 'ready',
+  'testenv.status.running': 'running',
+  'testenv.status.exited': 'stopped',
+  'testenv.logsEmpty': 'No output yet',
+  'testenv.logTitle': 'Test environment log',
+  'testenv.showLog': 'Show the log in a column on the right',
+  'testenv.hideLog': 'Close the log column',
+  'testenv.autostop': 'Closes itself a minute after you close this panel, and runs 30 minutes at most. Accepting, sending back, or discarding stops it immediately.',
+  'testenv.noPort': 'This command isn’t listening on a port — the log is all it produces.',
+  'testenv.exited': 'The process exited on its own ({code}). The log above says why.',
+  'testenv.stoppedBy.manual': 'Stopped.',
+  'testenv.stoppedBy.idle': 'Nobody was watching, so it was cleaned up. Start it again to get it back.',
+  'testenv.stoppedBy.expired': 'It hit the 30-minute cap and was cleaned up. Start it again to keep testing.',
+  'testenv.stoppedBy.verdict': 'The card was decided, so the environment went with it — its worktree is about to be gone.',
+  'testenv.stoppedBy.shutdown': 'The board shut down and took the environment with it.',
+
   'term.empty': 'Nothing run yet.',
   'term.hint': 'A real session: `cd` sticks, long commands stream as they go, ctrl+c interrupts. Programs that need a terminal (vim, top) won\u2019t run here.',
   'term.cwd': 'in {path}',
@@ -404,6 +523,9 @@ const en: Record<MessageKey, string> = {
   'sidebar.addProject': 'Add project',
   'sidebar.noProjects': 'No projects yet',
   'sidebar.projectHint': '{path}\nbase {branch}\nDouble-click to rename',
+  'sidebar.projectRunning': '{n} running',
+  'sidebar.projectQueued': '{n} queued for a slot',
+  'sidebar.projectReview': '{n} waiting for your review',
   'sidebar.deleteProjectNamed': 'Delete project {name}',
   'sidebar.deleteProject': 'Delete project',
   'sidebar.agents': 'Local agents',
@@ -440,9 +562,14 @@ const en: Record<MessageKey, string> = {
   'column.running.hint': 'Agent at work',
   'column.review.hint': 'Waiting on you · pass and fail both land here',
   'column.done.hint': 'Merged',
+  'column.review.failed': '{n} didn’t finish this round',
 
   'card.empty': 'Nothing written yet',
+  'card.related': 'Linked cards — written into TASK.md as reference at dispatch',
   'card.leaseExpired': 'Lease expired · to be reclaimed',
+  'card.runFailed': 'This round failed · {provider}',
+  'card.runAborted': 'This round was stopped · {provider}',
+  'card.runFailedHint': 'Open it and read the log — this card is in Review because the run didn’t finish, not because it did',
   'card.draftCleanupFailed': 'That blank new card could not be removed — it is still in the idea pool, so delete it by hand.',
 
   'skip.blocked-by-dependency': 'Unfinished dependencies: {0}',
@@ -475,6 +602,7 @@ const en: Record<MessageKey, string> = {
   'panel.accept': 'Accept',
   'panel.discard': 'Discard',
   'panel.acceptNote': 'Accepting only commits the work to branch {branch}; your main worktree is untouched. Discarding deletes the branch and sends the card back to Backlog. Want another pass? Say so in Talk — a comment requeues the card.',
+  'panel.errorDismiss': 'dismiss',
   'panel.rounds': 'round {n}',
   'panel.roundsHint': 'Rounds this session has run — +1 each time the card is handed out; from the second one on it resumes the same agent session',
   'panel.round': '#{n}',
@@ -488,6 +616,26 @@ const en: Record<MessageKey, string> = {
   'panel.waiting': 'Waiting for events…',
   'panel.noRuns': 'No runs yet',
   'panel.inProgress': 'running',
+  'panel.branchHint': 'The branch the agent works on — every change lives there, and that is what gets merged',
+
+  'pr.title': 'Pull request',
+  'pr.refresh': 'Refresh',
+  'pr.opened': 'Opened #{n}.',
+  'pr.reused': 'This branch already had PR #{n}; the changes were pushed to it.',
+  'pr.willOpen': 'This commits the changes, merges the base in, pushes to {repo}, and opens a PR against {base}. Merging stays your call on GitHub — once it lands, this card moves to Done on its own.',
+  'pr.fallback': 'No PR possible here ({detail}), so this button does a local merge instead: the branch goes back into the base in your main worktree.',
+  'pr.pendingHint': 'The PR is open. Review it on GitHub and merge it yourself. Once merged, this card moves to Done automatically — hit Refresh above to ask right now.',
+  'pr.conflictingHint': 'GitHub says this PR conflicts — the base moved on in the meantime. Hit Accept & merge again and the conflict is pulled back into this card’s worktree for it to resolve.',
+  'pr.conflicting': 'conflicts',
+  'pr.conflict': 'Conflicts with the base: {files}.',
+  'pr.conflictHandoff': 'The conflict is left in the worktree and the card went back to the queue — dispatch a round to resolve it, then hit Accept & merge again.',
+  'pr.conflictDispatched': 'The conflict is left in the worktree and a round was dispatched to resolve it — hit Accept & merge again once it lands.',
+  'pr.conflictStuck': 'The worktree still has unresolved conflicts and this card is still in Review — say so in Talk to have it finish the job, or resolve them yourself and hit the button again.',
+  'pr.collected': 'PR merged; this card moved to Done.',
+  'pr.stillOpen': 'Not merged yet.',
+  'pr.state.open': 'open',
+  'pr.state.merged': 'merged',
+  'pr.state.closed': 'closed',
 
   'talk.you': 'You',
   'talk.placeholderRequeue': 'What should it change? Sending this puts the card back in the queue',
@@ -497,6 +645,13 @@ const en: Record<MessageKey, string> = {
   'talk.nextRound': 'Next round goes to',
   'talk.sendFailed': 'Could not send — try again',
   'talk.send': 'Send',
+  'talk.attach': 'Attach files',
+  'talk.attachDropActive': 'Let go to upload',
+  'talk.attachUploading': 'Uploading {name}',
+  'talk.attachRemove': 'Drop this file',
+  'talk.attachFull': 'A comment carries at most {max} files',
+  'talk.attachFailed': 'That file didn’t upload — try again',
+  'talk.attachRemoveFailed': 'Couldn’t drop that file — try again',
 
   'editor.lockedRunning': 'A run is in progress, so the spec is frozen — otherwise you and the agent would be reading two different ones. Stop the run to edit.',
   'editor.lockedArchived': 'Archived, so the content is frozen. Restore it from the archive to edit.',
@@ -516,6 +671,13 @@ const en: Record<MessageKey, string> = {
   'editor.modelUnknown': 'Couldn’t list models for {provider} (offline, or it won’t report them) — this run uses its own default.',
   'editor.modelHint': '{count} available; leave it unset to use {provider}’s own default',
   'editor.modelDefault': '(default model)',
+  'editor.related': 'Related tasks',
+  'editor.relatedHint': 'Cards in this project. Their text is written into TASK.md as reference at dispatch — a citation, not a blocker',
+  'editor.relatedAdd': '+ Link a card',
+  'editor.relatedRemove': 'Unlink this one',
+  'editor.relatedNone': 'No other card in this project to link yet',
+  'editor.relatedAllPicked': 'Every card in this project is already linked',
+  'editor.relatedGone': 'This card is gone',
   'editor.attachments': 'Attachments',
   'editor.attachmentsHint': 'Images, PDFs, Word documents. They are copied into the workspace at dispatch and listed for the agent in TASK.md',
   'editor.attachmentsDrop': 'Drop files here, or click to pick',
@@ -540,6 +702,13 @@ const en: Record<MessageKey, string> = {
   'preview.close': 'Close preview · esc',
   'preview.loading': 'Reading…',
   'preview.truncated': 'The file is too large to show in full; only the first part is here. The whole thing is on disk.',
+  'preview.rendered': 'Rendered',
+  'preview.source': 'Source',
+  'preview.binary': 'This format can’t be shown here.',
+  'preview.legacyDoc': 'Legacy .doc is a binary proprietary format. Save it as .docx in Word and it will show up.',
+  'preview.noRaw': 'This file has to be opened by the browser itself, and there’s no address for it here.',
+  'preview.emptyDoc': 'This document is empty.',
+  'preview.docTruncated': 'The document is long; only the first part is shown here.',
 
   'newProject.pickTitle': 'Pick a project folder',
   'newProject.pickHint': 'You’re browsing the machine running LoopKanban. Only git repos can be projects.',
@@ -601,6 +770,14 @@ const en: Record<MessageKey, string> = {
   'err.dirty-worktree': 'Your main worktree has uncommitted changes; clean it up before merging. The work is already committed on the task branch, so nothing is lost.',
   'err.wrong-branch': 'Your main worktree isn’t on the base branch. The work is already committed on the task branch — switch back and merge again.',
   'err.no-run': 'This card has no runs yet.',
+  'err.gh-missing': 'No gh found here. Opening a PR uses your own logged-in GitHub CLI — install it and run `gh auth login`, or fall back to a local merge.',
+  'err.no-remote': 'This repo has no remote, so there is nothing to push to and no PR to open.',
+  'err.not-github': 'That remote isn’t GitHub, so no PR can be opened — gh only speaks GitHub (Enterprise included).',
+  'err.gh-failed': 'gh errored out. Usually that means not logged in or no access: run `gh auth status` in a terminal and see what it says.',
+  'err.push-failed': 'The push failed. The remote branch may have been changed by someone else, or you lack push access — the work is committed on the task branch either way.',
+  'err.fetch-failed': 'Could not fetch the base branch from the remote. Check your network and remote config.',
+  'err.merge-failed': 'Merging the base into the task branch failed (not a conflict). Run git status in that worktree to see where it stopped.',
+  'err.merge-conflict': 'Conflicts with the base. They are left in this card’s worktree — resolve them, then hit Accept & merge again.',
   'err.no-worktree': 'That run left no worktree (it most likely failed at launch), so there’s nothing to review — say something in Talk to make it try again, or discard it.',
   'err.task-archived': 'This card is archived. Restore it first — archived cards are frozen and never claimed automatically.',
   'err.already-archived': 'This card is already archived.',
@@ -611,11 +788,15 @@ const en: Record<MessageKey, string> = {
   'err.no-such-branch': 'That branch isn’t in this repo — it may have just been deleted.',
   'err.task-running': 'A run is in progress, so the spec and its attachments are frozen. Stop the run to edit.',
   'err.too-many-attachments': 'Too many attachments. Remove a few first — dozens of files at once and the agent loses the thread.',
+  'err.attachment-sent': 'This file already went out with a comment — the thread is a record. Leave another comment instead.',
   'err.no-attachments': 'This instance has no attachment storage configured, so files can’t be uploaded.',
   'err.attachment-not-found': 'That attachment is gone; it may have just been deleted.',
   'err.attachment-gone': 'That attachment’s file is no longer on disk — upload it again.',
   'err.path-outside-workspace': 'That path is outside what this card can reach (its worktree and the project repo).',
   'err.not-text': 'That’s a binary file — previewing it here would just be a screen of noise.',
+  'err.bad-document': 'This Word document can’t be read — it may be damaged, encrypted, too large to page through, or just something else with a .docx name.',
+  'err.too-large': 'This document is too large to read in and page through here. Open it on your machine.',
+  'err.not-inlineable': 'This format can’t be opened directly in the browser.',
   'err.unreadable': 'That file can’t be opened — most likely permissions. It is there, but this user can’t read it.',
   'err.no-such-file': 'That file is gone — deleted or renamed, or the worktree for that run was removed.',
   'err.no-such-dir': 'Can’t open that directory; it may have just been deleted or renamed.',
@@ -624,6 +805,8 @@ const en: Record<MessageKey, string> = {
   'err.empty-command': 'Type a command first.',
   'err.no-such-shell': 'That shell session is gone — most likely collected after sitting idle. Reconnecting opens a fresh one.',
   'err.shell-busy': 'Another command is still running. Wait for it, or hit ctrl+c to interrupt.',
+  'err.no-testenv': 'This instance has no test environments enabled.',
+  'err.no-test-command': 'This project has no start command yet — write one above, e.g. `pnpm install && pnpm dev`.',
 }
 
 const TABLES: Record<Lang, Record<MessageKey, string>> = { zh, en }
@@ -705,6 +888,17 @@ export function useT(): Translate {
  */
 export function maybe(t: Translate, key: string, fallback: string): string {
   return key in zh ? t(key as MessageKey) : fallback
+}
+
+/**
+ * 领域错误码 → 用户能照做的说明。
+ *
+ * 服务端给的是错误码，人要的是"下一步该做什么"。文案在 `err.*` 里两种语言
+ * 各一份；没有对应文案的码连同原文一起端出来 —— 咽掉它只会让人对着一个
+ * 没反应的按钮发呆。
+ */
+export function explain(t: Translate, code: string, detail: string): string {
+  return maybe(t, `err.${code}`, `${code} · ${detail}`)
 }
 
 /**

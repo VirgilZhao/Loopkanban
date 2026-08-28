@@ -12,25 +12,26 @@ import {
   type IncomingMessage, type Server, type ServerResponse,
 } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
-import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
+import { basename, extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
-  unarchiveTask, type Column, type Task, type TaskEdit,
+  archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropReferences, editTask, moveTask,
+  unarchiveTask, type Column, type Task, type TaskEdit, type TaskId,
 } from '@loopkanban/core'
 import { AgentPool, type DetectedAgent } from '../agents/index.ts'
 import {
   canInline, mimeOf, safeFilename, AttachmentStore,
-  MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_COMMENT, MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
 } from '../attachments/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
-import type { Attachment, Storage } from '../storage/index.ts'
+import { DRAFT_COMMENT, type Attachment, type Storage } from '../storage/index.ts'
+import type { TestEnvs } from '../testenv/index.ts'
 import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
-import { readFilePreview } from './preview.ts'
+import { readFilePreview, resolvePreviewTarget } from './preview.ts'
 import { RunBus } from './bus.ts'
 import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
 import { ShellBusyError, ShellHub, type ShellEvent, type ShellSession } from './shell.ts'
@@ -53,6 +54,9 @@ const DEFAULT_SSE_HEARTBEAT_MS = 20_000
  */
 const SHELL_SIGNALS = new Set(['SIGINT', 'SIGTERM', 'SIGKILL', 'SIGQUIT', 'SIGHUP'])
 
+/** 一次性读取事件日志时最多回多少条。轮询的调用方要的是最近发生了什么。 */
+const EVENT_PAGE = 200
+
 export interface ServerOptions {
   readonly storage: Storage
   /**
@@ -73,6 +77,11 @@ export interface ServerOptions {
   readonly attachments?: AttachmentStore
   /** 自动认领调度器。不给则界面上没有自动驾驶开关。 */
   readonly scheduler?: Scheduler
+  /**
+   * 一键测试环境。不给则那几条接口一律 503 —— 界面据此把按钮收起来，
+   * 而不是给一个按下去永远失败的按钮。
+   */
+  readonly testEnvs?: TestEnvs
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -140,6 +149,52 @@ function describeAgent({ provider, caps }: DetectedAgent): Record<string, unknow
     // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
     ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
   }
+}
+
+/** 校验关联卡片的结果：要么是一串确实存在的同项目 id，要么是可回给调用方的拒绝。 */
+type RelatedResult =
+  | { readonly ok: true; readonly ids: TaskId[] }
+  | { readonly ok: false; readonly error: string; readonly detail: string }
+
+/**
+ * 校验一批关联卡片 id。
+ *
+ * 关联**只在同一个项目内成立**：任务在这个项目派生出来的 worktree 里干活，
+ * 指向另一个仓库里的卡，Agent 既读不到也用不上 —— 而它照样会被展开写进
+ * TASK.md，变成一段没法照做的需求。存进去之前就挡住，比派活那一刻才发现强。
+ *
+ * 同理，查无此卡的 id 也当场拒绝：领域层能去掉自指与重复，但"这个 id 到底
+ * 存不存在"要看别的卡，那不在它的视野里。
+ *
+ * @param raw - 请求里的原始值；`null` 与缺席都当作"清空"。
+ * @param siblings - 同项目的全部卡片。
+ * @param self - 这张卡自己；建卡时还没有，给 null。
+ */
+function resolveRelated(raw: unknown, siblings: readonly Task[], self: TaskId | null): RelatedResult {
+  if (raw === null || raw === undefined) return { ok: true, ids: [] }
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: 'bad-request', detail: 'relatedTo 要给一个任务 id 数组' }
+  }
+  const known = new Set(siblings.map((task) => String(task.id)))
+  const ids: TaskId[] = []
+  for (const item of raw as readonly unknown[]) {
+    if (typeof item !== 'string') {
+      return { ok: false, error: 'bad-request', detail: 'relatedTo 里只能是任务 id' }
+    }
+    if (self !== null && item === String(self)) {
+      return { ok: false, error: 'self-related', detail: '一张卡不能关联它自己' }
+    }
+    if (!known.has(item)) {
+      return {
+        ok: false,
+        error: 'no-such-related-task',
+        detail: `${item} 不在这个项目里 —— 只能关联同项目的卡`,
+      }
+    }
+    const id = asTaskId(item)
+    if (!ids.includes(id)) ids.push(id)
+  }
+  return { ok: true, ids }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
@@ -213,8 +268,32 @@ function describeAttachment(attachment: Attachment): Record<string, unknown> {
     filename: attachment.filename,
     mime: attachment.mime,
     size: attachment.size,
+    // 三态原样带出去（空串 = 还没发出去的草稿）：前端要靠它分辨这个文件
+    // 是撤得回的草稿，还是已经进了讨论记录的东西。
+    ...(attachment.commentId === undefined ? {} : { commentId: attachment.commentId }),
     at: attachment.at,
   }
+}
+
+/**
+ * 讨论线程对外的样子：每条留言把自己带的文件挂在身上。
+ *
+ * 附件不另开一个接口去拼：一句话和它随手贴的那张截图是一起说出来的，
+ * 前端要是得自己按 id 对齐两份列表，迟早会在某个刷新时序里把图挂到
+ * 上一条留言底下。
+ */
+function describeComments(storage: Storage, taskId: TaskId): Record<string, unknown>[] {
+  const byComment = new Map<string, Record<string, unknown>[]>()
+  for (const file of storage.listCommentAttachments(taskId)) {
+    const key = file.commentId ?? ''
+    const list = byComment.get(key) ?? []
+    list.push(describeAttachment(file))
+    byComment.set(key, list)
+  }
+  return storage.listComments(taskId).map((comment) => ({
+    ...comment,
+    ...(byComment.has(comment.id) ? { attachments: byComment.get(comment.id) } : {}),
+  }))
 }
 
 /** 从路径里取出形如 `/api/runs/<id>/events` 的片段。 */
@@ -236,6 +315,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const runner = options.runner
   const review = options.review
   const scheduler = options.scheduler
+  const testEnvs = options.testEnvs
   const attachmentStore = options.attachments
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
   const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
@@ -280,15 +360,48 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 带了几个附件也捎上：看板上那枚回形针得知道自己该不该出现，而为它
       // 单独开一轮请求（每张卡一次）就太贵了。只给数量，内容按需再取。
       const attachments: Record<string, number> = {}
+      /*
+       * 上一轮没跑成的卡，把收场也捎上。
+       *
+       * 成功与失败都停在 Review（running 只有这一个出口），所以那一列里
+       * 「已经干完等你验」和「压根没跑起来」长得一模一样 —— 不标出来，人只能
+       * 一张张点开才知道该验哪张。**只给 Review 那一列**：别处的卡要么还没跑、
+       * 要么已经判过，一个红标记在那儿只是旧闻。
+       */
+      const failures: Record<string, {
+        runId: string; provider: string; status: string; diagnostic?: string; at: number
+      }> = {}
+      const latest = storage.latestRuns()
       for (const task of tasks) {
         const count = storage.listAttachments(task.id).length
         if (count > 0) attachments[task.id] = count
+
+        const last = latest.get(task.id)
+        if (task.column === 'review' && last !== undefined
+          && (last.status === 'failed' || last.status === 'aborted')) {
+          failures[task.id] = {
+            runId: last.id,
+            provider: last.provider,
+            status: last.status,
+            ...(last.diagnostic === undefined ? {} : { diagnostic: last.diagnostic }),
+            at: last.endedAt ?? last.startedAt,
+          }
+        }
+
         const runId = task.lease?.runId
         if (task.column !== 'running' || runId === undefined) continue
         const event = storage.lastEvent(runId)
         if (event !== null) live[task.id] = { kind: event.kind, payload: event.payload, at: event.at }
       }
-      sendJson(res, 200, { projects: storage.listProjects(), tasks, live, attachments }, extraHeaders)
+      // 卡面上要标出"这张卡合过哪几条 PR"，所以一次读完全部 —— 一张卡问
+      // 一次的话，Done 列有多少张卡就是多少个请求。
+      const prs: Record<string, unknown[]> = {}
+      for (const pr of storage.listAllPullRequests()) {
+        (prs[pr.taskId] ??= []).push(pr)
+      }
+      sendJson(res, 200, {
+        projects: storage.listProjects(), tasks, live, attachments, prs, failures,
+      }, extraHeaders)
       return
     }
 
@@ -342,7 +455,69 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * 自己的路径拼接写错 —— 那种 bug 在「只列目录名」时是噪音，在「读文件正文」
      * 和「跑命令」时就是把整台机器摊开。
      */
+    /**
+     * 把一个文件的原始字节直接流给浏览器。
+     *
+     * PDF 与图片是这样出去的，而不是 base64 进 JSON：浏览器自带 PDF 阅读器，
+     * 图片更是给个 URL 就完事，绕一圈 base64 只是凭空胖三分之一再让前端解回来。
+     *
+     * **类型是一份允许清单，不是猜测**：只有图片和 PDF 会内联，别的一律拒绝。
+     * 这些字节和看板同源 —— 一个能内联渲染的 `.html` 就能拿着 cookie 调本机的
+     * 执行接口，那是把「看一眼文件」变成「在你机器上跑任意命令」。`.svg` 同样
+     * 不在清单里，它是能跑脚本的。
+     *
+     * @param path - 已经过围栏校验的绝对路径。
+     * @param name - 下载/内联时报的文件名。
+     */
+    const streamRaw = async (path: string, name: string): Promise<void> => {
+      const mime = mimeOf(name)
+      if (!canInline(mime)) {
+        sendJson(res, 415, { error: 'not-inlineable', detail: `${name} 不是能直接在浏览器里打开的类型` })
+        return
+      }
+      // 先拿 fd 再决定状态码：stat 与 open 之间那道缝里文件可能被删掉，而那时
+      // 头已经发出去了就改不成 404 了。（同附件那条路由，理由见其注释。）
+      const handle = await open(path, 'r').catch(() => null)
+      if (handle === null) {
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${path}` })
+        return
+      }
+      const info = await handle.stat().catch(() => null)
+      if (info?.isFile() !== true) {
+        await handle.close().catch(() => undefined)
+        sendJson(res, 404, { error: 'no-such-file', detail: `打不开 ${path}` })
+        return
+      }
+      res.writeHead(200, {
+        'content-type': mime,
+        'content-length': info.size,
+        'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(name)}`,
+        // 不许浏览器自作主张改判类型 —— 上面那份允许清单就白设了。
+        'x-content-type-options': 'nosniff',
+        // 文件随时在被 Agent 改写，缓存住只会让人看到上一版。
+        'cache-control': 'no-store',
+        ...extraHeaders,
+      })
+      const stream = handle.createReadStream()
+      // 读到一半的 I/O 错误改不了状态码，只能掐断连接 —— 但这个监听必须在：
+      // 少了它，一个读错误就是一次 uncaughtException，整个看板跟着没。
+      stream.on('error', (error: unknown) => {
+        console.error(`[loopkanban] 文件读取中断 ${path}:`, error)
+        res.destroy()
+      })
+      res.on('close', () => { stream.destroy() })
+      stream.pipe(res)
+    }
+
     const projectRoots = (): string[] => storage.listProjects().map((project) => project.repoPath)
+
+    /**
+     * 一张卡够得着的目录：它历次执行的 worktree，加上项目仓库。
+     *
+     * 预览与取原始字节两条路由共用它 —— 围栏只算一遍，才不会有一天走岔。
+     */
+    const reachableRoots = (task: Task): string[] =>
+      [...new Set([...storage.listRuns(task.id).map((run) => run.worktreePath), task.repoPath])]
 
     /**
      * 围栏没放行时的应答。
@@ -373,6 +548,23 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 200, { workspaces: await listWorkspaces(project.repoPath) }, extraHeaders)
+      return
+    }
+
+    /**
+     * 某个文件的原始字节。PDF 与图片走这里 —— 正文接口只回文本。
+     *
+     * 围栏与正文接口完全一样，一个字都不放松：能读到正文的地方才能读到字节。
+     */
+    if (method === 'GET' && pathname === '/api/files/raw') {
+      const roots = projectRoots()
+      const askedRoot = url.searchParams.get('root')?.trim() ?? ''
+      const askedPath = url.searchParams.get('path')?.trim() ?? ''
+      const root = await confine(roots, askedRoot)
+      if (root === null) { await refuse(roots, askedRoot, '只能看已登记项目仓库里的文件'); return }
+      const target = await confine([root], askedPath)
+      if (target === null) { await refuse([root], askedPath, '只能看已登记项目仓库里的文件'); return }
+      await streamRaw(target, basename(target))
       return
     }
 
@@ -649,9 +841,16 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const project = storage.getProject(target)
       if (project === null) { sendJson(res, 404, { error: 'project-not-found' }); return }
 
-      const body = await readJsonBody(req) as Partial<{ name: string; baseBranch: string }> | undefined
+      const body = await readJsonBody(req) as
+        (Partial<{ name: string; baseBranch: string; testCommand: string | null }> & Record<string, unknown>)
+        | undefined
       const name = body?.name?.trim()
       const baseBranch = body?.baseBranch?.trim()
+      // 同 PATCH 卡片：缺席是"这次没提到"，显式 null / 空串才是"清空"。
+      // 两者必须分得开，否则改个项目名就会顺手把启动命令抹掉。
+      const testCommand = body !== undefined && 'testCommand' in body
+        ? (body['testCommand'] as string | null) ?? ''
+        : undefined
       if (name !== undefined && name.length === 0) {
         sendJson(res, 400, { error: 'bad-request', detail: '项目名不能为空' })
         return
@@ -674,6 +873,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!storage.updateProject(target, {
         ...(name === undefined ? {} : { name }),
         ...(baseBranch === undefined ? {} : { baseBranch }),
+        ...(testCommand === undefined ? {} : { testCommand }),
       })) {
         sendJson(res, 404, { error: 'project-not-found' })
         return
@@ -710,6 +910,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       // 同 accept / discard / 删卡：状态先落定，不可逆的删除在后。
       // 收拾的只是我们自己建的 worktree 与任务分支，仓库本身一个字不动。
+      for (const task of tasks) await testEnvs?.stop(task.id, 'verdict')
       if (review !== undefined) {
         for (const task of tasks) await review.purge(task, runsOfTask.get(task.id) ?? [])
       }
@@ -724,7 +925,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (method === 'POST' && pathname === '/api/tasks') {
       const body = await readJsonBody(req) as Partial<{
         projectId: string; description: string; acceptance: string[]
-        preferredProvider: string; model: string
+        preferredProvider: string; model: string; relatedTo: string[]
       }> | undefined
       // 仓库与基线跟着项目走，不由建卡方指定 —— 任务干活的地方是这个项目
       // 派生出来的 worktree，两者对不上就没有意义。
@@ -734,6 +935,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
       const now = Date.now()
       const tasks = storage.listTasks(project.id)
+      // 建卡时就能带上关联 —— MCP 那边"照着这张卡再开一张"是常事，逼它先
+      // 建后改只是多一次往返。同项目的约束一样要过。
+      const related = resolveRelated(body?.relatedTo, tasks, null)
+      if (!related.ok) {
+        sendJson(res, related.error === 'bad-request' ? 400 : 422, {
+          error: related.error, detail: related.detail,
+        })
+        return
+      }
       const created: Task = {
         id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
         projectId: project.id,
@@ -749,6 +959,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         ...(body?.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
         ...(body?.model === undefined ? {} : { model: body.model }),
         blockedBy: [],
+        relatedTo: related.ids,
         createdAt: now,
         updatedAt: now,
       }
@@ -765,7 +976,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
 
       if (method === 'GET') {
-        sendJson(res, 200, { comments: storage.listComments(taskId) }, extraHeaders)
+        sendJson(res, 200, { comments: describeComments(storage, taskId) }, extraHeaders)
         return
       }
       if (method === 'POST') {
@@ -774,6 +985,28 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         const text = body?.body?.trim() ?? ''
         if (text.length === 0) {
           sendJson(res, 400, { error: 'bad-request', detail: '留言不能为空' })
+          return
+        }
+        // 这条话带上哪几个已经传好的草稿附件。文件先传、留言后发，所以
+        // 这里收的是 id 而不是字节 —— 真正的认领在留言落库之后。
+        const rawIds = body?.['attachmentIds']
+        const attachmentIds = Array.isArray(rawIds)
+          ? rawIds.filter((value): value is string => typeof value === 'string')
+          : []
+        /*
+         * 数量在这儿就挡住，**而且必须挡在留言落库之前**。
+         *
+         * 认领那一句是 `id IN (?, ?, …)`，一个 id 一个占位符；数量一大就顶穿
+         * SQLite 的参数上限，`prepare` 直接抛 —— 而那时留言已经写进去、卡可能
+         * 也已经回了队列，调用方却拿到一个 500，重试就多一条重复留言。
+         * 上传那一路本来就传不出超过这个数的草稿，所以这里拒绝也不冤枉任何
+         * 正常的客户端。
+         */
+        if (attachmentIds.length > MAX_ATTACHMENTS_PER_COMMENT) {
+          sendJson(res, 422, {
+            error: 'too-many-attachments',
+            detail: `一条留言最多带 ${String(MAX_ATTACHMENTS_PER_COMMENT)} 个附件`,
+          })
           return
         }
 
@@ -805,23 +1038,33 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           current = edited.value
         }
 
+        const commentId = `c-${randomUUID().slice(0, 8)}`
         storage.addComment({
-          id: `c-${randomUUID().slice(0, 8)}`,
+          id: commentId,
           taskId,
           author: 'human',
           body: text,
           at: Date.now(),
         })
-        // 在 Review 里留言就是"再改一版"：卡自动回队列，下一次执行带着
-        // 整条讨论走。别的列只是留个话，不动卡的位置。
+        // 认领在留言之后：反过来的话，留言写失败会留下一批挂在幽灵 id 上的
+        // 附件 —— 它们既不在草稿里也不在任何一条留言底下，谁都再看不见。
+        storage.attachToComment(taskId, attachmentIds, commentId)
+        // 在 Review **或 Done** 里留言就是"再改一版"：卡自动回队列，下一次
+        // 执行带着整条讨论走。Done 也算，是因为"合上去才发现还差一条"本来
+        // 就是这张卡的下一轮 —— 另开一张新卡会把讨论、worktree、已经合过的
+        // PR 全丢掉，而那些正是接着干最需要的东西。别的列只是留个话，
+        // 不动卡的位置。
         let moved = false
-        if (current.column === 'review') {
+        if (current.column === 'review' || current.column === 'done') {
           const next = moveTask(current, {
             expectedRevision: current.revision, to: 'ready', now: Date.now(),
           })
           if (next.ok) moved = storage.commitTask(next.value)
+          // 打回就是"这一版不要了，接着改"。那个还开着的测试环境跑的是上一版，
+          // 留着它只会让人对着一个马上就要被改掉的页面继续验。
+          if (moved) await testEnvs?.stop(taskId, 'verdict')
         }
-        sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)
+        sendJson(res, 201, { comments: describeComments(storage, taskId), requeued: moved }, extraHeaders)
         return
       }
     }
@@ -833,15 +1076,23 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * `x-filename` 头（URI 编码，非 ASCII 的文件名只有这样才能安全过头部）。
      * 自己写一个 multipart 解析器是这个项目最不值得的那种代码 —— 而"零运行时
      * 依赖"这条线又不允许引一个库进来。前端本来就一个一个地传。
+     *
+     * `?scope=draft` 走的是讨论那一路：文件先落地、等留言发出去时再认领。
+     * 两路共用这个口子是因为它们从头到尾是同一件事（收一份字节、记一条
+     * 元数据），只有"挂在哪儿"和"什么时候能传"不一样。
      */
     const attachmentsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/attachments$/)
     if (attachmentsOf !== null) {
       const taskId = asTaskId(decodeURIComponent(attachmentsOf))
       const task = storage.getTask(taskId)
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      // 讨论里传的文件属于那条还没发出去的留言，不是需求的一部分 ——
+      // 两路各看各的清单，谁也不该出现在对方的列表里。
+      const draft = url.searchParams.get('scope') === 'draft'
 
       if (method === 'GET') {
-        sendJson(res, 200, { attachments: storage.listAttachments(taskId).map(describeAttachment) }, extraHeaders)
+        const listed = draft ? storage.listDraftAttachments(taskId) : storage.listAttachments(taskId)
+        sendJson(res, 200, { attachments: listed.map(describeAttachment) }, extraHeaders)
         return
       }
       if (method === 'POST') {
@@ -858,22 +1109,32 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           refuse(503, { error: 'no-attachments', detail: '当前实例没有配置附件存储' })
           return
         }
-        // 与「正在执行的卡不能改需求」同一条规矩：附件就是需求的一部分，
-        // Agent 已经拿着 TASK.md 在干活了，此刻加一份材料只会让人和机器
-        // 对着两份规格。归档的卡是冻结的，同理。
-        if (task.column === 'running') {
+        /*
+         * 冻结的规矩只管规格附件。
+         *
+         * 与「正在执行的卡不能改需求」同一条：附件是需求的一部分，Agent
+         * 已经拿着 TASK.md 在干活了，此刻加一份材料只会让人和机器对着两份
+         * 规格。归档的卡是冻结的，同理。
+         *
+         * **讨论不受这条约束**，因为留言本来就不受：跑着的时候看见哪儿不对
+         * 顺手贴张图，和顺手留一句话是同一个动作，它们一起等下一轮被带走。
+         */
+        if (!draft && task.column === 'running') {
           refuse(422, { error: 'task-running', detail: '正在执行的卡片不能加附件，先终止执行' })
           return
         }
-        if (task.archivedAt !== undefined) {
+        if (!draft && task.archivedAt !== undefined) {
           refuse(422, { error: 'task-archived', detail: '这张卡已归档。要动它先取消归档' })
           return
         }
-        const existing = storage.listAttachments(taskId)
-        if (existing.length >= MAX_ATTACHMENTS_PER_TASK) {
+        const cap = draft ? MAX_ATTACHMENTS_PER_COMMENT : MAX_ATTACHMENTS_PER_TASK
+        const existing = draft ? storage.listDraftAttachments(taskId) : storage.listAttachments(taskId)
+        if (existing.length >= cap) {
           refuse(422, {
             error: 'too-many-attachments',
-            detail: `一张卡最多 ${String(MAX_ATTACHMENTS_PER_TASK)} 个附件`,
+            detail: draft
+              ? `一条留言最多带 ${String(cap)} 个附件`
+              : `一张卡最多 ${String(cap)} 个附件`,
           })
           return
         }
@@ -913,6 +1174,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           mime,
           size: stored.size,
           path: stored.path,
+          // 草稿先挂在空串上，等那条留言发出去再认领过去。
+          ...(draft ? { commentId: DRAFT_COMMENT } : {}),
           at: Date.now(),
         }
         storage.addAttachment(attachment)
@@ -988,13 +1251,28 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
       if (method === 'DELETE') {
         const owner = storage.getTask(attachment.taskId)
-        if (owner?.column === 'running') {
+        /*
+         * 已经跟着留言发出去的附件撤不回。
+         *
+         * 讨论是一份记录：话说出去了改不了，话里带的那张图自然也不该消失
+         * —— 底下若还接着 Agent 的回复，抽掉它就等于让那段对话失去依据。
+         * 要更正就再留一条，这也正是这条线程本来的用法。
+         */
+        if (attachment.commentId !== undefined && attachment.commentId !== DRAFT_COMMENT) {
+          sendJson(res, 422, {
+            error: 'attachment-sent', detail: '这个附件已经跟着留言发出去了，讨论是一份记录，撤不回来',
+          })
+          return
+        }
+        // 冻结只管规格附件：草稿附件和留言一样，跑着的时候也能收拾 ——
+        // 它要到下一轮才被带走，此刻动它谁也不碍着。
+        if (attachment.commentId === undefined && owner?.column === 'running') {
           sendJson(res, 422, { error: 'task-running', detail: '正在执行的卡片不能删附件，先终止执行' })
           return
         }
         // 归档的卡是冻结的，删附件和加附件同属"改需求"，两边必须同一套规矩
         // —— 上传拒了、删除放行，等于让归档这个动作只挡住一半。
-        if (owner?.archivedAt !== undefined) {
+        if (attachment.commentId === undefined && owner?.archivedAt !== undefined) {
           sendJson(res, 422, { error: 'task-archived', detail: '这张卡已归档。要动它先取消归档' })
           return
         }
@@ -1031,7 +1309,21 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const edit = Object.fromEntries(
         Object.entries(rest).map(([key, value]) => [key, value === null ? undefined : value]),
       ) as TaskEdit
-      const edited = editTask(task, { expectedRevision, edit, now: Date.now() })
+      // 关联要单独过一遍：那几个 id 是否真的存在、是否同项目，领域层看不到
+      // 别的卡，答不上来。**清空写成空数组而不是 undefined** —— 后者在
+      // editTask 眼里是"这次没提到关联"，于是"取消全部关联"永远存不下去。
+      let checked = edit
+      if ('relatedTo' in rest) {
+        const related = resolveRelated(rest['relatedTo'], storage.listTasks(task.projectId), task.id)
+        if (!related.ok) {
+          sendJson(res, related.error === 'bad-request' ? 400 : 422, {
+            error: related.error, detail: related.detail,
+          })
+          return
+        }
+        checked = { ...edit, relatedTo: related.ids }
+      }
+      const edited = editTask(task, { expectedRevision, edit: checked, now: Date.now() })
       if (!edited.ok) {
         sendJson(res, edited.reason === 'revision-conflict' ? 409 : 422, {
           error: edited.reason, detail: edited.detail,
@@ -1067,12 +1359,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
 
-      // 下游对它的依赖要一并摘掉：留着一个查无此卡的 id，那些卡会永远停在
-      // "依赖未完成"，而界面上没有任何操作能解开它。
+      // 别的卡对它的引用要一并摘掉：依赖留着一个查无此卡的 id，那些卡会永远
+      // 停在"依赖未完成"，而界面上没有任何操作能解开它；关联留着则会把一段
+      // 指向不存在之物的需求写进 TASK.md。
       const now = Date.now()
       const cascade = storage.listTasks(task.projectId)
         .filter((other) => other.id !== task.id)
-        .map((other) => dropDependency(other, task.id, now))
+        .map((other) => dropReferences(other, task.id, now))
         .filter((next): next is Task => next !== null)
       // Run 要在删库之前读出来 —— 删完就查不到该收拾哪些 worktree 了。
       const runs = storage.listRuns(task.id)
@@ -1083,6 +1376,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
       // 同 accept / discard：状态先落定，不可逆的删除在后。反过来的话一次
       // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
+      // purge 会删掉 worktree，所以跑在里面的测试环境必须先停。
+      await testEnvs?.stop(task.id, 'verdict')
       if (review !== undefined) await review.purge(task, runs)
       // 附件的字节也跟着卡一起走。库里的记录已经在事务里删掉了。
       if (attachmentStore !== undefined) await attachmentStore.removeTask(task.id)
@@ -1118,6 +1413,11 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (!storage.commitTask(moved.value)) {
         sendJson(res, 409, { error: 'revision-conflict', detail: '提交时已被他人改动，请重读后重试' })
         return
+      }
+      // 用拖的把卡挪出 Review，跟按下验收按钮是同一个意思：这张卡判完了。
+      // 只认"离开 Review"，列内换位置不动它 —— 那只是在排序。
+      if (task.column === 'review' && moved.value.column !== 'review') {
+        await testEnvs?.stop(task.id, 'verdict')
       }
       sendJson(res, 200, { task: moved.value }, extraHeaders)
       return
@@ -1187,28 +1487,170 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
      * 自己的 worktree，浏览器打不开。够得着的范围只有这张卡历次执行的
      * worktree 与项目仓库，越界一律拒绝（细则见 `preview.ts`）。
      */
+    /**
+     * 同一份文件的原始字节。PDF 与图片走这里 —— 预览接口只回文本与文档树。
+     *
+     * 围栏跟预览接口共用 `resolvePreviewTarget`，不是各写一遍：这两条路
+     * 只要有一天走岔，其中一条就是个能读任意文件的洞。
+     */
+    const rawOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file\/raw$/)
+    if (method === 'GET' && rawOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(rawOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      const found = await resolvePreviewTarget(url.searchParams.get('path') ?? '', reachableRoots(task))
+      if (!found.ok) {
+        sendJson(res, found.reason === 'path-outside-workspace' ? 422 : 404, {
+          error: found.reason, detail: found.detail,
+        })
+        return
+      }
+      // 读的是解完符号链接那条（真正的文件），报的名字用原路径的末段。
+      await streamRaw(found.target.real, basename(found.target.path))
+      return
+    }
+
     const fileOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/file$/)
     if (method === 'GET' && fileOf !== null) {
       const taskId = asTaskId(decodeURIComponent(fileOf))
       const task = storage.getTask(taskId)
       if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
 
-      const roots = [...new Set([
-        ...storage.listRuns(taskId).map((run) => run.worktreePath),
-        task.repoPath,
-      ])]
-      const found = await readFilePreview(url.searchParams.get('path') ?? '', roots)
+      const found = await readFilePreview(url.searchParams.get('path') ?? '', reachableRoots(task))
       if (!found.ok) {
         // 越界是「这个请求本身不成立」，不是「东西不在」——分开报，不然
         // 界面只能笼统地说一句打不开。
         const status = found.reason === 'path-outside-workspace' ? 422
           : found.reason === 'not-text' ? 415
+          // 「这是份 Word 但读不出来」跟「这个格式看不了」不是一回事，
+          // 混成同一个码，界面就只能笼统地说一句打不开。
+          : found.reason === 'bad-document' ? 422
+          : found.reason === 'too-large' ? 413
           : found.reason === 'unreadable' ? 403
           : 404
         sendJson(res, status, { error: found.reason, detail: found.detail })
         return
       }
       sendJson(res, 200, { file: found.file }, extraHeaders)
+      return
+    }
+
+    /*
+     * ── Pull Request ────────────────────────────────────────
+     *
+     * GET  列出这张卡的 PR，外加"这个仓库能不能开 PR"。
+     * POST 开一条：提交 → 跟上基线 → 推 → gh pr create。合不合由人在 GitHub
+     *      上决定，我们只在它真的合上之后把卡收进 Done。
+     * POST …/sync 问一遍现在怎么样了，顺带做那次收尾。
+     */
+    const prSync = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/prs\/sync$/)
+    if (method === 'POST' && prSync !== null) {
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+      const taskId = asTaskId(decodeURIComponent(prSync))
+      if (storage.getTask(taskId) === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const result = await review.syncPullRequests(taskId)
+      sendJson(res, 200, {
+        prs: storage.listPullRequests(taskId),
+        collected: result.collected,
+        task: storage.getTask(taskId),
+      }, extraHeaders)
+      return
+    }
+
+    const prsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/prs$/)
+    if (prsOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(prsOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, {
+          prs: storage.listPullRequests(taskId),
+          capability: await review.pullRequestCapability(task.repoPath),
+        }, extraHeaders)
+        return
+      }
+
+      if (method === 'POST') {
+        const result = await review.openPullRequest(taskId)
+        if (!result.ok) {
+          /*
+           * 冲突是**有下一步**的失败：改动已经提交在分支上，冲突原样留在
+           * 工作区里，卡也已经回了队列。既然本机就有 Agent，直接把这一轮派
+           * 出去 —— 让用户回看板再点一次"派活"，只是把一个我们已经知道该做
+           * 的动作推给他。派不出去（没装 CLI、卡刚被人动过）也不改变结论：
+           * 冲突这件事本身已经如实报了。
+           */
+          let dispatched: string | undefined
+          if (result.reason === 'merge-conflict' && result.requeued === true && runner !== undefined) {
+            const started = await runner.start(taskId)
+            if (started.ok) dispatched = started.run.id
+          }
+          sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {
+            error: result.reason,
+            detail: result.detail,
+            ...(result.files === undefined ? {} : { files: result.files }),
+            ...(result.requeued === undefined ? {} : { requeued: result.requeued }),
+            ...(dispatched === undefined ? {} : { dispatched }),
+          })
+          return
+        }
+        sendJson(res, 201, {
+          pr: result.pr,
+          created: result.created,
+          commit: result.commit,
+          prs: storage.listPullRequests(taskId),
+          task: storage.getTask(taskId),
+        }, extraHeaders)
+        return
+      }
+    }
+
+    /*
+     * ── 一键测试环境：起 / 看 / 停 ───────────────────────────
+     *
+     * 起在这张卡自己的 worktree 里，端口由 host 分配。**事件流那条连接就是
+     * 心跳** —— 关掉面板、关掉标签页之后没人再订阅，环境会自己被收掉，
+     * 不必让人记得回来按停止。
+     */
+    const envOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/testenv$/)
+    if (envOf !== null) {
+      if (testEnvs === undefined) { sendJson(res, 503, { error: 'no-testenv' }); return }
+      const taskId = asTaskId(decodeURIComponent(envOf))
+
+      if (method === 'GET') {
+        // 没有环境不是错：界面据此显示"未启动"。给 404 会逼前端把正常状态
+        // 当成异常来处理。
+        sendJson(res, 200, { env: testEnvs.view(taskId) }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const started = await testEnvs.start(taskId)
+        if (!started.ok) {
+          sendJson(res, started.reason === 'task-not-found' ? 404 : 422, {
+            error: started.reason, detail: started.detail,
+          })
+          return
+        }
+        sendJson(res, 201, { env: started.env }, extraHeaders)
+        return
+      }
+      if (method === 'DELETE') {
+        // 本来就没有环境也是 200：那是"它已经停了"这个完全正常的结果，同上面的
+        // GET。回 404 的话前端只能把它当异常抛出来，而 404 的响应体里没有
+        // `error` 字段，界面最后显示的是一句没有对应文案的 "unknown"。
+        const stopped = await testEnvs.stop(taskId, 'manual')
+        sendJson(res, 200, { stopped, env: testEnvs.view(taskId) }, extraHeaders)
+        return
+      }
+    }
+
+    const envStream = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/testenv\/events$/)
+    if (method === 'GET' && envStream !== null) {
+      if (testEnvs === undefined) { sendJson(res, 503, { error: 'no-testenv' }); return }
+      streamTestEnv(req, res, asTaskId(decodeURIComponent(envStream)), testEnvs)
       return
     }
 
@@ -1219,6 +1661,12 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const taskId = asTaskId(decodeURIComponent(verdict[1] as string))
       const body = await readJsonBody(req) as { merge?: boolean } | undefined
 
+      /*
+       * 测试环境由 Review 自己在动 worktree 之前收掉（`ReviewOptions.beforeMutate`）。
+       * **不在这儿先斩后奏**：验收会因为主工作区脏、卡被人改过这些原因被拒，
+       * 而在门口就把环境杀掉的话，一次被拒的验收会顺手弄没人正在用的试跑环境，
+       * 让他重新装一遍依赖 —— 明明这张卡一个字都没动过。
+       */
       const result = verdict[2] === 'accept'
         ? await review.accept(taskId, body?.merge === true)
         : await review.discard(taskId)
@@ -1248,6 +1696,34 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const run = storage.getRun(asRunId(decodeURIComponent(runId)))
       if (run === null) { sendJson(res, 404, { error: 'run-not-found' }); return }
       sendJson(res, 200, { run }, extraHeaders)
+      return
+    }
+
+    /*
+     * ── 事件日志（一次性读取）────────────────────────────────
+     *
+     * 与下面的 SSE 同源同数据，区别只在"谁在等谁"：浏览器开着面板，推给它
+     * 最省事；而 MCP 那边的调用方是一次问一句的 Agent，给它开一条流等于让它
+     * 抱着一个永远不结束的响应。`after` 与 SSE 的 `Last-Event-ID` 是同一个
+     * 游标，所以轮询与订阅之间可以无缝接上。
+     */
+    const logOf = matchPath(pathname, /^\/api\/runs\/([^/]+)\/log$/)
+    if (method === 'GET' && logOf !== null) {
+      const id = asRunId(decodeURIComponent(logOf))
+      if (storage.getRun(id) === null) { sendJson(res, 404, { error: 'run-not-found' }); return }
+      const asked = Number.parseInt(url.searchParams.get('after') ?? '0', 10)
+      // 消毒过的游标只算一次，后面一律用它 —— 分两处算的话，`?after=abc`
+      // 会让 lastSeq 变成 NaN（JSON 里就是 null），调用方拿它回问等于从头重来。
+      const after = Number.isFinite(asked) ? asked : 0
+      // 一次跑几万条事件是常事，整段回给调用方只会撑爆它的上下文。截断在
+      // **SQL 里**做（见 readRecentEvents），并且留最新的那一段 —— Agent 要的是
+      // "现在到哪儿了"；说清楚丢了多少，下一次拿 lastSeq 接着问就是。
+      const { events, total } = storage.readRecentEvents(id, after, EVENT_PAGE)
+      sendJson(res, 200, {
+        events,
+        lastSeq: events.at(-1)?.seq ?? after,
+        truncated: total > events.length,
+      }, extraHeaders)
       return
     }
 
@@ -1448,6 +1924,44 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     res.on('close', cleanup)
   }
 
+  /**
+   * 测试环境的事件流：状态变化与日志。
+   *
+   * 与 Run 的事件流有一处根本不同：**这条连接是有副作用的**。它是"还有人在看"
+   * 的唯一凭据，断开即开始收尸倒计时（见 `TestEnvs.subscribe`）。所以这里
+   * 一定要把 `close` 接好 —— 漏掉的话，那个环境会一直以为有人看着。
+   */
+  function streamTestEnv(
+    req: IncomingMessage,
+    res: ServerResponse,
+    taskId: ReturnType<typeof asTaskId>,
+    envs: TestEnvs,
+  ): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+
+    const lastHeader = req.headers['last-event-id']
+    const lastSeq = typeof lastHeader === 'string' ? Number.parseInt(lastHeader, 10) : 0
+    const from = Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0
+
+    const unsubscribe = envs.subscribe(taskId, from, (event) => {
+      res.write(`id: ${String(event.seq)}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`)
+    })
+
+    const heartbeat = setInterval(() => { res.write(': ping\n\n') }, heartbeatMs)
+    heartbeat.unref()
+    const cleanup = (): void => {
+      clearInterval(heartbeat)
+      unsubscribe()
+    }
+    req.on('close', cleanup)
+    res.on('close', cleanup)
+  }
+
   function streamRunEvents(req: IncomingMessage, res: ServerResponse, id: ReturnType<typeof asRunId>): void {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -1494,9 +2008,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     port,
     bus,
     close: async () => {
-      // 先收终端会话：它们手里攥着真实的进程树（`npm run dev` 就是典型），
-      // 关掉 HTTP 端口不会让它们退出，只会让它们变成没人认领的孤儿。
-      await shells.dispose()
+      // 先收终端会话与测试环境：它们手里攥着真实的进程树（`npm run dev`
+      // 就是典型），关掉 HTTP 端口不会让它们退出，只会让它们变成没人认领
+      // 的孤儿 —— 而那时已经没有任何界面能再找到它们了。
+      await Promise.all([shells.dispose(), testEnvs?.stopAll('shutdown')])
       await new Promise<void>((resolve, reject) => {
         server.close((error) => { error === undefined ? resolve() : reject(error) })
         server.closeAllConnections()

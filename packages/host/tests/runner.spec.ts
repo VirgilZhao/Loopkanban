@@ -68,7 +68,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     description: '加个 greet 函数\n\n要有测试',
     acceptance: ['greet.js 存在', '有单测'],
     repoPath: repo, baseBranch: 'main',
-    blockedBy: [], createdAt: T0, updatedAt: T0, ...rest,
+    blockedBy: [], relatedTo: [], createdAt: T0, updatedAt: T0, ...rest,
   }
 }
 
@@ -121,11 +121,89 @@ describe('renderTaskSpec / renderPrompt', () => {
   it('prompt 指向 TASK.md 而不是把长文堆进命令行', () => {
     expect(renderPrompt(task({ id: 't1' }))).toContain('TASK.md')
   })
+
+  it('没有关联时不摆一个空的「关联任务」节', () => {
+    expect(renderTaskSpec(task({ id: 't1' }))).not.toContain('## 关联任务')
+    expect(renderPrompt(task({ id: 't1' }))).not.toContain('关联')
+  })
+
+  it('关联的卡整段展开：状态、正文、验收标准都在', () => {
+    const other = task({
+      id: 't2', column: 'done',
+      description: '统一错误码\n\n所有接口的错误都走同一份表',
+      acceptance: ['errors.ts 导出 CODES'],
+    })
+    const spec = renderTaskSpec(task({ id: 't1', relatedTo: [other.id] }), [], [], [other])
+    expect(spec).toContain('## 关联任务')
+    expect(spec).toContain('t2')
+    expect(spec).toContain('已完成')
+    // 光给一串 id 等于没给：Agent 没有任何办法查到那张卡长什么样。
+    expect(spec).toContain('所有接口的错误都走同一份表')
+    expect(spec).toContain('errors.ts 导出 CODES')
+  })
+
+  it('关联卡的身份要写明是参考，否则 Agent 会顺手把它们的验收标准也做掉', () => {
+    const other = task({ id: 't2', description: '另一张卡' })
+    const spec = renderTaskSpec(task({ id: 't1', relatedTo: [other.id] }), [], [], [other])
+    expect(spec).toContain('参考资料')
+    expect(renderPrompt(task({ id: 't1' }), [], false, [], [other])).toContain('参考资料')
+  })
+
+  it('太长的关联描述只截前一段，并且明说截了', () => {
+    const other = task({ id: 't2', description: `长${'字'.repeat(4000)}` })
+    const spec = renderTaskSpec(task({ id: 't1' }), [], [], [other])
+    expect(spec).toContain('只截取前一段')
+    expect(spec.length).toBeLessThan(3000)
+  })
+
+  it('prompt 里点名关联的卡 —— TASK.md 里有正文，但 prompt 才是必读的那份', () => {
+    const other = task({ id: 't2', description: '统一错误码' })
+    const prompt = renderPrompt(task({ id: 't1', relatedTo: [other.id] }), [], false, [], [other])
+    expect(prompt).toContain('t2')
+    expect(prompt).toContain('统一错误码')
+    expect(prompt).toContain('关联任务')
+  })
+})
+
+describe('关联任务', () => {
+  it('派活时读的是此刻的库 —— 关联卡改过需求，这次执行看到的就是新的那份', async () => {
+    store.createTask(task({ id: 't2', column: 'done', description: '统一错误码' }))
+    store.createTask(task({ id: 't1', relatedTo: [asTaskId('t2')] }))
+
+    const ref = store.getTask(asTaskId('t2'))
+    if (ref === null) throw new Error('setup')
+    store.commitTask({ ...ref, revision: ref.revision + 1, description: '错误码改走 errors.ts' })
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const spec = await readFile(join(worktreeDir(repo, 't1'), 'TASK.md'), 'utf8')
+    expect(spec).toContain('## 关联任务')
+    expect(spec).toContain('错误码改走 errors.ts')
+    expect(spec).not.toContain('统一错误码')
+  })
+
+  it('关联指向一张已经不在的卡时跳过它，而不是在规格里留一行查无此卡', async () => {
+    store.createTask(task({ id: 't1', relatedTo: [asTaskId('t-gone')] }))
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    expect(started.ok).toBe(true)
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const spec = await readFile(join(worktreeDir(repo, 't1'), 'TASK.md'), 'utf8')
+    expect(spec).not.toContain('## 关联任务')
+    expect(spec).not.toContain('t-gone')
+  })
 })
 
 describe('附件', () => {
   /** 造一个真的附件文件，并把记录挂到卡上。 */
-  async function attach(taskId: string, filename: string, body: string): Promise<void> {
+  async function attach(taskId: string, filename: string, body: string, commentId?: string): Promise<void> {
     const path = join(sandbox, `blob-${filename}`)
     await writeFile(path, body, 'utf8')
     store.addAttachment({
@@ -135,6 +213,7 @@ describe('附件', () => {
       mime: 'text/plain',
       size: body.length,
       path,
+      ...(commentId === undefined ? {} : { commentId }),
       at: T0,
     })
   }
@@ -195,6 +274,47 @@ describe('附件', () => {
     if (!second.ok) return
     await settle(second.run.id)
     expect(await listStaged(worktreeDir(repo, 't1'))).toEqual([])
+  })
+
+  it('讨论里带的文件也拷进去，并且摆在它那条留言底下', async () => {
+    store.createTask(task({ id: 't1' }))
+    await attach('t1', '需求.txt', '照着这个做')
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '这儿为什么长这样？', at: T0 })
+    await attach('t1', '截图.txt', 'PNG', 'c1')
+
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) return
+    await settle(started.run.id)
+
+    const wt = worktreeDir(repo, 't1')
+    // 只把需求里的文件放进去，等于让 Agent 读着一句指着图说的话却看不见图。
+    expect(await readFile(join(wt, '.loopkanban/attachments/截图.txt'), 'utf8')).toBe('PNG')
+
+    const spec = await readFile(join(wt, 'TASK.md'), 'utf8')
+    // 讨论里贴的图不进「附件」一节：摆进需求清单会被当成一条新要求。
+    const attachmentsSection = spec.slice(spec.indexOf('## 附件'), spec.indexOf('## 讨论'))
+    expect(attachmentsSection).toContain('需求.txt')
+    expect(attachmentsSection).not.toContain('截图.txt')
+    // 它跟着那句话走。
+    expect(spec.slice(spec.indexOf('这儿为什么长这样？'))).toContain('.loopkanban/attachments/截图.txt')
+  })
+
+  it('最新这条反馈带的文件在 prompt 里单独点一次名 —— 它就是这一轮要看的东西', () => {
+    const comments = [
+      { id: 'c1', taskId: asTaskId('t1'), author: 'human' as const, body: '照着这张图改', at: T0 },
+    ]
+    const prompt = renderPrompt(task({ id: 't1' }), comments, false, [
+      { filename: '需求.txt', mime: 'text/plain', size: 3, relPath: '.loopkanban/attachments/需求.txt' },
+      {
+        filename: '截图.png', mime: 'image/png', size: 9,
+        relPath: '.loopkanban/attachments/截图.png', commentId: 'c1',
+      },
+    ])
+    expect(prompt).toContain('这条反馈带了 1 个文件')
+    expect(prompt).toContain('.loopkanban/attachments/截图.png')
+    // 卡自己的附件仍然照旧点名，两者说的不是同一件事。
+    expect(prompt).toContain('这张卡带了 1 个附件')
   })
 
   it('没有附件时 TASK.md 里不摆一个空的「附件」节', () => {
@@ -713,6 +833,36 @@ describe('异常路径的收尾（回归）', () => {
     // 记录可以存在，但绝不能停在 running —— 否则统计与孤儿对账都被带偏。
     expect(runs.every((run) => run.status !== 'running')).toBe(true)
     expect(store.listOrphanRuns()).toEqual([])
+  })
+
+  it('worktree 都没建出来也要留下一条失败的 Run —— 否则 Review 里这张卡看着像跑成了', async () => {
+    // 基线分支不存在 → ensureWorktree 在 createRun 之前就抛。
+    store.createTask(task({ id: 't1', baseBranch: '没有这条分支' }))
+    const r = runner(scriptedProvider([]))
+
+    const result = await r.start(asTaskId('t1'))
+    expect(result).toMatchObject({ ok: false, reason: 'launch-failed' })
+    // 卡照样进 Review，所以那一列里必须看得出它是"没跑成"的那种。
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+
+    const runs = store.listRuns(asTaskId('t1'))
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ status: 'failed', provider: 'scripted' })
+    expect(runs[0]?.diagnostic).toContain('没有这条分支')
+    expect(store.listOrphanRuns()).toEqual([])
+  })
+
+  it('上一轮跑成过的卡，这一轮起不来时不许再顶着那条 completed', async () => {
+    store.createTask(task({ id: 't1', baseBranch: '没有这条分支' }))
+    store.createRun({
+      id: asRunId('r-old'), taskId: asTaskId('t1'), provider: 'scripted', cliVersion: '9.9.9',
+      worktreePath: '/wt', branch: 'task/t1', status: 'completed', startedAt: T0, endedAt: T0 + 1_000,
+    })
+
+    await runner(scriptedProvider([])).start(asTaskId('t1'))
+
+    // 「最近一次执行」是这一轮的失败，不是上一轮的成功 —— 看板的失败标记看的就是它。
+    expect(store.latestRuns().get(asTaskId('t1'))).toMatchObject({ status: 'failed' })
   })
 
   it('主动取消记为 aborted，不混进失败率', async () => {

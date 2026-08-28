@@ -8,15 +8,26 @@
 
 import type {
   Agent, Attachment, BranchListing, DiffView, DirListing, FileContent, FileListing,
-  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, ShellEvent,
-  ShellSession, StreamEvent, Task, TaskComment, TaskEdit, Workspace,
+  FilePreview, LiveLine, PrCapability, Project, PullRequest, Run, RunFailure, RunStats,
+  SchedulerSettings, SchedulerState, ShellEvent, ShellSession, StreamEvent, Task, TaskComment,
+  TaskEdit, TestEnv, TestEnvEvent, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
 export type NextRound = Pick<TaskEdit, 'preferredProvider' | 'model'>
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly code: string, detail: string) {
+  /**
+   * @param body - 响应体原样带着。有些拒绝是**有结构的**：开 PR 撞上冲突时，
+   *   服务端还会给出冲突文件与那次自动派活的 id —— 只留一句 detail 的话，
+   *   界面就只能把服务端那句中文原样贴给英文用户看。
+   */
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    detail: string,
+    readonly body: Record<string, unknown> = {},
+  ) {
     super(detail)
     this.name = 'ApiError'
   }
@@ -30,7 +41,9 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   })
   const body = await res.json().catch(() => ({})) as Record<string, unknown>
   if (!res.ok) {
-    throw new ApiError(res.status, String(body['error'] ?? 'unknown'), String(body['detail'] ?? res.statusText))
+    throw new ApiError(
+      res.status, String(body['error'] ?? 'unknown'), String(body['detail'] ?? res.statusText), body,
+    )
   }
   return body as T
 }
@@ -53,6 +66,10 @@ export const api = {
     live: Record<string, LiveLine>
     /** 每张卡挂了几个附件；没有附件的卡不在里面。 */
     attachments: Record<string, number>
+    /** 每张卡开过哪些 PR，新的在前；一条都没有的卡不在里面。 */
+    prs: Record<string, PullRequest[]>
+    /** Review 里上一轮没跑成的卡；跑成了的、以及别的列的卡不在里面。 */
+    failures: Record<string, RunFailure>
   }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
@@ -61,7 +78,12 @@ export const api = {
    * 改项目名或换基线分支。仓库路径不在其列 —— 那是项目的身份，换了仓库
    * 就是另一个项目。换基线只影响此后新建的卡。
    */
-  updateProject: (projectId: string, patch: { name?: string; baseBranch?: string }) =>
+  updateProject: (
+    projectId: string,
+    // testCommand 传 null 是"清空"。省略与清空必须分得开，否则改个名字就会
+    // 顺手把启动命令抹掉。
+    patch: { name?: string; baseBranch?: string; testCommand?: string | null },
+  ) =>
     call<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
       method: 'PATCH', body: JSON.stringify(patch),
     }),
@@ -232,27 +254,66 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ merge }) },
     ),
 
+  /** 一张卡开过的 PR，外加"这个仓库能不能开 PR"。 */
+  prs: (taskId: string) =>
+    call<{ prs: PullRequest[]; capability: PrCapability }>(`/api/tasks/${encodeURIComponent(taskId)}/prs`),
+
+  /**
+   * 开一条 PR：提交这一轮的改动 → 把基线合进任务分支 → 推上去 → `gh pr create`。
+   *
+   * **卡不会因此进 Done**。PR 开出来只说明改动到了该被评审的地方，合不合是
+   * GitHub 上那颗按钮说了算；合上之后由 {@link api.syncPrs} 或后台巡检把卡收进 Done。
+   *
+   * 冲突（`merge-conflict`）是**有下一步的失败**：改动已经在分支上，冲突留在
+   * 工作区里，卡自动回队列，服务端还会顺手把这一轮派出去解冲突 ——
+   * 响应里的 `files` 是冲突文件，`dispatched` 是那次执行的 id。
+   */
+  openPr: (taskId: string) =>
+    call<{ pr: PullRequest; created: boolean; commit: string | null; prs: PullRequest[]; task: Task }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/prs`,
+      { method: 'POST' },
+    ),
+
+  /** 问一遍这张卡的 PR 现在怎么样了。合上的会被收进 Done，`collected` 就是它们。 */
+  syncPrs: (taskId: string) =>
+    call<{ prs: PullRequest[]; collected: string[]; task: Task }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/prs/sync`,
+      { method: 'POST' },
+    ),
+
   /** 一张卡的讨论，按时间正序。 */
   comments: (taskId: string) =>
     call<{ comments: TaskComment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/comments`),
 
   /**
-   * 留一条言。**在 Review 里留言就是"再改一版"**：卡自动回队列，
+   * 留一条言。**在 Review 或 Done 里留言就是"再改一版"**：卡自动回队列，
    * 下一次执行会带着整条讨论走。`requeued` 说明这次有没有搬动卡片。
    *
    * `next` 是顺带改掉的「下一轮交给谁、用哪个模型」。只送真正变了的字段 ——
    * 没变就别提它，免得白白顶掉一个 revision。**这个口子只认这两个字段**，
    * 所以类型也只开这两个：写成整个 TaskEdit 的话，多送的描述会被静静吃掉。
    */
-  comment: (taskId: string, body: string, next: NextRound = {}) =>
+  comment: (taskId: string, body: string, next: NextRound = {}, attachmentIds: readonly string[] = []) =>
     call<{ comments: TaskComment[]; requeued: boolean }>(
       `/api/tasks/${encodeURIComponent(taskId)}/comments`,
-      { method: 'POST', body: JSON.stringify({ body, ...clearable(next) }) },
+      {
+        method: 'POST',
+        // 附件是先传好的（见 `upload` 的 `draft`），这里只把它们认领给这句话。
+        body: JSON.stringify({ body, ...clearable(next), ...(attachmentIds.length === 0 ? {} : { attachmentIds }) }),
+      },
     ),
 
-  /** 一张卡的附件，按上传顺序。 */
-  attachments: (taskId: string) =>
-    call<{ attachments: Attachment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/attachments`),
+  /**
+   * 一张卡的附件，按上传顺序。
+   *
+   * @param scope - `spec` 是需求带的；`draft` 是讨论里传上来、还没跟着
+   *   留言发出去的那些 —— 重新打开面板时要拿它把草稿摆回去，否则人只会
+   *   以为传丢了然后再传一遍。
+   */
+  attachments: (taskId: string, scope: 'spec' | 'draft' = 'spec') =>
+    call<{ attachments: Attachment[] }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/attachments${scope === 'draft' ? '?scope=draft' : ''}`,
+    ),
 
   /**
    * 传一个附件。
@@ -264,8 +325,9 @@ export const api = {
    * `content-type` 显式给 file.type，且**必须绕开 `call`** —— 它会给所有
    * 请求都盖上 `application/json`，那样服务端看到的类型全是错的。
    */
-  upload: async (taskId: string, file: File): Promise<Attachment> => {
-    const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/attachments`, {
+  upload: async (taskId: string, file: File, scope: 'spec' | 'draft' = 'spec'): Promise<Attachment> => {
+    const path = `/api/tasks/${encodeURIComponent(taskId)}/attachments${scope === 'draft' ? '?scope=draft' : ''}`
+    const res = await fetch(path, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
@@ -289,6 +351,20 @@ export const api = {
   discard: (taskId: string) =>
     call(`/api/tasks/${encodeURIComponent(taskId)}/discard`, { method: 'POST' }),
 
+  /** 这张卡当前的测试环境；没起过就是 null（不是错）。 */
+  testEnv: (taskId: string) =>
+    call<{ env: TestEnv | null }>(`/api/tasks/${encodeURIComponent(taskId)}/testenv`),
+
+  /** 起一个测试环境。已经有活着的就把它给回来，不会起第二个。 */
+  startTestEnv: (taskId: string) =>
+    call<{ env: TestEnv }>(`/api/tasks/${encodeURIComponent(taskId)}/testenv`, { method: 'POST' }),
+
+  stopTestEnv: (taskId: string) =>
+    call<{ stopped: boolean; env: TestEnv | null }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/testenv`,
+      { method: 'DELETE' },
+    ),
+
   /** 归档：把卡从看板上收走，列与内容原样保留。 */
   archive: (taskId: string, expectedRevision: number) =>
     call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}/archive`, {
@@ -307,6 +383,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ expectedRevision, to, position }),
     }),
+}
+
+/**
+ * 一张卡够得着的某个文件的**原始字节**的地址。`<iframe src>` / `<img src>` 用它。
+ *
+ * PDF 与图片不走 JSON：浏览器自带 PDF 阅读器，图片给个 URL 就完事，绕一圈
+ * base64 只是凭空胖三分之一。围栏和预览接口是同一套，一个字都不松。
+ */
+export function taskFileUrl(taskId: string, path: string): string {
+  return `/api/tasks/${encodeURIComponent(taskId)}/file/raw?path=${encodeURIComponent(path)}`
+}
+
+/** 文件浏览页里同一件事：工作区某个文件的原始字节。 */
+export function workspaceFileUrl(root: string, path: string): string {
+  return `/api/files/raw?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`
 }
 
 /**
@@ -373,6 +464,31 @@ export function subscribeShell(
     // CONNECTING 是它自己在重连，那不是"丢了"，别打扰用户。
     if (source.readyState === EventSource.CLOSED) onLost()
   })
+  return () => { source.close() }
+}
+
+/**
+ * 订阅一个测试环境的日志与状态。
+ *
+ * **这条连接就是心跳**：断开之后服务端会开始倒计时，到点把环境收掉。所以
+ * 返回的取消函数必须在组件卸载时调用 —— 漏掉的话那个 dev server 会一直
+ * 以为还有人在看。反过来也成立：关掉面板就等于"我验完了"。
+ */
+export function subscribeTestEnv(taskId: string, onEvent: (event: TestEnvEvent) => void): () => void {
+  const source = new EventSource(
+    `/api/tasks/${encodeURIComponent(taskId)}/testenv/events`,
+    { withCredentials: true },
+  )
+  const handle = (message: MessageEvent<string>): void => {
+    try {
+      onEvent(JSON.parse(message.data) as TestEnvEvent)
+    } catch {
+      // 半条 JSON 不该把整条流带走。
+    }
+  }
+  // 服务端用 `event:` 分了类型，默认的 message 监听器收不到它们。
+  source.addEventListener('status', handle as EventListener)
+  source.addEventListener('log', handle as EventListener)
   return () => { source.close() }
 }
 

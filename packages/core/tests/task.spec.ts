@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   acquireLease, archiveTask, asProjectId, asRunId, asTaskId, canTransition, COLUMNS, deleteTask,
-  dropDependency, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
+  dropReferences, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
   unarchiveTask, type Task, taskTitle,
 } from '../src/index.ts'
 
@@ -18,7 +18,7 @@ function task(patch: Partial<Task> = {}): Task {
     acceptance: ['函数存在并有测试'],
     repoPath: '/repo',
     baseBranch: 'main',
-    blockedBy: [],
+    blockedBy: [], relatedTo: [],
     createdAt: T0,
     updatedAt: T0,
     ...patch,
@@ -44,12 +44,15 @@ describe('canTransition', () => {
     expect(canTransition('review', 'ready')).toBe(true)
     // 废弃成果、回想法池重新想需求：无租约状态之间的整理，该放行。
     expect(canTransition('review', 'backlog')).toBe(true)
+    // Done 里再说一句就是"再改一版"：卡回队列重跑，成果与 PR 记录都留着。
+    expect(canTransition('done', 'ready')).toBe(true)
   })
 
   it('拦住乱跳 —— 否则「租约属于谁」无法推理', () => {
     expect(canTransition('backlog', 'running')).toBe(false)
     expect(canTransition('ready', 'done')).toBe(false)
-    expect(canTransition('done', 'ready')).toBe(false)
+    // done 只开去 ready 那一个口子 —— 倒回想法池等于把做完的事说成没做过。
+    expect(canTransition('done', 'backlog')).toBe(false)
     expect(canTransition('running', 'done')).toBe(false)
     // running → ready 是系统回收租约的专属通道，人不能走。
     expect(canTransition('running', 'ready')).toBe(false)
@@ -88,6 +91,22 @@ describe('moveTask', () => {
     })
     const result = moveTask(running, { expectedRevision: 1, to: 'review', now: T0 })
     expect(result.ok && result.value.lease).toBeUndefined()
+  })
+
+  it('进 Done 时盖上完成时间 —— Done 列按它从新到旧排', () => {
+    const result = moveTask(task({ column: 'review' }), { expectedRevision: 1, to: 'done', now: T0 + 7 })
+    expect(result.ok && result.value.doneAt).toBe(T0 + 7)
+  })
+
+  it('没进 Done 的卡不带完成时间', () => {
+    const result = moveTask(task({ column: 'running' }), { expectedRevision: 1, to: 'review', now: T0 })
+    expect(result.ok && result.value.doneAt).toBeUndefined()
+  })
+
+  it('done → done 是列内重排，不重写完成时间', () => {
+    const done = task({ column: 'done', doneAt: T0 })
+    const result = moveTask(done, { expectedRevision: 1, to: 'done', position: 9, now: T0 + 100_000 })
+    expect(result.ok && result.value.doneAt).toBe(T0)
   })
 })
 
@@ -265,6 +284,30 @@ describe('editTask', () => {
     expect(edit(task({ column: 'backlog', revision: 5 }), { description: 'x' }, 4))
       .toMatchObject({ ok: false, reason: 'revision-conflict' })
   })
+
+  it('关联去重、并且去掉自指 —— 一张卡关联自己只会在规格里绕圈', () => {
+    const self = task({ column: 'backlog' })
+    const other = asTaskId('t2')
+    const result = edit(self, { relatedTo: [other, other, self.id] })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.relatedTo).toEqual([other])
+  })
+
+  it('给空数组就是取消全部关联', () => {
+    const linked = task({ column: 'backlog', relatedTo: [asTaskId('t2')] })
+    const result = edit(linked, { relatedTo: [] })
+    expect(result.ok && result.value.relatedTo).toEqual([])
+  })
+
+  it('关联不是依赖：关联着一张没做完的卡，照样能被认领', () => {
+    const linked = task({ column: 'ready', relatedTo: [asTaskId('t2')] })
+    const claimed = acquireLease(linked, {
+      expectedRevision: linked.revision, runId: asRunId('r1'), provider: 'claude',
+      ttlMs: 1000, now: T0, completed: new Set(),
+    })
+    expect(claimed.ok).toBe(true)
+  })
 })
 
 describe('归档', () => {
@@ -358,25 +401,39 @@ describe('删除', () => {
   })
 })
 
-describe('dropDependency', () => {
+describe('dropReferences', () => {
   const T2 = asTaskId('t2')
 
   it('摘掉指向被删任务的依赖，其余依赖原样保留', () => {
-    const next = dropDependency(task({ blockedBy: [T2, asTaskId('t3')] }), T2, T0 + 100)
+    const next = dropReferences(task({ blockedBy: [T2, asTaskId('t3')] }), T2, T0 + 100)
     expect(next?.blockedBy).toEqual([asTaskId('t3')])
     expect(next?.revision).toBe(2)
     expect(next?.updatedAt).toBe(T0 + 100)
   })
 
   it('本来就没依赖它就返回 null —— 不该白白推高 revision 让别人的 CAS 落空', () => {
-    expect(dropDependency(task(), T2, T0)).toBeNull()
+    expect(dropReferences(task(), T2, T0)).toBeNull()
   })
 
   it('running 与归档的卡照样摘 —— 它们最不能留着悬空引用', () => {
     const running = task({ column: 'running', blockedBy: [T2] })
-    expect(dropDependency(running, T2, T0)?.blockedBy).toEqual([])
+    expect(dropReferences(running, T2, T0)?.blockedBy).toEqual([])
     const shelved = task({ column: 'ready', archivedAt: T0, blockedBy: [T2] })
-    expect(dropDependency(shelved, T2, T0)?.blockedBy).toEqual([])
+    expect(dropReferences(shelved, T2, T0)?.blockedBy).toEqual([])
+  })
+
+  it('关联也一并摘掉 —— 悬空的关联会被写进 TASK.md，成为一段没法照做的需求', () => {
+    const next = dropReferences(task({ relatedTo: [T2, asTaskId('t3')] }), T2, T0 + 100)
+    expect(next?.relatedTo).toEqual([asTaskId('t3')])
+    expect(next?.blockedBy).toEqual([])
+  })
+
+  it('同时依赖又关联同一张卡时，两边都摘', () => {
+    const next = dropReferences(task({ blockedBy: [T2], relatedTo: [T2] }), T2, T0)
+    expect(next?.blockedBy).toEqual([])
+    expect(next?.relatedTo).toEqual([])
+    // 一次变更只推高一个 revision —— 分两次会让调用方的 CAS 白白落空一回。
+    expect(next?.revision).toBe(2)
   })
 })
 

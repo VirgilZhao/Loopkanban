@@ -204,6 +204,19 @@
   --lamp-ok: var(--chart-4);
   --lamp-fail: var(--destructive);
   --lamp-review: #b0771d;
+
+  /* 代码高亮。十个角色，全部落在这一层 —— 换主题只重新接线，不动组件。
+     亮色下都压到足够深，11px 的等宽字才不会糊在白底上。 */
+  --code-comment: #6b7785;
+  --code-string:  #2f7a5c;
+  --code-number:  #96601a;
+  --code-keyword: #7d3f96;
+  --code-type:    #1a6289;
+  --code-func:    #1d6c96;
+  --code-prop:    #0f4866;
+  --code-tag:     #b8413c;
+  --code-attr:    #96601a;
+  --code-punct:   #5a6573;
 }
 
 .dark {
@@ -227,6 +240,18 @@
   --lamp-ok: var(--chart-4);
   --lamp-fail: var(--destructive);
   --lamp-review: var(--chart-5);
+
+  /* 暗色下反过来：提亮，但避开纯饱和色 —— 那种颜色在深底上会晕开。 */
+  --code-comment: #6f7b8b;
+  --code-string:  #86c9a6;
+  --code-number:  #e8b25c;
+  --code-keyword: #c79ae0;
+  --code-type:    #7ab0d0;
+  --code-func:    #a8cfe3;
+  --code-prop:    #9fc7dd;
+  --code-tag:     #dc6e69;
+  --code-attr:    #e8b25c;
+  --code-punct:   #8590a0;
 }
 
 @theme inline {
@@ -246,6 +271,17 @@
   --color-lamp-ok:     var(--lamp-ok);
   --color-lamp-fail:   var(--lamp-fail);
   --color-lamp-review: var(--lamp-review);
+
+  --color-code-comment: var(--code-comment);
+  --color-code-string:  var(--code-string);
+  --color-code-number:  var(--code-number);
+  --color-code-keyword: var(--code-keyword);
+  --color-code-type:    var(--code-type);
+  --color-code-func:    var(--code-func);
+  --color-code-prop:    var(--code-prop);
+  --color-code-tag:     var(--code-tag);
+  --color-code-attr:    var(--code-attr);
+  --color-code-punct:   var(--code-punct);
 
   --radius-xs: calc(var(--radius) - 6px);
   --radius-panel: calc(var(--radius) - 2px);
@@ -360,6 +396,14 @@
     background: var(--color-lamp-live);
     box-shadow: 0 0 6px var(--color-lamp-live);
     animation: breathe 1.8s ease-in-out infinite;
+  }
+  /* "排着队等执行位"：也在动，但慢半拍、不发光 —— 一眼分得出"已经在跑"
+     和"还在等"。颜色沿用 idle，与看板上 Ready 那列的灯一致。
+     叫 queued 而不是 ready，是因为卡片的灯直接拿列名当 state：占用 ready
+     就等于让看板上每张待命的卡都开始呼吸，那一屏就没有安静的地方了。 */
+  .lamp[data-state="queued"] {
+    background: var(--color-lamp-idle);
+    animation: breathe 3s ease-in-out infinite;
   }
   .lamp[data-state="done"]   { background: var(--color-lamp-ok); }
   .lamp[data-state="failed"] { background: var(--color-lamp-fail); box-shadow: 0 0 6px var(--color-lamp-fail); }

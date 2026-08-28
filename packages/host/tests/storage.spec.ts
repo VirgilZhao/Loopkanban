@@ -30,7 +30,7 @@ function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
     acceptance: ['有测试'],
     repoPath: '/repo',
     baseBranch: 'main',
-    blockedBy: [],
+    blockedBy: [], relatedTo: [],
     createdAt: T0,
     updatedAt: T0,
     ...rest,
@@ -77,6 +77,23 @@ describe('任务往返', () => {
 
   it('不存在的任务返回 null', () => {
     expect(store.getTask(asTaskId('nope'))).toBeNull()
+  })
+
+  it('关联与依赖各存各的 —— 同一张卡可以既是依赖又是参考', () => {
+    const original = task({
+      id: 't1', blockedBy: [asTaskId('dep')], relatedTo: [asTaskId('dep'), asTaskId('ref')],
+    })
+    store.createTask(original)
+    const loaded = store.getTask(asTaskId('t1'))
+    expect(loaded?.blockedBy).toEqual([asTaskId('dep')])
+    expect(loaded?.relatedTo).toEqual([asTaskId('dep'), asTaskId('ref')])
+  })
+
+  it('改关联走 commitTask 也能落库', () => {
+    store.createTask(task({ id: 't1' }))
+    const current = store.getTask(asTaskId('t1')) as Task
+    expect(store.commitTask({ ...current, revision: 2, relatedTo: [asTaskId('t2')] })).toBe(true)
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual([asTaskId('t2')])
   })
 
   it('按 position 排序列出', () => {
@@ -176,6 +193,23 @@ describe('Run', () => {
     store.createRun(run({ id: asRunId('done'), status: 'completed', endedAt: T0 + 1 }))
     expect(store.listOrphanRuns().map((r) => r.id)).toEqual(['alive'])
   })
+
+  it('latestRuns：每张卡只回最近那一次，跑过多轮的按 started_at 认新', () => {
+    store.createTask(task({ id: 't2' }))
+    store.createRun(run({ id: asRunId('r1'), status: 'failed', endedAt: T0 + 1 }))
+    store.createRun(run({ id: asRunId('r2'), startedAt: T0 + 9, status: 'completed', endedAt: T0 + 10 }))
+    store.createRun(run({ id: asRunId('r3'), taskId: asTaskId('t2'), status: 'aborted', endedAt: T0 + 2 }))
+
+    const latest = store.latestRuns()
+    expect(latest.get(asTaskId('t1'))).toMatchObject({ id: 'r2', status: 'completed' })
+    expect(latest.get(asTaskId('t2'))).toMatchObject({ id: 'r3', status: 'aborted' })
+  })
+
+  it('latestRuns：没跑过的卡不在里面 —— 缺席就是"还没派过"', () => {
+    store.createTask(task({ id: 't2' }))
+    store.createRun(run())
+    expect([...store.latestRuns().keys()]).toEqual(['t1'])
+  })
 })
 
 describe('deleteTask', () => {
@@ -199,7 +233,7 @@ describe('deleteTask', () => {
     store.createTask(task({ id: 't2', blockedBy: [asTaskId('t1')] }))
     const downstream = store.getTask(asTaskId('t2'))
     if (downstream === null) throw new Error('setup')
-    const patched = { ...downstream, blockedBy: [], revision: downstream.revision + 1 }
+    const patched = { ...downstream, blockedBy: [], relatedTo: [], revision: downstream.revision + 1 }
 
     expect(store.deleteTask(asTaskId('t1'), 1, [patched])).toBe(true)
     expect(store.getTask(asTaskId('t2'))?.blockedBy).toEqual([])
@@ -269,6 +303,36 @@ describe('附件', () => {
     expect(store.deleteProject(PROJECT)).toBe(true)
     expect(store.getAttachment('a-1')).toBeNull()
   })
+
+  it('三种附件各归各的：规格 / 草稿 / 已经跟着留言发出去的', () => {
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '看这个', at: T0 })
+    store.addAttachment(attachment({ id: 'a-spec' }))
+    store.addAttachment(attachment({ id: 'a-draft', commentId: '' }))
+    store.addAttachment(attachment({ id: 'a-sent', commentId: 'c1' }))
+
+    // 规格清单只有需求带的那份：讨论里贴的图混进来，会让"需求是什么"越读越糊。
+    expect(store.listAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-spec'])
+    expect(store.listDraftAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-draft'])
+    expect(store.listCommentAttachments(asTaskId('t1')).map((a) => a.id)).toEqual(['a-sent'])
+    // 收拾磁盘时要看得见全部 —— 记录被外键连带删了，字节可不会自己消失。
+    expect(store.listProjectAttachments(PROJECT)).toHaveLength(3)
+  })
+
+  it('留言发出去时认领草稿；已经发出去的和别人的草稿都认不走', () => {
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '看这个', at: T0 })
+    store.addAttachment(attachment({ id: 'a-draft', commentId: '' }))
+    store.addAttachment(attachment({ id: 'a-sent', commentId: 'c-old' }))
+    store.addAttachment(attachment({ id: 'a-other', taskId: asTaskId('t2'), commentId: '' }))
+
+    expect(store.attachToComment(asTaskId('t1'), ['a-draft', 'a-sent', 'a-other'], 'c1')).toBe(1)
+    expect(store.getAttachment('a-draft')?.commentId).toBe('c1')
+    // 已经进了讨论记录的不该被搬到另一条留言底下，别的卡的草稿更不行。
+    expect(store.getAttachment('a-sent')?.commentId).toBe('c-old')
+    expect(store.getAttachment('a-other')?.commentId).toBe('')
+    // 认领是幂等的：条件里的"还是草稿"本身就挡住了第二次。
+    expect(store.attachToComment(asTaskId('t1'), ['a-draft'], 'c1')).toBe(0)
+  })
 })
 
 describe('事件日志（append-only）', () => {
@@ -316,6 +380,25 @@ describe('迁移', () => {
 
   it('外键约束生效 —— 不能给不存在的任务建 Run', () => {
     expect(() => { store.createRun(run({ taskId: asTaskId('ghost') })) }).toThrow()
+  })
+})
+
+describe('项目的启动命令', () => {
+  it('存得住、读得回，空的就是"没配"而不是空串', () => {
+    expect(store.getProject(PROJECT)?.testCommand).toBeUndefined()
+
+    store.updateProject(PROJECT, { testCommand: 'pnpm install && pnpm dev' })
+    expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm install && pnpm dev')
+
+    // 配错了要能退回"没配"，而不是只能塞一条命令进去凑数。
+    store.updateProject(PROJECT, { testCommand: '  ' })
+    expect(store.getProject(PROJECT)?.testCommand).toBeUndefined()
+  })
+
+  it('改名不会顺手把启动命令抹掉 —— 缺席是"这次没提到"', () => {
+    store.updateProject(PROJECT, { testCommand: 'pnpm dev' })
+    store.updateProject(PROJECT, { name: '换个名字' })
+    expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm dev')
   })
 })
 
@@ -370,6 +453,35 @@ describe('stats', () => {
   })
 })
 
+describe('readRecentEvents', () => {
+  const RUN = asRunId('r1')
+
+  beforeEach(() => {
+    store.createTask(task({ id: 't1' }))
+    store.createRun(run({ id: RUN, taskId: asTaskId('t1') }))
+  })
+
+  it('取的是游标之后最新的一段，按 seq 正序回', () => {
+    for (let index = 0; index < 10; index += 1) store.appendEvent(RUN, 'text', { index }, T0 + index)
+    const { events, total } = store.readRecentEvents(RUN, 0, 3)
+    expect(events.map((event) => event.seq)).toEqual([8, 9, 10])
+    // total 是游标之后的**全部**条数，调用方据此知道自己漏了多少。
+    expect(total).toBe(10)
+  })
+
+  it('游标之后不足一页时全给，total 与条数相等', () => {
+    store.appendEvent(RUN, 'text', { text: 'a' }, T0)
+    store.appendEvent(RUN, 'text', { text: 'b' }, T0 + 1)
+    const { events, total } = store.readRecentEvents(RUN, 1, 200)
+    expect(events.map((event) => event.seq)).toEqual([2])
+    expect(total).toBe(1)
+  })
+
+  it('一条都没有时是空的，不是 null', () => {
+    expect(store.readRecentEvents(RUN, 0, 10)).toEqual({ events: [], total: 0 })
+  })
+})
+
 describe('迁移', () => {
   /**
    * 造一个停在 `version` 版本上的真实旧库：只跑前 version 条迁移。
@@ -406,6 +518,38 @@ describe('迁移', () => {
       expect(migrated?.column).toBe('review')
       // 搬列而已，内容一个字都不该动。
       expect(migrated?.description).toBe('跑挂了的卡')
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加关联列：旧库里的卡读出来是"没有关联"，而不是崩在缺列上', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // 倒数第二版 = 关联那条迁移之前的世界。跟着 MIGRATIONS 走，
+      // 以后再加迁移这个测试也不会指错版本。
+      const legacy = seedLegacyDb(file, MIGRATIONS.length - 1)
+      // 列名一个个写出来，不用 `VALUES (…)` 的隐式全列：这张表往后还会长新列，
+      // 隐式写法会在下一次迁移落地时莫名其妙地挂掉，而挂的不是被测的东西。
+      legacy.prepare(
+        'INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
+      ).run(PROJECT, '默认看板', '/repo', 'main', T0)
+      legacy.prepare(`
+        INSERT INTO tasks (
+          id, project_id, revision, column_name, position, description,
+          acceptance_json, repo_path, base_branch, preferred_provider, model,
+          blocked_by_json, lease_json, archived_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run('t1', PROJECT, 1, 'ready', 1, '一张老卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const migrated = store.getTask(asTaskId('t1'))
+      expect(migrated?.relatedTo).toEqual([])
+      expect(migrated?.description).toBe('一张老卡')
       store.close()
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -467,5 +611,102 @@ describe('迁移', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+
+  it('加启动命令列：旧库里的项目一律视为"还没配"', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v10 = projects 表还没有 test_command 列的世界。
+      const legacy = seedLegacyDb(file, 10)
+      legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '老项目', '/repo', 'main', T0)
+      legacy.close()
+
+      const store = Storage.open(file)
+      const migrated = store.getProject(PROJECT)
+      expect(migrated?.name).toBe('老项目')
+      // 缺席，不是空串 —— 界面据此显示"还没配"并把输入框摆出来。
+      expect(migrated?.testCommand).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('加完成时间：旧库里已在 Done 的卡用 updated_at 回填，其余的仍然没有', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loopkanban-migrate-'))
+    const file = join(dir, 'board.db')
+    try {
+      // v11 = 加 done_at 之前的世界。
+      const legacy = seedLegacyDb(file, 11)
+      legacy.prepare('INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(PROJECT, '默认看板', '/repo', 'main', T0)
+      const insert = legacy.prepare(`
+        INSERT INTO tasks (
+          id, project_id, revision, column_name, position, description,
+          acceptance_json, repo_path, base_branch, preferred_provider, model,
+          blocked_by_json, lease_json, archived_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      insert.run('t1', PROJECT, 1, 'done', 1, '早就做完的卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0 + 5_000)
+      insert.run('t2', PROJECT, 1, 'ready', 2, '还没做的卡', '[]', '/repo', 'main',
+        null, null, '[]', null, null, T0, T0 + 9_000)
+      legacy.close()
+
+      const store = Storage.open(file)
+      expect(store.getTask(asTaskId('t1'))?.doneAt).toBe(T0 + 5_000)
+      expect(store.getTask(asTaskId('t2'))?.doneAt).toBeUndefined()
+      store.close()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Pull Request', () => {
+  beforeEach(() => { store.createTask(task({ id: 't1', column: 'review' })) })
+
+  const pr = (patch: Record<string, unknown> = {}) => ({
+    id: 'pr-1', taskId: asTaskId('t1'), number: 7, url: 'https://github.com/acme/demo/pull/7',
+    branch: 'task/t1', baseBranch: 'main', state: 'open' as const, mergeable: 'unknown' as const,
+    createdAt: T0, updatedAt: T0, ...patch,
+  })
+
+  it('同一条 PR 刷多少次都只有一行，状态覆盖成最新的', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ state: 'merged', mergedAt: T0 + 99, updatedAt: T0 + 99 }))
+
+    const found = store.listPullRequests(asTaskId('t1'))
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatchObject({ state: 'merged', mergedAt: T0 + 99 })
+  })
+
+  it('刷新不动 createdAt —— 那是"这条 PR 什么时候进视野"，被推到现在顺序就乱了', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ createdAt: T0 + 5000, updatedAt: T0 + 5000 }))
+    expect(store.listPullRequests(asTaskId('t1'))[0]?.createdAt).toBe(T0)
+  })
+
+  it('一张卡可以有多条，新的排在前面 —— 每一轮合上去的是不同的一条', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ id: 'pr-2', number: 9 }))
+    expect(store.listPullRequests(asTaskId('t1')).map((row) => row.number)).toEqual([9, 7])
+  })
+
+  it('只有还开着的才进巡检，合过的不必再问', () => {
+    store.upsertPullRequest(pr())
+    store.upsertPullRequest(pr({ id: 'pr-2', number: 9, state: 'merged' }))
+    expect(store.listOpenPullRequests().map((row) => row.number)).toEqual([7])
+    expect(store.listAllPullRequests()).toHaveLength(2)
+  })
+
+  it('删卡时 PR 记录跟着走 —— 留着一堆指向空卡的行只是垃圾', () => {
+    store.upsertPullRequest(pr())
+    const current = store.getTask(asTaskId('t1')) as Task
+    store.commitTask({ ...current, column: 'ready', revision: current.revision + 1 })
+    expect(store.deleteTask(asTaskId('t1'), current.revision + 1)).toBe(true)
+    expect(store.listAllPullRequests()).toEqual([])
   })
 })

@@ -1,19 +1,24 @@
 import { useEffect, useState } from 'react'
-import { ChevronRight, FolderGit2, Plus, X } from 'lucide-react'
+import { ChevronRight, FolderGit2, Link2, Plus, X } from 'lucide-react'
 import { Attachments } from '@/components/Attachments.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { useT } from '@/lib/i18n.tsx'
-import { modelOptions } from '@/lib/task.ts'
+import { modelOptions, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, Project, Task, TaskEdit } from '@/types.ts'
+import { COLUMN_META, type Agent, type Project, type Task, type TaskEdit } from '@/types.ts'
 
 interface Props {
   task: Task
   /** 任务所属项目；卡片就在它派生出来的 worktree 里干活。 */
   project: Project | null
+  /**
+   * 同项目的其它卡片，可供关联。**只能同项目** —— 任务在这个项目派生的
+   * worktree 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
+   */
+  siblings: Task[]
   agents: Agent[]
   busy: boolean
   onSave: (edit: TaskEdit) => void
@@ -28,6 +33,7 @@ interface Draft {
   acceptance: string[]
   preferredProvider: string | undefined
   model: string | undefined
+  relatedTo: string[]
 }
 
 /** 从任务取出可编辑的那部分，作为表单初值。 */
@@ -37,11 +43,12 @@ function draftOf(task: Task): Draft {
     acceptance: task.acceptance.length > 0 ? task.acceptance : [''],
     preferredProvider: task.preferredProvider,
     model: task.model,
+    relatedTo: [...task.relatedTo],
   }
 }
 
 export function TaskEditor({
-  task, project, agents, busy, onSave, onError, onChanged,
+  task, project, siblings, agents, busy, onSave, onError, onChanged,
 }: Props): React.JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState(() => draftOf(task))
@@ -57,6 +64,11 @@ export function TaskEditor({
   const picked = agents.find((agent) => agent.id === draft.preferredProvider)
   /** 下拉里的选项；卡上原有的模型即使不在探测清单里也留着。 */
   const options = picked === undefined ? [] : modelOptions(picked, draft.model)
+
+  /** 还能关联的卡：同项目、不是自己、也还没关联上。 */
+  const linkable = siblings.filter(
+    (other) => other.id !== task.id && !draft.relatedTo.includes(other.id),
+  )
 
   const setAcceptance = (index: number, value: string): void => {
     setDraft((d) => ({ ...d, acceptance: d.acceptance.map((item, i) => (i === index ? value : item)) }))
@@ -81,9 +93,10 @@ export function TaskEditor({
             autoFocus={draft.description.trim().length === 0}
             placeholder={t('editor.descriptionPlaceholder')}
             onChange={(e) => { setDraft((d) => ({ ...d, description: e.target.value })) }}
-            // Textarea 用的是 field-sizing:content，高度跟着内容走、rows 说了不算，
-            // 所以要给它更大的起始高度得抬 min-h（rows 只在不支持的浏览器上兜底）。
-            className="min-h-32 leading-relaxed"
+            // Textarea 默认 field-sizing:content —— 高度跟着内容走，写长了就把
+            // 下面的字段一路顶下去。这里按住不动：固定高度、写满了自己滚。
+            // （rows 只在不认 field-sizing 的浏览器上兜底。）
+            className="field-sizing-fixed h-40 leading-relaxed"
           />
         </Field>
 
@@ -126,6 +139,78 @@ export function TaskEditor({
             >
               <Plus />{t('editor.acceptanceAdd')}
             </Button>
+          </div>
+        </Collapsible>
+
+        {/* 关联卡片。折叠着 —— 多数卡不需要它，而它一展开就是一串下拉与条目。
+            关联是**引用不是依赖**：它不拦调度，只是在派活时把那几张卡的正文
+            一起写进 TASK.md，让 Agent 照着已经定下来的东西做。 */}
+        <Collapsible
+          label={t('editor.related')}
+          hint={t('editor.relatedHint')}
+          count={draft.relatedTo.length}
+          defaultOpen={task.relatedTo.length > 0}
+        >
+          <div className="space-y-2">
+            {draft.relatedTo.map((id) => {
+              const other = siblings.find((candidate) => candidate.id === id)
+              return (
+                <div key={id} className="flex items-center gap-2 rounded-md border border-hairline px-3 py-2">
+                  <Link2 className="size-3.5 flex-none text-ink-faint" />
+                  <div className="min-w-0 flex-1">
+                    {/* 卡刚被删掉时它还留在草稿里 —— 显示 id 而不是装作没这回事，
+                        存下去时服务端也会拒；两边都沉默的话，人只会看到关联凭空少了一条。 */}
+                    <p className="truncate text-sm text-ink">
+                      {other === undefined ? t('editor.relatedGone') : taskTitle(other)}
+                    </p>
+                    <p className="mono truncate text-xs text-ink-faint">
+                      {id}
+                      {other === undefined ? '' : ` · ${COLUMN_META[other.column].label}`}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label={t('editor.relatedRemove')}
+                    title={t('editor.relatedRemove')}
+                    disabled={locked}
+                    onClick={() => {
+                      setDraft((d) => ({ ...d, relatedTo: d.relatedTo.filter((item) => item !== id) }))
+                    }}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              )
+            })}
+            {linkable.length === 0 ? (
+              <p className="text-xs text-ink-faint">
+                {siblings.length === 0 ? t('editor.relatedNone') : t('editor.relatedAllPicked')}
+              </p>
+            ) : (
+              <select
+                value=""
+                disabled={locked}
+                onChange={(e) => {
+                  const picked = e.target.value
+                  if (picked.length === 0) return
+                  setDraft((d) => ({ ...d, relatedTo: [...d.relatedTo, picked] }))
+                }}
+                className={cn(
+                  'border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+                  'transition-[color,box-shadow] outline-none dark:bg-input/30',
+                  'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+                  'disabled:cursor-not-allowed disabled:opacity-50',
+                )}
+              >
+                <option value="">{t('editor.relatedAdd')}</option>
+                {linkable.map((other) => (
+                  <option key={other.id} value={other.id}>
+                    {`${COLUMN_META[other.column].label} · ${taskTitle(other)}`}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         </Collapsible>
 

@@ -30,7 +30,7 @@ import type { AgentPool, DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
 import type { Run, Storage, TaskComment } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
-import { branchSlug, ensureWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
+import { branchSlug, ensureWorktree, worktreeDir, worktreeDiff, type Worktree } from '../worktree/index.ts'
 
 /** 租期。跑着的 Run 会在到期前续，崩溃的 Run 到期后被回收。 */
 export const DEFAULT_LEASE_TTL_MS = 90_000
@@ -149,10 +149,36 @@ export class Runner {
       return { ok: true, run: await this.launch(claimed.value, runId, agent, prior) }
     } catch (error) {
       const detail = describeError(error)
-      // launch 可能已经写了 Run 记录才失败（例如 spawn 时 CLI 二进制刚被替换）。
-      // 不打到终态的话，它会永远算作 running，把统计和孤儿对账都带偏。
+      /*
+       * 这次派活**一定**要留下一条终态的 Run。两种失败都要兜住：
+       *
+       * 一是 launch 已经写了 Run 记录才失败（例如 spawn 时 CLI 二进制刚被
+       * 替换）。不打到终态的话，它会永远算作 running，把统计和孤儿对账都带偏。
+       *
+       * 二是更早就失败了，连 Run 都还没写 —— worktree 建不出来（基线分支被
+       * 删、仓库被移走、index.lock 没清、磁盘满）就是这一种。这一条更要补：
+       * 卡照样被 release 进 Review，而"这一轮跑挂了"全靠 runs 表判断，一条
+       * 记录都没有就等于这次失败从没发生过 —— 自动驾驶下没有任何人看得见它，
+       * 上一轮跑成过的卡还会顶着那条 completed 冒充"干完了等你验"。
+       */
       const created = storage.getRun(runId)
-      if (created !== null && created.status === 'running') {
+      if (created === null) {
+        // 工作区没建成，但它该在哪儿、分支该叫什么是确定的（同一张卡永远是
+        // 同一个目录），照实记下来 —— 验收那头本来就容得下"根本没建出工作区"
+        // 的卡，会明确拒绝而不是在不存在的目录上炸开。
+        storage.createRun({
+          id: runId,
+          taskId,
+          provider: agent.provider.id,
+          cliVersion: agent.caps.version,
+          worktreePath: worktreeDir(task.repoPath, task.id),
+          branch: branchSlug(task.id, taskTitle(task)),
+          status: 'failed',
+          diagnostic: detail,
+          startedAt: now,
+          endedAt: this.now,
+        })
+      } else if (created.status === 'running') {
         storage.updateRun({ ...created, status: 'failed', diagnostic: detail, endedAt: this.now })
       }
       // 副作用建到一半失败，必须把卡放回去，否则它会一直卡在 running。
@@ -194,16 +220,32 @@ export class Runner {
     await mkdir(artifactsDir, { recursive: true })
     // 附件先落进 worktree，再写 TASK.md —— 清单里的每一条都得真的在那儿，
     // 拷不过去的不列出来，免得 Agent 去找一个不存在的文件。
-    const staged = await stageAttachments(worktree.path, storage.listAttachments(task.id))
+    //
+    // 规格附件在前、讨论里带的在后：**两种都要拷**。人在讨论里贴的那张
+    // 截图和他那句"这儿为什么长这样"是一件事，只把需求里的文件放进去，
+    // 等于让 Agent 读着一句指着图说的话却看不见图。
+    const staged = await stageAttachments(worktree.path, [
+      ...storage.listAttachments(task.id),
+      ...storage.listCommentAttachments(task.id),
+    ])
     // 讨论线程一起写进 TASK.md：人和 Agent 的每一轮往来都是这次执行的上下文。
     const comments = storage.listComments(task.id)
-    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged), 'utf8')
+    // 关联的卡也要展开写进去。**读的是此刻的库**，不是建卡时的快照 ——
+    // 参考的那张卡改过需求、跑完进了 Done，这次执行看到的就该是新的样子。
+    // 中间被删掉的会返回 null（`dropReferences` 通常已经把 id 摘掉了，这里
+    // 只是不指望它）：跳过，而不是在规格里留一行查无此卡。
+    const related = task.relatedTo
+      .map((id) => storage.getTask(id))
+      .filter((other): other is Task => other !== null)
+    await writeFile(
+      join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged, related), 'utf8',
+    )
 
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task, comments, prior !== undefined, staged),
+      prompt: renderPrompt(task, comments, prior !== undefined, staged, related),
       permission: 'standard',
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
       ...(task.model === undefined ? {} : { model: task.model }),
@@ -548,6 +590,39 @@ export class Runner {
 }
 
 /**
+ * 关联卡片在规格里展开多少字。
+ *
+ * 它们是参考资料，不是这次要做的活 —— 五张各写两千字的卡会把真正的需求
+ * 挤到 Agent 的注意力之外。截断处明说截断了，比悄悄少给一半强。
+ */
+const RELATED_EXCERPT = 1200
+
+/** 一张关联卡在规格里的样子：编号、状态、标题、需求正文与验收标准。 */
+function renderRelated(task: Task): string[] {
+  const body = task.description.trim()
+  const excerpt = body.length > RELATED_EXCERPT
+    ? `${body.slice(0, RELATED_EXCERPT)}\n\n（这张卡的描述过长，此处只截取前一段）`
+    : body
+  const lines = [`### ${String(task.id)} · ${COLUMN_LABEL[task.column]} · ${taskTitle(task)}`, '']
+  if (excerpt.length > 0) lines.push(excerpt, '')
+  if (task.acceptance.length > 0) {
+    lines.push('验收标准：')
+    for (const item of task.acceptance) lines.push(`- ${item}`)
+    lines.push('')
+  }
+  return lines
+}
+
+/** 列名在规格里的说法。给的是"这张关联卡走到哪儿了"，Agent 据此判断它有多可信。 */
+const COLUMN_LABEL: Readonly<Record<Task['column'], string>> = {
+  backlog: '想法池（还没定下来）',
+  ready: '队列中（还没开工）',
+  running: '正在执行',
+  review: '待验收（做完了但还没过人眼）',
+  done: '已完成',
+}
+
+/**
  * 投喂给 Agent 的任务规格，写进 worktree 根目录。
  *
  * 讨论线程整段附在后面：人和 Agent 的往来是这张卡真正的上下文，只给最后
@@ -556,9 +631,14 @@ export class Runner {
  * 附件列成一节**带上相对路径**：文件已经躺在 worktree 里了，但 Agent 只有
  * 知道它们在哪儿、分别是什么，才会真的去读 —— 光把文件放进目录，多数时候
  * 它连看都不会看一眼。
+ *
+ * 关联的卡同样整段展开，并且**明写它们是参考、不是这次的活**：只给一串 id
+ * 等于没给（Agent 没有任何办法查到那张卡长什么样），而不声明身份则会让它
+ * 顺手把参考资料里的验收标准也一并做掉。
  */
 export function renderTaskSpec(
   task: Task, comments: readonly TaskComment[] = [], attachments: readonly StagedAttachment[] = [],
+  related: readonly Task[] = [],
 ): string {
   const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
   // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
@@ -566,18 +646,35 @@ export function renderTaskSpec(
     lines.push('## 验收标准', '')
     for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
   }
-  if (attachments.length > 0) {
+  // 规格附件进「附件」一节，讨论里带的跟着它那条留言走 —— 一张截图脱离了
+  // 「这儿为什么长这样」那句话就只是一张来历不明的图，摆进需求清单反而
+  // 会被当成一条新要求。
+  const spec = attachments.filter((file) => file.commentId === undefined)
+  if (spec.length > 0) {
     lines.push('', '## 附件', '', '这些文件是需求的一部分，已经放在工作区里，请读过再动手：', '')
-    for (const file of attachments) {
-      lines.push(`- \`${file.relPath}\` —— ${file.filename}（${file.mime}，${humanSize(file.size)}）`)
-    }
+    for (const file of spec) lines.push(describeStaged(file))
     lines.push('', '读不了某个格式（比如 Word、PDF）就想办法转成文本再读，不要跳过它。')
+  }
+  if (related.length > 0) {
+    lines.push(
+      '', '## 关联任务', '',
+      '这几张卡是这张卡的**参考资料**，不是这次要做的活 —— 读它们是为了让你的改动',
+      '跟它们对得上（接口、命名、已经定下来的做法）。不要去实现它们的验收标准。',
+      '',
+    )
+    for (const other of related) lines.push(...renderRelated(other))
   }
   if (comments.length > 0) {
     lines.push('', '## 讨论', '')
     for (const comment of comments) {
       lines.push(`### ${comment.author === 'agent' ? 'Agent' : '人'} · ${new Date(comment.at).toISOString()}`, '')
       lines.push(comment.body.trim(), '')
+      const carried = attachments.filter((file) => file.commentId === comment.id)
+      if (carried.length > 0) {
+        lines.push('这条留言带了这些文件，已经放在工作区里：', '')
+        for (const file of carried) lines.push(describeStaged(file))
+        lines.push('')
+      }
     }
   }
   lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
@@ -590,15 +687,20 @@ export function renderTaskSpec(
  * 附件在这里**再点一次名**：TASK.md 里已经有完整清单，但 prompt 是 CLI
  * 唯一保证会读的东西，附件是需求的一部分，不该指望它自己翻到那一节。
  *
+ * 关联的卡同样在这里点名：TASK.md 里有它们的正文，但 prompt 是 CLI 唯一
+ * 保证会读的东西，而"有几张卡要一起读"这件事本身就会改变它的做法。
+ *
  * @param task - 目标任务。
  * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
  * @param attachments - 已经拷进 worktree 的附件。
+ * @param related - 关联的同项目卡片，已经展开在 TASK.md 里。
  */
 export function renderPrompt(
   task: Task,
   comments: readonly TaskComment[] = [],
   resuming = false,
   attachments: readonly StagedAttachment[] = [],
+  related: readonly Task[] = [],
 ): string {
   const lines: string[] = []
   const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
@@ -615,16 +717,43 @@ export function renderPrompt(
       '完整需求与此前的往来见仓库根目录的 TASK.md 的「讨论」一节。',
     )
   }
-  if (attachments.length > 0) {
+  const spec = attachments.filter((file) => file.commentId === undefined)
+  if (spec.length > 0) {
     lines.push(
       '',
-      `这张卡带了 ${String(attachments.length)} 个附件，是需求的一部分，动手前先读：`,
-      ...attachments.map((file) => `- ${file.relPath}（${file.filename}）`),
+      `这张卡带了 ${String(spec.length)} 个附件，是需求的一部分，动手前先读：`,
+      ...spec.map((file) => `- ${file.relPath}（${file.filename}）`),
+    )
+  }
+  // 最新这条反馈自己带的文件**单独点一次名**：它多半就是这一轮要看的东西
+  // （"照着这张图改"），混在整卡的清单里说一句"共 N 个附件"，等于指望
+  // Agent 自己去分辨哪个是新的。
+  const carried = lastHuman === undefined
+    ? []
+    : attachments.filter((file) => file.commentId === lastHuman.id)
+  if (carried.length > 0) {
+    lines.push(
+      '',
+      `这条反馈带了 ${String(carried.length)} 个文件，就是它说的那些东西：`,
+      ...carried.map((file) => `- ${file.relPath}（${file.filename}）`),
+    )
+  }
+  if (related.length > 0) {
+    lines.push(
+      '',
+      `这张卡关联了 ${String(related.length)} 张同项目的卡片，正文在 TASK.md 的「关联任务」一节，`
+      + '是**参考资料**而不是这次要做的活 —— 动手前先读，做完对一遍别和它们打架：',
+      ...related.map((other) => `- ${String(other.id)} ${taskTitle(other)}`),
     )
   }
   lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')
   lines.push('不要提交、不要推送、不要改动 TASK.md。')
   return lines.join('\n')
+}
+
+/** TASK.md 里的一条附件：路径在前，因为 Agent 要拿它去读文件。 */
+function describeStaged(file: StagedAttachment): string {
+  return `- \`${file.relPath}\` —— ${file.filename}（${file.mime}，${humanSize(file.size)}）`
 }
 
 function describeError(error: unknown): string {

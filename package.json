@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "m0": "node --experimental-strip-types packages/host/src/bin/m0.ts",
     "build:web": "pnpm --filter @openkanban/web run build",
-    "dev": "node --experimental-strip-types packages/host/src/bin/openkanban.ts",
+    "dev": "node --experimental-strip-types scripts/dev.ts",
+    "dev:host": "node --experimental-strip-types packages/host/src/bin/openkanban.ts",
     "build": "pnpm run build:web && node --experimental-strip-types scripts/build.ts",
     "prepack": "pnpm run build"
   },

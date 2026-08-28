@@ -137,6 +137,23 @@ describe('guardRequest — token 关卡', () => {
   })
 })
 
+describe('guardRequest — cookieOnly（WebSocket 升级）', () => {
+  const CONFIG_WS = { ...CONFIG, cookieOnly: true }
+
+  it('无视 URL 上的同名 token，认 cookie', () => {
+    // vite 的 HMR 客户端就是这样：ws URL 上挂着它自己的 `?token=`。
+    const req = authed({ url: '/?token=vite-hmr-handshake' })
+    expect(guardRequest(req, CONFIG_WS)).toMatchObject({ ok: true })
+    // 不加 cookieOnly 的话，query 那份会被当成我们的 token，直接 401。
+    expect(guardRequest(req, CONFIG)).toMatchObject({ ok: false, reason: 'bad-token' })
+  })
+
+  it('没有 cookie 时不因 query 里的 token 而放行', () => {
+    const req = request({ host: '127.0.0.1:4321', url: `/?token=${TOKEN}` })
+    expect(guardRequest(req, CONFIG_WS)).toMatchObject({ ok: false, reason: 'missing-token' })
+  })
+})
+
 describe('tokenCookieHeader', () => {
   it('带 HttpOnly 与 SameSite=Strict', () => {
     const header = tokenCookieHeader(TOKEN)

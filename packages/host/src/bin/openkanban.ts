@@ -149,6 +149,7 @@ const USAGE = `
   --data <dir>      数据目录，默认按平台惯例
   --no-open         不自动打开浏览器
   --new-token       轮换访问 token
+  --web-dev <url>   前端交给该地址的 vite dev server（pnpm run dev 会自动带上）
   --help            显示本帮助
 
 service 子命令：
@@ -267,10 +268,13 @@ async function main(): Promise<void> {
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
   const token = await resolveToken(dir, process.argv.includes('--new-token'))
-  const assets = staticDir()
-  if (assets === undefined) {
+  // --web-dev 把前端交给 vite（见 scripts/dev.ts）。此时不碰 packages/web/dist ——
+  // 那份产物只在构建时更新，开发时读它就是在看一个过期的界面。
+  const webDev = flag('web-dev')
+  const assets = webDev === undefined ? staticDir() : undefined
+  if (webDev === undefined && assets === undefined) {
     console.log(C.red('  ✗ 找不到前端产物，本次只提供 API。'))
-    console.log(C.dim('    从源码运行时先跑 `pnpm run build:web`。\n'))
+    console.log(C.dim('    从源码运行时用 `pnpm run dev`，或先跑 `pnpm run build:web`。\n'))
   }
   const server = await startServer({
     storage,
@@ -280,11 +284,13 @@ async function main(): Promise<void> {
     scheduler,
     bus,
     token,
+    ...(webDev === undefined ? {} : { devServer: webDev }),
     ...(assets === undefined ? {} : { staticDir: assets }),
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })
 
   console.log(`\n  ${C.amber('▸')} ${server.url}`)
+  if (webDev !== undefined) console.log(C.dim(`    前端来自 ${webDev}，改 packages/web/src 会热更新。`))
   console.log(C.dim('    只监听 127.0.0.1。远程访问请用 SSH 端口转发，不要改成 0.0.0.0。'))
   console.log(C.dim('    token 存在数据目录里，重启后链接依然有效；`--new-token` 可轮换。'))
   console.log(C.dim(`    数据 ${join(dir, 'openkanban.db')}`))

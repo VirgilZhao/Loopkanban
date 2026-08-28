@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Moon, Sun } from 'lucide-react'
 import { cn } from '@/lib/utils.ts'
 
-const KEY = 'openkanban.theme'
+const KEY = 'loopkanban.theme'
 
 /** 用户手动选过的明暗；没选过（或读不到）返回 null，此时以系统为准。 */
 function storedTheme(): 'dark' | 'light' | null {

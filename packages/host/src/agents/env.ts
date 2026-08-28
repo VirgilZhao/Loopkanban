@@ -7,7 +7,7 @@
  *    凭证，子 CLI 会直接拿去用，绕过用户自己的登录态 —— 那就不再是
  *    「用你本机的 CLI 身份干活」了。所以凭证形变量一律清掉。
  *
- * 2. **切断父会话的身份**。OpenKanban 很可能本身就跑在某个 Agent 会话里
+ * 2. **切断父会话的身份**。LoopKanban 很可能本身就跑在某个 Agent 会话里
  *    （开发时就是如此）。父会话会注入 `CLAUDE_CODE_SESSION_ID`、
  *    `CLAUDE_CODE_MESSAGING_TOKEN`、`CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH`
  *    这类变量，子 CLI 会误以为自己是那个会话的子代、由宿主代管鉴权。

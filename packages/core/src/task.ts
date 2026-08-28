@@ -112,6 +112,7 @@ export type DomainError =
   | 'task-archived'
   | 'already-archived'
   | 'not-archived'
+  | 'not-deletable'
   | 'subject-required'
 
 const fail = <T>(reason: DomainError, detail: string): DomainResult<T> => ({ ok: false, reason, detail })
@@ -185,6 +186,69 @@ export function unarchiveTask(task: Task, request: ArchiveRequest): DomainResult
     return fail('not-archived', '这张卡没有归档')
   }
   return succeed(bump(task, { archivedAt: undefined }, request.now))
+}
+
+/** 可以删除的列。**只有 Agent 还没碰过的卡**：想法池与队列。 */
+const DELETABLE: readonly Column[] = ['backlog', 'ready']
+
+export interface DeleteRequest {
+  readonly expectedRevision: number
+}
+
+/**
+ * 删除一张卡：判定它能不能删。
+ *
+ * 与归档的分工：归档是"从视野里拿走但留着"，删除是"这张卡本身就是多余的"
+ * —— 想法池里写废的点子、队列里重复排进去的活。攒着它们只会让看板越来越
+ * 难扫，而归档不解决这个问题：归档是给"以后可能还要"准备的。
+ *
+ * **只允许 backlog 与 ready**。再往后每一列都意味着 Agent 已经动过仓库：
+ * running 有活着的进程和租约，review 有等着人判读的 diff，done 是审计记录。
+ * 这几列该走的是终止 / 废弃 / 归档 —— 删掉它们等于让"发生过什么"无从追溯。
+ * 要删一张已经跑过的卡，先废弃回想法池。
+ *
+ * 归档的卡可以直接删。归档冻结的是那些会造出半途状态的动作（移动、改需求、
+ * 被认领），删除和归档指向的是同一个方向，不必先取出来再删一次。
+ *
+ * 只做判定、不产出新值：删除没有"新的任务值"，副作用（连同执行历史与
+ * worktree 一并抹掉）由调用方负责。
+ *
+ * @param task - 当前任务。
+ * @param request - CAS 凭据。
+ * @returns 原样的任务，表示可以删；或拒绝的原因。
+ */
+export function deleteTask(task: Task, request: DeleteRequest): DomainResult<Task> {
+  const guard = checkRevision(task, request.expectedRevision)
+  if (!guard.ok) return guard
+  if (!DELETABLE.includes(task.column)) {
+    return fail('not-deletable', `只有 Backlog 与 Ready 的卡可以删除，当前在 ${task.column}`)
+  }
+  // 队列里的卡不该带着租约（离开 running 时一并释放）。真带着就说明有 Run
+  // 正抓着它，删掉会留下一个还在改仓库、却再也没有卡片对应的进程。
+  if (task.lease !== undefined) {
+    return fail('lease-held', `这张卡还挂着 ${task.lease.provider} 的租约，先终止那次执行`)
+  }
+  return succeed(task)
+}
+
+/**
+ * 摘掉一条指向已删除任务的依赖。
+ *
+ * 这是引用完整性的修补，不是人工编辑：`blockedBy` 里留着一个已经不存在的
+ * id，调度器会永远算它"依赖未完成"，那张卡再也不会被派出去，界面上却只
+ * 显示一个查无此卡的 id —— 没有任何操作能解开它。
+ *
+ * 刻意不设列与归档的守卫。running 的卡同样可能依赖被删的那张，而它恰恰
+ * 最不能留着悬空引用：打回之后它还要重新排队。
+ *
+ * @param task - 待检查的任务。
+ * @param on - 被删掉的任务 id。
+ * @param now - 当前时间。
+ * @returns 摘除后的新值；本来就没依赖它则返回 null。
+ */
+export function dropDependency(task: Task, on: TaskId, now: number): Task | null {
+  if (!task.blockedBy.includes(on)) return null
+  return bump(task, { blockedBy: task.blockedBy.filter((id) => id !== on) }, now)
 }
 
 export interface MoveRequest {

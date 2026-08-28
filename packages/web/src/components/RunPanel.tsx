@@ -64,9 +64,13 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
   const [feedback, setFeedback] = useState('')
   const [overlaps, setOverlaps] = useState<string[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
+  // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const latest = runs[0]
   const archived = task.archivedAt !== undefined
+  // 只有想法池与队列里的卡能删。再往后 Agent 已经动过仓库，该走的是终止 / 废弃。
+  const deletable = task.column === 'backlog' || task.column === 'ready'
 
   // 依赖 revision 而不只是 id：派活之后卡片 id 不变，只有 revision 会动。
   // 只看 id 的话，刚派出去的 Run 永远不会被拉到，事件流会一直空着。
@@ -112,6 +116,16 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     return () => { cancelled = true }
   }, [task.id, task.revision, latest])
 
+  // 换了一张卡就把"上膛"收回去 —— 上一张卡的危险状态不该跟着漂到下一张。
+  useEffect(() => { setConfirmDelete(false) }, [task.id])
+
+  // 上膛也不该一直挂着：手滑点开之后忘了，下一次随手一点就把卡删了。
+  useEffect(() => {
+    if (!confirmDelete) return undefined
+    const timer = setTimeout(() => { setConfirmDelete(false) }, 4_000)
+    return () => { clearTimeout(timer) }
+  }, [confirmDelete])
+
   // 新事件到达时贴底，除非用户正在往回翻。
   useEffect(() => {
     const node = logRef.current
@@ -129,6 +143,17 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
     }
     return [...counts].sort((a, b) => b[1] - a[1])
   }, [events])
+
+  /** 删除这张卡。删完面板里已经没有可看的东西了，直接关掉。 */
+  const remove = (): void => {
+    setBusy(true)
+    void api.remove(task.id, task.revision)
+      .then(() => { onChanged(); onClose() })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) onError(error.code, error.message)
+      })
+      .finally(() => { setBusy(false); setConfirmDelete(false) })
+  }
 
   /** 统一处理验收动作的忙碌态与错误上报。 */
   const act = async (call: () => Promise<unknown>): Promise<void> => {
@@ -179,6 +204,27 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
               ? <><ArchiveRestore className="size-2.5" />取出</>
               : <><Archive className="size-2.5" />归档</>}
           </button>
+          {deletable ? (
+            <button
+              disabled={busy}
+              title={confirmDelete
+                ? '再点一次就删掉了，不可撤销'
+                : '删除这张卡：执行历史与它留下的分支、工作区一并抹掉'}
+              onClick={() => {
+                if (!confirmDelete) { setConfirmDelete(true); return }
+                remove()
+              }}
+              className={cn(
+                'chrome-label flex items-center gap-1 rounded-md border px-1.5 py-0.5 transition-colors',
+                'disabled:cursor-not-allowed disabled:opacity-40',
+                confirmDelete
+                  ? 'border-lamp-fail bg-lamp-fail/10 !text-lamp-fail'
+                  : 'border-hairline hover:border-lamp-fail hover:!text-lamp-fail',
+              )}
+            >
+              <Trash2 className="size-2.5" />{confirmDelete ? '确认删除' : '删除'}
+            </button>
+          ) : null}
           <button
             onClick={onClose}
             className="chrome-label rounded-md border border-hairline px-1.5 py-0.5 transition-colors hover:border-hairline-bright hover:text-ink"
@@ -187,7 +233,8 @@ export function RunPanel({ task, agents, onLiveTool, onChanged, onError, onClose
           </button>
         </header>
 
-        {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"这一个动作。
+        {/* 归档的卡是冻结的：派活、验收、改需求全部拒绝，只剩"取出"和"删除"
+            两个动作（删除和归档指向同一个方向，不必先取出来再删一次）。
             与其把按钮摆在那儿等服务端拒绝，不如直接换成一条说明。 */}
         {archived ? (
           <div className="flex items-start gap-2 border-b border-hairline bg-raised/40 px-3 py-2">

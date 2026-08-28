@@ -15,8 +15,8 @@ import type { AddressInfo, Socket } from 'node:net'
 import { extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  archiveTask, asBoardId, asRunId, asTaskId, editTask, moveTask, overlappingWriteScopes,
-  unarchiveTask, type Column, type Task, type TaskEdit,
+  archiveTask, asBoardId, asRunId, asTaskId, deleteTask, dropDependency, editTask, moveTask,
+  overlappingWriteScopes, unarchiveTask, type Column, type Task, type TaskEdit,
 } from '@loopkanban/core'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { Review } from '../review/index.ts'
@@ -298,6 +298,48 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       sendJson(res, 200, { task: edited.value }, extraHeaders)
+      return
+    }
+
+    // ── 删除任务（CAS）──────────────────────────────────────
+    if (method === 'DELETE' && editId !== undefined) {
+      const taskId = asTaskId(decodeURIComponent(editId))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+      const body = await readJsonBody(req) as { expectedRevision?: number } | undefined
+      // DELETE 带请求体不是所有客户端都方便，查询串是等价的入口（curl 用得上）。
+      const fromQuery = Number.parseInt(url.searchParams.get('expectedRevision') ?? '', 10)
+      const expectedRevision = body?.expectedRevision ?? (Number.isFinite(fromQuery) ? fromQuery : undefined)
+      if (expectedRevision === undefined) {
+        sendJson(res, 400, { error: 'bad-request', detail: '需要 expectedRevision' })
+        return
+      }
+      const verdict = deleteTask(task, { expectedRevision })
+      if (!verdict.ok) {
+        sendJson(res, verdict.reason === 'revision-conflict' ? 409 : 422, {
+          error: verdict.reason, detail: verdict.detail,
+        })
+        return
+      }
+
+      // 下游对它的依赖要一并摘掉：留着一个查无此卡的 id，那些卡会永远停在
+      // "依赖未完成"，而界面上没有任何操作能解开它。
+      const now = Date.now()
+      const cascade = storage.listTasks(task.boardId)
+        .filter((other) => other.id !== task.id)
+        .map((other) => dropDependency(other, task.id, now))
+        .filter((next): next is Task => next !== null)
+      // Run 要在删库之前读出来 —— 删完就查不到该收拾哪些 worktree 了。
+      const runs = storage.listRuns(task.id)
+
+      if (!storage.deleteTask(task.id, expectedRevision, cascade)) {
+        sendJson(res, 409, { error: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' })
+        return
+      }
+      // 同 accept / discard：状态先落定，不可逆的删除在后。反过来的话一次
+      // CAS 冲突就会留下"worktree 没了、卡还在"的残局。
+      if (review !== undefined) await review.purge(task, runs)
+      sendJson(res, 200, { deleted: true, unblocked: cascade.map((t) => t.id) }, extraHeaders)
       return
     }
 

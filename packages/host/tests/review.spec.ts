@@ -204,6 +204,26 @@ describe('discard', () => {
   })
 })
 
+describe('purge', () => {
+  it('把卡留下的 worktree 与分支一并收拾掉', async () => {
+    const { branch, worktreePath } = await reviewable()
+    const card = store.getTask(asTaskId('t1'))
+    if (card === null) throw new Error('setup')
+
+    // 删卡的顺序是"先落库、再收拾场地"，所以 purge 拿到的是值而不是 id。
+    await review.purge(card, store.listRuns(asTaskId('t1')))
+
+    expect((await git(repo, 'branch', '--list', branch)).stdout.trim()).toBe('')
+    await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).rejects.toThrow()
+  })
+
+  it('没留下工作区也不抛 —— 卡都删了，收拾场地失败不该让这次删除变成一半成功', async () => {
+    const card = task({ id: 't9', column: 'backlog' })
+    store.createTask(card)
+    await expect(review.purge(card, [])).resolves.toBeUndefined()
+  })
+})
+
 describe('CAS 与不可逆操作的顺序（回归）', () => {
   it('accept 的 CAS 冲突时 worktree 还在，重试能成功', async () => {
     const { worktreePath } = await reviewable()

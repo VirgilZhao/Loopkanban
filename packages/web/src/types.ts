@@ -137,20 +137,50 @@ export interface FileContent {
   content: string
 }
 
-/** 跑一条命令的结果。命令自己失败也是这个形状 —— 那是它的输出，不是故障。 */
-export interface ExecResult {
-  command: string
+/**
+ * 一个终端会话此刻的样子。
+ *
+ * cwd 是**会话自己的**，不跟着文件浏览器走：`cd` 过去就留在那儿，和任何一个
+ * 终端一样。
+ */
+export interface ShellSession {
+  id: string
   cwd: string
-  stdout: string
-  stderr: string
-  /** 被信号打断时为 null，此时看 signal。 */
-  code: number | null
-  signal: string | null
-  /** 有一路输出撞到了上限。 */
-  truncated: boolean
-  timedOut: boolean
-  durationMs: number
+  /** 给人看的 cwd：家目录以内缩成 `~/…`。提示符只有一行宽。 */
+  label: string
+  /** 正在跑的命令；空闲时为 null。 */
+  running: string | null
+  /** 已发出的最后一个事件序号。 */
+  seq: number
 }
+
+/**
+ * 终端事件流里的一条。
+ *
+ * `state` 是订阅时的对齐快照，不带序号 —— 它不是历史里的一条，只是"此刻的
+ * 真相"，页面据此知道有没有命令还在跑。
+ */
+export type ShellEvent =
+  | { kind: 'began'; seq: number; command: string; cwd: string; label: string }
+  | { kind: 'out' | 'err'; seq: number; text: string }
+  | {
+    kind: 'ended'
+    seq: number
+    command: string
+    /** 被信号打断时为 null，此时看 signal。 */
+    code: number | null
+    signal: string | null
+    /** 是被 ctrl+c 打断的，不是它自己退的。 */
+    interrupted: boolean
+    durationMs: number
+    cwd: string
+    label: string
+    /** 命令根本没起来（目录没了这类）。它自己失败不算。 */
+    error?: string
+  }
+  | ({ kind: 'state' } & ShellSession)
+  /** 会话整个没了（被回收、被关掉）。这条之后流就断了。 */
+  | { kind: 'closed'; seq: number }
 
 /** 一个仓库有哪些本地分支，以及推荐当基线的那条。 */
 export interface BranchListing {

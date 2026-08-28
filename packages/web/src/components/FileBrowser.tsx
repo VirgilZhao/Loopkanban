@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CornerLeftUp, File, FileCode, FileText, Folder, GitBranch, RefreshCw } from 'lucide-react'
 import { api, ApiError } from '@/api.ts'
 import { Terminal } from '@/components/Terminal.tsx'
@@ -67,6 +67,17 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
       : String(failure))
   }, [t])
 
+  /*
+   * 报错函数放进 ref，**不当依赖**。
+   *
+   * 它跟着 `t` 走，而 `t` 在切换语言时会换一个身份 —— 把它写进下面几个
+   * effect 的依赖里，切一次语言就会：工作区重读一遍、`setRoot(null)` 让
+   * 终端被整个拆掉重建（正在跑的命令连着屏幕一起没）。语言只该换文案，
+   * 不该把这一页重来一次。用 ref 取当下那份 t，报错照旧说对语言。
+   */
+  const failRef = useRef(fail)
+  failRef.current = fail
+
   // 换项目就整个重来：上一个仓库的工作区、目录、选中的文件，对这一个都没有意义。
   useEffect(() => {
     let cancelled = false
@@ -82,9 +93,9 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
         // 默认落在主仓库上 —— 它总在第一个，且总存在。
         setRoot(found[0]?.path ?? null)
       })
-      .catch((failure: unknown) => { if (!cancelled) fail(failure) })
+      .catch((failure: unknown) => { if (!cancelled) failRef.current(failure) })
     return () => { cancelled = true }
-  }, [project.id, fail])
+  }, [project.id])
 
   /** 打开一个目录。不给 path 就是工作区根。 */
   const open = useCallback((at: string, path?: string) => {
@@ -92,17 +103,17 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
     setError(null)
     void api.files(at, path)
       .then((next) => { setListing(next) })
-      .catch((failure: unknown) => { fail(failure); setListing(null) })
+      .catch((failure: unknown) => { failRef.current(failure); setListing(null) })
       .finally(() => { setBusy(false) })
-  }, [fail])
+  }, [])
 
   /*
    * 换工作区就回到它的根：上一个工作区里的路径在这一个里未必存在。
    *
-   * `listing` 也要一起清掉，不能只清 `file`：终端的 cwd 取自 `listing.path`，
-   * 留着旧的，在新目录到位之前那一小会儿，命令会带着新 root、旧 cwd 出去 ——
-   * 从 worktree 切回主仓库时这两者恰好都通得过围栏，于是命令**静悄悄跑在了
-   * 上一个 worktree 里**，而提示符上写的是另一个地方。
+   * `listing` 也要一起清掉，不能只清 `file`：面包屑与"上一级"都读它，留着
+   * 旧的，在新目录到位之前那一小会儿，屏幕上写的是上一个工作区里的路径。
+   *
+   * 终端**不受这里影响** —— 它有自己的 cwd，换工作区不会把它拽走。
    */
   useEffect(() => {
     if (root === null) return
@@ -116,8 +127,8 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
     setError(null)
     void api.fileContent(root, entry.path)
       .then((next) => { setFile(next) })
-      .catch((failure: unknown) => { fail(failure); setFile(null) })
-  }, [root, fail])
+      .catch((failure: unknown) => { failRef.current(failure); setFile(null) })
+  }, [root])
 
   /**
    * 面包屑。每一段都能点回去。
@@ -298,9 +309,9 @@ export function FileBrowser({ project }: Props): React.JSX.Element {
 
       {root === null ? null : (
         <Terminal
+          projectId={project.id}
           root={root}
-          cwd={here}
-          where={where}
+          browsing={here}
           open={termOpen}
           onToggle={() => { setTermOpen((on) => !on) }}
         />

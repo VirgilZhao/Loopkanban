@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
-import { chmod, mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, writeFile, rm } from 'node:fs/promises'
 import { connect, type AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,6 +34,69 @@ const api = (path: string, init: RequestInit = {}): Promise<Response> =>
     ...init,
     headers: { cookie: `loopkanban_token=${TOKEN}`, ...init.headers },
   })
+
+/** 一条终端事件：SSE 帧里的 `id:`、`event:` 与解开的 `data:`。 */
+interface ShellFrame { seq: number; kind: string; data: Record<string, unknown> }
+
+/** 开一个终端会话，返回它的 id。 */
+async function openShell(body: { root: string; cwd?: string }): Promise<string> {
+  const res = await api('/api/shell', { method: 'POST', body: JSON.stringify(body) })
+  expect(res.status).toBe(201)
+  return (await res.json() as { session: { id: string } }).session.id
+}
+
+/**
+ * 订阅一个会话的事件流，读到 `done` 说够了为止。
+ *
+ * 会话有回放缓冲，所以**先跑命令再订阅**也不会漏事件 —— 测试里不必和
+ * "什么时候接上流"赛跑。
+ */
+async function shellEvents(
+  id: string,
+  done: (frame: ShellFrame) => boolean,
+  after = 0,
+): Promise<ShellFrame[]> {
+  const control = new AbortController()
+  const res = await api(
+    `/api/shell/${encodeURIComponent(id)}/events?after=${String(after)}`,
+    { signal: control.signal },
+  )
+  expect(res.status).toBe(200)
+  const frames: ShellFrame[] = []
+  // 卡死时给出一个有限的失败，而不是把整个测试跑挂在这儿。
+  const guard = setTimeout(() => { control.abort() }, 10_000)
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      buffer += decoder.decode(chunk, { stream: true })
+      for (let at = buffer.indexOf('\n\n'); at >= 0; at = buffer.indexOf('\n\n')) {
+        const frame = buffer.slice(0, at)
+        buffer = buffer.slice(at + 2)
+        const kind = /^event: (.+)$/m.exec(frame)?.[1]
+        const data = /^data: (.*)$/m.exec(frame)?.[1]
+        if (kind === undefined || data === undefined) continue
+        const parsed: ShellFrame = {
+          // 快照那条不带 id —— 它不是历史里的一条事件。
+          seq: Number.parseInt(/^id: (\d+)$/m.exec(frame)?.[1] ?? '0', 10),
+          kind,
+          data: JSON.parse(data) as Record<string, unknown>,
+        }
+        frames.push(parsed)
+        if (done(parsed)) return frames
+      }
+    }
+    return frames
+  } finally {
+    clearTimeout(guard)
+    control.abort()
+  }
+}
+
+/** 一串事件里的 stdout。 */
+function outputOf(frames: ShellFrame[]): string {
+  return frames.filter((frame) => frame.kind === 'out').map((frame) => String(frame.data['text'])).join('')
+}
 
 /** 用原始 http 客户端发请求，以便伪造 Host 头（fetch 不允许覆盖）。 */
 function rawRequest(headers: Record<string, string>, path = '/api/state'): Promise<number> {
@@ -411,33 +474,117 @@ describe('文件浏览与命令行', () => {
     expect(res.status).toBe(404)
   })
 
-  it('跑命令，回退出码与输出', async () => {
-    const res = await api('/api/exec', {
-      method: 'POST',
-      body: JSON.stringify({ root: repo, cwd: join(repo, 'src'), command: 'cat main.ts' }),
-    })
-    expect(res.status).toBe(200)
-    const result = await res.json() as { stdout: string; code: number; cwd: string }
-    expect(result.stdout).toBe('export const x = 1\n')
-    expect(result.code).toBe(0)
+  it('开一个终端会话，跑一条命令，从事件流里看输出与退出码', async () => {
+    const id = await openShell({ root: repo, cwd: join(repo, 'src') })
+    expect((await api(`/api/shell/${id}/exec`, {
+      method: 'POST', body: JSON.stringify({ command: 'cat main.ts' }),
+    })).status).toBe(202)
+
+    const events = await shellEvents(id, (event) => event.kind === 'ended')
+    expect(outputOf(events)).toBe('export const x = 1\n')
+    expect(events.at(-1)?.data['code']).toBe(0)
   })
 
-  it('命令失败照样 200 —— 那是它的输出，不是我们的故障', async () => {
-    const res = await api('/api/exec', {
-      method: 'POST', body: JSON.stringify({ root: repo, command: 'exit 7' }),
+  it('命令失败不是我们的故障 —— 退出码照实报，不是一次请求失败', async () => {
+    const id = await openShell({ root: repo })
+    await api(`/api/shell/${id}/exec`, { method: 'POST', body: JSON.stringify({ command: 'exit 7' }) })
+    const events = await shellEvents(id, (event) => event.kind === 'ended')
+    expect(events.at(-1)?.data['code']).toBe(7)
+  })
+
+  /*
+   * 这是这次改动的重点：终端不再跟着文件浏览器的目录走，`cd` 过去就留在
+   * 那儿 —— 和任何一个终端一样。
+   */
+  it('cd 留得住，会话记着自己在哪儿', async () => {
+    const id = await openShell({ root: repo })
+    await api(`/api/shell/${id}/exec`, { method: 'POST', body: JSON.stringify({ command: 'cd src' }) })
+    await shellEvents(id, (event) => event.kind === 'ended')
+
+    const { session } = await (await api(`/api/shell/${id}`)).json() as { session: { cwd: string } }
+    expect(session.cwd).toBe(join(await realpath(repo), 'src'))
+  })
+
+  it('ctrl+c 把正在跑的命令中断掉', async () => {
+    const id = await openShell({ root: repo })
+    await api(`/api/shell/${id}/exec`, { method: 'POST', body: JSON.stringify({ command: 'sleep 30' }) })
+    // 命令得先真的起来 —— 信号发给一个还没 spawn 出来的进程组是没有意义的。
+    await shellEvents(id, (event) => event.kind === 'began')
+
+    const signalled = await api(`/api/shell/${id}/signal`, {
+      method: 'POST', body: JSON.stringify({ signal: 'SIGINT' }),
     })
-    expect(res.status).toBe(200)
-    expect((await res.json() as { code: number }).code).toBe(7)
+    expect(signalled.status).toBe(200)
+    expect((await signalled.json() as { delivered: boolean }).delivered).toBe(true)
+
+    const events = await shellEvents(id, (event) => event.kind === 'ended')
+    expect(events.at(-1)?.data['interrupted']).toBe(true)
+  })
+
+  it('一次只跑一条：忙着的时候第二条是 409，不是并排跑', async () => {
+    const id = await openShell({ root: repo })
+    await api(`/api/shell/${id}/exec`, { method: 'POST', body: JSON.stringify({ command: 'sleep 1' }) })
+    const second = await api(`/api/shell/${id}/exec`, {
+      method: 'POST', body: JSON.stringify({ command: 'echo nope' }),
+    })
+    expect(second.status).toBe(409)
+    expect((await second.json() as { error: string }).error).toBe('shell-busy')
+  })
+
+  it('Tab 补全列的是会话自己的目录，不受工作区根牵制', async () => {
+    const id = await openShell({ root: repo })
+    const listing = await (await api(`/api/shell/${id}/list?dir=src`)).json() as
+      { entries: { name: string }[] }
+    expect(listing.entries.map((entry) => entry.name)).toEqual(['main.ts'])
+  })
+
+  /*
+   * 每次重新订阅都从头回放的话，用户刚按下的"清空"会在下一次重订阅时自己
+   * 长回来 —— 切一下界面语言就够了。
+   */
+  it('页面带着自己的游标重订阅，已经看过的不会再来一遍', async () => {
+    const id = await openShell({ root: repo })
+    await api(`/api/shell/${id}/exec`, { method: 'POST', body: JSON.stringify({ command: 'echo once' }) })
+    const first = await shellEvents(id, (event) => event.kind === 'ended')
+    expect(outputOf(first)).toContain('once')
+
+    const cursor = Math.max(...first.map((frame) => frame.seq))
+    const again = await shellEvents(id, (event) => event.kind === 'state', cursor)
+    // 只剩下那条对齐用的快照，历史一条都不该重发。
+    expect(again.map((frame) => frame.kind)).toEqual(['state'])
+  })
+
+  /*
+   * 会话没了，这条流就没有对端了。只把订阅者从名单上划掉是不够的：那样
+   * 连接还开着、心跳还在响，页面会以为终端好端端地活着。
+   */
+  it('会话被收掉时，还接着的事件流收到讣告并断开', async () => {
+    const id = await openShell({ root: repo })
+    // 只有流自己结束才会回来 —— 没断的话，这里会一直等到超时并失败。
+    const stream = shellEvents(id, () => false)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect((await api(`/api/shell/${id}`, { method: 'DELETE' })).status).toBe(200)
+    const frames = await stream
+    expect(frames.at(-1)?.kind).toBe('closed')
+  })
+
+  it('会话不在了一律 404 —— 命令不该被送进一个已经回收的会话', async () => {
+    const id = await openShell({ root: repo })
+    expect((await api(`/api/shell/${id}`, { method: 'DELETE' })).status).toBe(200)
+    const res = await api(`/api/shell/${id}/exec`, {
+      method: 'POST', body: JSON.stringify({ command: 'pwd' }),
+    })
+    expect(res.status).toBe(404)
+    expect((await res.json() as { error: string }).error).toBe('no-such-shell')
   })
 
   /*
    * 目录在你浏览的这会儿被删掉，是这几个接口最常见的失败 —— 废弃一张卡就会
    * 连它的 worktree 一起删。三条路都得说人话，不能一句 500 了事。
    */
-  it('cwd 没了是 404，不是 500 —— spawn 的报错会把锅甩给 shell', async () => {
-    const res = await api('/api/exec', {
-      method: 'POST',
-      body: JSON.stringify({ root: repo, cwd: join(repo, '走了'), command: 'pwd' }),
+  it('起步目录没了是 404，不是 500 —— spawn 的报错会把锅甩给 shell', async () => {
+    const res = await api('/api/shell', {
+      method: 'POST', body: JSON.stringify({ root: repo, cwd: join(repo, '走了') }),
     })
     expect(res.status).toBe(404)
     expect((await res.json() as { error: string }).error).toBe('no-such-dir')
@@ -457,19 +604,22 @@ describe('文件浏览与命令行', () => {
       expect(res.status).toBe(410)
       expect((await res.json() as { error: string }).error).toBe('repo-missing')
     }
-    const ran = await api('/api/exec', {
-      method: 'POST', body: JSON.stringify({ root: repo, command: 'pwd' }),
-    })
-    expect(ran.status).toBe(410)
-    expect((await ran.json() as { error: string }).error).toBe('repo-missing')
+    const opened = await api('/api/shell', { method: 'POST', body: JSON.stringify({ root: repo }) })
+    expect(opened.status).toBe(410)
+    expect((await opened.json() as { error: string }).error).toBe('repo-missing')
   })
 
-  it('空命令 422，围栏外的 cwd 422', async () => {
-    expect((await api('/api/exec', {
-      method: 'POST', body: JSON.stringify({ root: repo, command: '   ' }),
+  /*
+   * 围栏只画在开会话这一步。开完之后 `cd` 去哪儿是用户自己的事 —— 命令本来
+   * 就能自己 `cd /`，拦不住也不打算拦；这层围栏防的是我们的路径拼接写错。
+   */
+  it('空命令 422，围栏外的起步目录 422', async () => {
+    const id = await openShell({ root: repo })
+    expect((await api(`/api/shell/${id}/exec`, {
+      method: 'POST', body: JSON.stringify({ command: '   ' }),
     })).status).toBe(422)
-    expect((await api('/api/exec', {
-      method: 'POST', body: JSON.stringify({ root: '/etc', command: 'ls' }),
+    expect((await api('/api/shell', {
+      method: 'POST', body: JSON.stringify({ root: '/etc' }),
     })).status).toBe(422)
   })
 })

@@ -7,9 +7,9 @@
  */
 
 import type {
-  Agent, Attachment, BranchListing, DiffView, DirListing, ExecResult, FileContent, FileListing,
-  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, StreamEvent,
-  Task, TaskComment, TaskEdit, Workspace,
+  Agent, Attachment, BranchListing, DiffView, DirListing, FileContent, FileListing,
+  FilePreview, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState, ShellEvent,
+  ShellSession, StreamEvent, Task, TaskComment, TaskEdit, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
@@ -114,15 +114,50 @@ export const api = {
     ),
 
   /**
-   * 在工作区里跑一条命令。
+   * 开一个终端会话。
    *
-   * **命令自己失败不会抛** —— 非零退出是它的输出而不是我们的故障，界面要
-   * 照实显示退出码。只有围栏拒绝、空命令这类才是 4xx。
+   * `root` 是工作区根，服务端据此校验起步目录在围栏里。**围栏只画在这一步**：
+   * 开完之后 `cd` 去哪儿是用户自己的事。
    */
-  exec: (root: string, cwd: string, command: string) =>
-    call<ExecResult>('/api/exec', {
-      method: 'POST', body: JSON.stringify({ root, cwd, command }),
+  openShell: (root: string, cwd?: string) =>
+    call<{ session: ShellSession }>('/api/shell', {
+      method: 'POST', body: JSON.stringify({ root, cwd }),
     }),
+
+  /** 会话此刻的样子。页面重新挂上来时用它确认那个会话还在。 */
+  shell: (id: string) =>
+    call<{ session: ShellSession }>(`/api/shell/${encodeURIComponent(id)}`),
+
+  /**
+   * 跑一条命令。**不等它结束** —— 202 只表示会话收下了，输出与结局从事件流
+   * 里出去。`npm run dev` 根本不打算结束，等它 exit 再回应等于把这类命令
+   * 整个排除在外。
+   */
+  shellExec: (id: string, command: string) =>
+    call<{ accepted: boolean }>(`/api/shell/${encodeURIComponent(id)}/exec`, {
+      method: 'POST', body: JSON.stringify({ command }),
+    }),
+
+  /** 往正在跑的命令的 stdin 里写。`eof` 相当于 ctrl+d。 */
+  shellInput: (id: string, data: string, eof = false) =>
+    call<{ delivered: boolean }>(`/api/shell/${encodeURIComponent(id)}/input`, {
+      method: 'POST', body: JSON.stringify({ data, eof }),
+    }),
+
+  /** ctrl+c 走这里。信号发给整个进程组，孙进程一起收到。 */
+  shellSignal: (id: string, signal: 'SIGINT' | 'SIGTERM' | 'SIGKILL' = 'SIGINT') =>
+    call<{ delivered: boolean }>(`/api/shell/${encodeURIComponent(id)}/signal`, {
+      method: 'POST', body: JSON.stringify({ signal }),
+    }),
+
+  /**
+   * 列会话当前目录下的东西，供 Tab 补全。
+   *
+   * 不走 `/api/files`：那条钉在某个工作区根上，而会话 `cd` 出去之后就补不出
+   * 任何东西了 —— 一个补不了路径的终端，Tab 按下去什么都不动。
+   */
+  shellList: (id: string, dir: string) =>
+    call<FileListing>(`/api/shell/${encodeURIComponent(id)}/list?dir=${encodeURIComponent(dir)}`),
 
   agents: () => call<{ agents: Agent[] }>('/api/agents'),
 
@@ -294,6 +329,53 @@ export function attachmentUrl(attachmentId: string): string {
  * @param onEvent - 每条事件的回调。
  * @returns 关闭订阅的函数。
  */
+/**
+ * 订阅一个终端会话的输出。
+ *
+ * 同样用原生 EventSource：断线自动重连，并带上 `Last-Event-ID`，服务端从
+ * 那之后补齐 —— 网络抖一下不该让屏幕上出现一个洞。
+ *
+ * 会话被回收掉之后，服务端回的是 404 而不是事件流。EventSource 遇到非
+ * 200 会**永久关闭**（不再重连），`onLost` 就是为这一刻准备的：页面据此
+ * 重开一个会话，而不是对着一条死掉的连接一直转圈。
+ *
+ * @param id - 会话 id。
+ * @param onEvent - 每条事件的回调。
+ * @param onLost - 连接彻底断了（多半是会话已经不在了）。
+ * @param after - 页面已经画到第几号事件。**新建连接时必须给**：
+ *   `Last-Event-ID` 只在浏览器自己重连时才有，不给这个参数的话，每次重新
+ *   订阅都会把整个回放缓冲再倒一遍 —— 刚清掉的屏幕会自己长回来。
+ * @returns 关闭订阅的函数。
+ */
+export function subscribeShell(
+  id: string,
+  onEvent: (event: ShellEvent) => void,
+  onLost: () => void,
+  after = 0,
+): () => void {
+  const source = new EventSource(
+    `/api/shell/${encodeURIComponent(id)}/events?after=${String(after)}`,
+    { withCredentials: true },
+  )
+  for (const kind of ['began', 'out', 'err', 'ended', 'state', 'closed']) {
+    source.addEventListener(kind, (event) => {
+      const message = event as MessageEvent<string>
+      const seq = Number.parseInt(message.lastEventId, 10)
+      // 服务端的形状与 ShellEvent 一一对应，这里只把 kind 与 seq 补回去。
+      onEvent({
+        kind,
+        seq: Number.isFinite(seq) ? seq : 0,
+        ...JSON.parse(message.data) as Record<string, unknown>,
+      } as unknown as ShellEvent)
+    })
+  }
+  source.addEventListener('error', () => {
+    // CONNECTING 是它自己在重连，那不是"丢了"，别打扰用户。
+    if (source.readyState === EventSource.CLOSED) onLost()
+  })
+  return () => { source.close() }
+}
+
 export function subscribeRun(runId: string, onEvent: (event: StreamEvent) => void): () => void {
   const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`, { withCredentials: true })
   const kinds = ['session', 'notice', 'text', 'tool', 'usage', 'finished', 'raw']

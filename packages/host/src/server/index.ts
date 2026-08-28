@@ -32,8 +32,8 @@ import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
 import { readFilePreview } from './preview.ts'
 import { RunBus } from './bus.ts'
-import { runCommand } from './exec.ts'
 import { confine, listFiles, listWorkspaces, readFileText, refusalFor } from './files.ts'
+import { ShellBusyError, ShellHub, type ShellEvent, type ShellSession } from './shell.ts'
 
 /** 只监听回环地址。**绝不 `0.0.0.0`** —— 那等于把执行任意代码的接口挂到局域网。 */
 const LOOPBACK = '127.0.0.1'
@@ -44,6 +44,14 @@ const LOOPBACK = '127.0.0.1'
  * 死连接占着订阅的时间越久。
  */
 const DEFAULT_SSE_HEARTBEAT_MS = 20_000
+
+/**
+ * 终端里允许发的信号。
+ *
+ * 白名单而不是照单全收：信号名是原样交给 `process.kill` 的，而进程组号是
+ * 我们自己算的 —— 一个拼错的名字在这儿只该是 422，不该变成一次意外的终止。
+ */
+const SHELL_SIGNALS = new Set(['SIGINT', 'SIGTERM', 'SIGKILL', 'SIGQUIT', 'SIGHUP'])
 
 export interface ServerOptions {
   readonly storage: Storage
@@ -72,6 +80,13 @@ export interface ServerOptions {
   readonly token?: string
   /** SSE 心跳间隔，同时决定发现死连接的最长延迟。 */
   readonly sseHeartbeatMs?: number
+  /**
+   * 终端会话没人看着能留多久，超时连同它正在跑的命令一起收掉。
+   *
+   * 默认十分钟。一个网页终端最不该干的事，是在用户关掉标签页之后，还在
+   * 机器上留一个谁也看不见的 `npm run dev`。
+   */
+  readonly shellIdleMs?: number
   /** 前端构建产物目录；不给则只提供 API。 */
   readonly staticDir?: string
   /**
@@ -224,6 +239,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const attachmentStore = options.attachments
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
   const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
+  const shells = new ShellHub(options.shellIdleMs === undefined ? {} : { idleMs: options.shellIdleMs })
 
   const server: Server = createHttpServer((req, res) => {
     void handle(req, res).catch((error: unknown) => {
@@ -395,26 +411,22 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     }
 
     /*
-     * 在工作区里跑一条命令。
+     * ── 终端会话 ─────────────────────────────────────────────
      *
-     * 这是用户自己的手，不是 Agent 的 —— 他正在看某个 worktree，想 `git log`
-     * 一下就得切出去开终端、再 cd 到那个七层深的路径。命令自己失败（非零退出）
-     * 照样是 200：那是它的输出，不是我们的故障。
+     * 开一个会话。**围栏只画在这一步**：起步目录必须落在已登记项目的仓库里。
+     * 开完之后，会话的 cwd 跟着 shell 自己的 `$PWD` 走 —— `cd ~` 就真的去了
+     * 家目录。这不是围栏漏了：命令本来就能自己 `cd /`，拦不住也不打算拦，
+     * 这层围栏防的是**我们的路径拼接写错**，不是防用户。
      */
-    if (method === 'POST' && pathname === '/api/exec') {
+    if (method === 'POST' && pathname === '/api/shell') {
       const body = (await readJsonBody(req) ?? {}) as Record<string, unknown>
-      const command = typeof body['command'] === 'string' ? body['command'].trim() : ''
-      if (command.length === 0) {
-        sendJson(res, 422, { error: 'empty-command', detail: '要一条命令' })
-        return
-      }
       const roots = projectRoots()
       const askedRoot = typeof body['root'] === 'string' ? body['root'].trim() : ''
       const asked = typeof body['cwd'] === 'string' ? body['cwd'].trim() : ''
       const root = await confine(roots, askedRoot)
-      if (root === null) { await refuse(roots, askedRoot, '只能在已登记项目的仓库里跑命令'); return }
+      if (root === null) { await refuse(roots, askedRoot, '终端只能从已登记项目的仓库里起步'); return }
       const cwd = asked.length === 0 ? root : await confine([root], asked)
-      if (cwd === null) { await refuse([root], asked, '只能在已登记项目的仓库里跑命令'); return }
+      if (cwd === null) { await refuse([root], asked, '终端只能从已登记项目的仓库里起步'); return }
 
       /*
        * cwd 可能在你浏览的这会儿就没了 —— 废弃一张卡会连它的 worktree 一起删掉。
@@ -425,8 +437,115 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         sendJson(res, 404, { error: 'no-such-dir', detail: `打不开 ${cwd}` })
         return
       }
-      const timeout = typeof body['timeoutMs'] === 'number' ? body['timeoutMs'] : undefined
-      sendJson(res, 200, await runCommand(command, cwd, timeout), extraHeaders)
+      sendJson(res, 201, { session: shells.open(cwd).snapshot() }, extraHeaders)
+      return
+    }
+
+    /*
+     * 会话上的动作。会话不在了一律 404 —— 页面据此重新开一个，而不是把
+     * 用户敲的命令送进一个已经被回收的会话里。
+     */
+    const shellRoute = /^\/api\/shell\/([^/]+)(?:\/(events|exec|input|signal|list))?$/.exec(pathname)
+    if (shellRoute !== null) {
+      const session = shells.get(decodeURIComponent(shellRoute[1] ?? ''))
+      if (session === null) {
+        sendJson(res, 404, { error: 'no-such-shell', detail: '这个终端会话已经不在了' })
+        return
+      }
+      const action = shellRoute[2] ?? ''
+
+      if (method === 'GET' && action === 'events') {
+        /*
+         * `after` 是**页面自己记着的游标**：它已经画在屏幕上的最后一个 seq。
+         * EventSource 建新连接时带不上 `Last-Event-ID`（那是重连才有的），
+         * 少了这个参数，每次重新订阅都会把整个回放缓冲再倒一遍 —— 用户刚
+         * 清掉的屏幕会自己长回来。
+         */
+        const after = Number.parseInt(url.searchParams.get('after') ?? '', 10)
+        streamShell(req, res, session, Number.isFinite(after) && after > 0 ? after : 0)
+        return
+      }
+
+      if (method === 'GET' && action === '') {
+        sendJson(res, 200, { session: session.snapshot() }, extraHeaders)
+        return
+      }
+
+      if (method === 'DELETE' && action === '') {
+        await shells.close(session.id)
+        sendJson(res, 200, { closed: true }, extraHeaders)
+        return
+      }
+
+      /*
+       * 跑一条命令。回 202 而不是结果：`npm run dev` 根本不打算结束，等它
+       * exit 再回应等于把这类命令整个排除在外。输出与结局都从事件流里出去。
+       */
+      if (method === 'POST' && action === 'exec') {
+        const body = (await readJsonBody(req) ?? {}) as Record<string, unknown>
+        const command = typeof body['command'] === 'string' ? body['command'].trim() : ''
+        if (command.length === 0) {
+          sendJson(res, 422, { error: 'empty-command', detail: '要一条命令' })
+          return
+        }
+        try {
+          session.exec(command)
+        } catch (error) {
+          // 一次一条。第二条该等着，而不是和前一条抢同一块屏幕。
+          if (error instanceof ShellBusyError) {
+            sendJson(res, 409, { error: 'shell-busy', detail: error.message })
+            return
+          }
+          throw error
+        }
+        sendJson(res, 202, { accepted: true }, extraHeaders)
+        return
+      }
+
+      /** 往正在跑的命令的 stdin 里写。`eof` 相当于 ctrl+d。 */
+      if (method === 'POST' && action === 'input') {
+        const body = (await readJsonBody(req) ?? {}) as Record<string, unknown>
+        const data = typeof body['data'] === 'string' ? body['data'] : ''
+        const eof = body['eof'] === true
+        sendJson(res, 200, { delivered: session.input(data, eof) }, extraHeaders)
+        return
+      }
+
+      /** ctrl+c 走这里。信号发给整个进程组，孙进程一起收到。 */
+      if (method === 'POST' && action === 'signal') {
+        const body = (await readJsonBody(req) ?? {}) as Record<string, unknown>
+        const asked = typeof body['signal'] === 'string' ? body['signal'] : 'SIGINT'
+        if (!SHELL_SIGNALS.has(asked)) {
+          sendJson(res, 422, { error: 'bad-signal', detail: `不认识的信号 ${asked}` })
+          return
+        }
+        sendJson(res, 200, { delivered: session.signal(asked as NodeJS.Signals) }, extraHeaders)
+        return
+      }
+
+      /*
+       * 列一个目录，只为 Tab 补全。
+       *
+       * 不走 `/api/files` 那条：那条的围栏钉在某个工作区根上，而会话 `cd`
+       * 出去之后就补不出任何东西了 —— 一个补不了路径的终端，Tab 按下去
+       * 什么都不动，最像的解释是这个功能坏了。这里不另设围栏：会话本来就能
+       * 跑 `ls`，列目录严格地更弱。
+       */
+      if (method === 'GET' && action === 'list') {
+        const asked = url.searchParams.get('dir')?.trim() ?? ''
+        const target = asked.length === 0 ? session.cwd : resolvePath(session.cwd, asked)
+        try {
+          sendJson(res, 200, {
+            cwd: session.cwd,
+            ...await listFiles(target, target),
+          }, extraHeaders)
+        } catch {
+          sendJson(res, 404, { error: 'no-such-dir', detail: `打不开 ${target}` })
+        }
+        return
+      }
+
+      sendJson(res, 405, { error: 'method-not-allowed', detail: `${method} ${pathname}` })
       return
     }
 
@@ -1256,6 +1375,79 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     return true
   }
 
+  /**
+   * 终端会话的事件流。
+   *
+   * 和 Run 的流有一处关键不同：**这一头是有背压的**。`res.write` 写不动
+   * （内核缓冲满了、页面在别的标签页里被节流）时就把子进程的输出暂停下来，
+   * 排空了再放开 —— 终端本来就是这么工作的，读得慢，写的人就该被堵住。
+   * 少了这一层，一条 `find /` 会在服务端攒出几百兆待发数据。
+   */
+  function streamShell(
+    req: IncomingMessage,
+    res: ServerResponse,
+    session: ShellSession,
+    after: number,
+  ): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+
+    // 两个游标取大的那个：`after` 是页面开新连接时给的，`Last-Event-ID` 是
+    // 浏览器自己重连时补的。谁更靠后就从谁之后接着发。
+    const lastHeader = req.headers['last-event-id']
+    const lastSeq = typeof lastHeader === 'string' ? Number.parseInt(lastHeader, 10) : 0
+    let cursor = Math.max(after, Number.isFinite(lastSeq) && lastSeq > 0 ? lastSeq : 0)
+    let held = false
+
+    const write = (event: ShellEvent): void => {
+      cursor = Math.max(cursor, event.seq)
+      const room = res.write(
+        `id: ${String(event.seq)}\nevent: ${event.kind}\ndata: ${JSON.stringify(event.payload)}\n\n`,
+      )
+      // 会话没了，这条流也就没有对端了 —— 把它收掉，别留一个心跳还在响、
+      // 后面永远不会再有内容的连接。
+      if (event.kind === 'closed') { res.end(); return }
+      if (room || held) return
+      held = true
+      session.hold()
+      res.once('drain', () => {
+        if (!held) return
+        held = false
+        session.release()
+      })
+    }
+
+    // 先补回放，再报快照，最后接实时。
+    //
+    // 快照必须在回放**之后**：断线的这段时间里命令可能已经跑完了，而回放
+    // 缓冲装不下全部历史，那条 `began` 也许早被挤掉。以快照为准，页面才不会
+    // 对着一条其实已经结束的命令一直显示"执行中"。
+    //
+    // 它不带 `id:` —— 这不是一条历史事件，不该顶掉重连时的游标。
+    for (const event of session.replay(cursor)) write(event)
+    res.write(`event: state\ndata: ${JSON.stringify(session.snapshot())}\n\n`)
+
+    // 这中间没有 await，所以「补完历史」与「接上实时」之间不存在缝隙。
+    const unsubscribe = session.subscribe((event) => {
+      if (event.seq > cursor) write(event)
+    })
+
+    const heartbeat = setInterval(() => { res.write(': ping\n\n') }, heartbeatMs)
+    heartbeat.unref()
+    const cleanup = (): void => {
+      clearInterval(heartbeat)
+      unsubscribe()
+      // 断开的订阅者不能把命令永远堵在那儿 —— 它已经没人读了。
+      if (held) { held = false; session.release() }
+    }
+    req.on('close', cleanup)
+    res.on('close', cleanup)
+  }
+
   function streamRunEvents(req: IncomingMessage, res: ServerResponse, id: ReturnType<typeof asRunId>): void {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -1301,10 +1493,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     token,
     port,
     bus,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => { error === undefined ? resolve() : reject(error) })
-      server.closeAllConnections()
-    }),
+    close: async () => {
+      // 先收终端会话：它们手里攥着真实的进程树（`npm run dev` 就是典型），
+      // 关掉 HTTP 端口不会让它们退出，只会让它们变成没人认领的孤儿。
+      await shells.dispose()
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { error === undefined ? resolve() : reject(error) })
+        server.closeAllConnections()
+      })
+    },
   }
 }
 

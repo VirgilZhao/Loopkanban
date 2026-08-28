@@ -24,6 +24,7 @@ import { Runner } from '../runner/index.ts'
 import { Scheduler } from '../scheduler/index.ts'
 import { installService, planService, uninstallService, type ServicePlan } from '../service/index.ts'
 import { Storage } from '../storage/index.ts'
+import { TestEnvs } from '../testenv/index.ts'
 import { loadModelCatalog, mergeModels } from '../agents/models-dev.ts'
 import { detectBaseBranch } from '../worktree/index.ts'
 
@@ -284,7 +285,14 @@ async function main(): Promise<void> {
     storage, bus, agents: pool,
     artifactsRoot: join(dir, 'runs'),
   })
-  const review = new Review({ storage })
+  // 一键测试环境。进程只活在这个 host 里，不落库 —— 重启之后它们就不在了。
+  const testEnvs = new TestEnvs({ storage })
+  const review = new Review({
+    storage,
+    // 动这张卡的 worktree 之前，先把跑在里面的测试环境收掉。挂在这儿而不是
+    // 路由上：位置很重要，它得在所有会被拒绝的校验都过完之后才开枪。
+    beforeMutate: (taskId) => testEnvs.stop(taskId, 'verdict'),
+  })
   // 附件的字节落在数据目录里，跟数据库同处一个信任级别。
   const attachments = new AttachmentStore(join(dir, 'attachments'))
   const scheduler = new Scheduler({ storage, runner, agents: pool })
@@ -298,6 +306,19 @@ async function main(): Promise<void> {
   // 调度器的每一轮都会回收租约过期的卡片，即使自动认领是关着的 ——
   // 没有它，一次崩溃就会让任务永远卡在 Running。
   scheduler.start()
+
+  /*
+   * PR 巡检：问一遍那些还开着的 PR 合上了没有，合上的把卡收进 Done。
+   *
+   * 必须有一条后台的路径，而不能只靠"打开卡片时刷一下"：人在 GitHub 上按下
+   * 合并之后，多半就去干别的了，看板这边不该等到下次有人点开那张卡才发现。
+   * 一分钟一轮 —— 再密就是在替用户浪费 GitHub 的额度，而这件事本来就不急。
+   * 没装 gh / 没有开着的 PR 时它一次网都不出。
+   */
+  const prSweep = setInterval(() => {
+    void review.syncPullRequests().catch(() => undefined)
+  }, 60_000)
+  prSweep.unref()
 
   // ── 起 server ────────────────────────────────────────────
   const portArg = flag('port')
@@ -317,6 +338,7 @@ async function main(): Promise<void> {
     review,
     attachments,
     scheduler,
+    testEnvs,
     bus,
     token,
     ...(webDev === undefined ? {} : { devServer: webDev }),

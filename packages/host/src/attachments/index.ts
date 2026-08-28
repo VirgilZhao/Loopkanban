@@ -58,6 +58,7 @@ const MIME_BY_EXT: Readonly<Record<string, string>> = {
   '.webp': 'image/webp',
   '.avif': 'image/avif',
   '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
   '.heic': 'image/heic',
   '.pdf': 'application/pdf',
   '.txt': 'text/plain; charset=utf-8',

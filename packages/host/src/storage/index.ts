@@ -21,6 +21,16 @@ export interface Project {
   readonly name: string
   readonly repoPath: string
   readonly baseBranch: string
+  /**
+   * 一键测试环境的启动命令，例如 `pnpm install && pnpm dev`。
+   *
+   * 缺席表示没配 —— 那个按钮会引导人填一条，而不是猜一条替他跑。猜错的代价
+   * 是在他的仓库里跑了一条他没写过的命令，这个工具不做这种事。
+   *
+   * 命令里可以写 `{{port}}`；host 分配的端口会替换进去，也会以 `PORT`
+   * 环境变量给到进程。
+   */
+  readonly testCommand?: string | undefined
   readonly createdAt: number
 }
 
@@ -73,6 +83,28 @@ export interface Attachment {
  * 是最让人恼火的那种意外），而留言的 id 要等它真发出去才存在。
  */
 export const DRAFT_COMMENT = ''
+
+/**
+ * 一条从卡片开出去的 Pull Request（的**投影**）。
+ *
+ * 真相在 GitHub 上，这里存的是最后一次问到的状态：界面照着它渲染，
+ * "合上了没有、要不要把卡收进 Done"也照着它判。一张卡可以有多条 ——
+ * Done 里再说一句就是下一轮，那一轮会开出另一条。
+ */
+export interface TaskPullRequest {
+  readonly id: string
+  readonly taskId: TaskId
+  readonly number: number
+  readonly url: string
+  /** 开这条 PR 时的任务分支。卡片标题改过之后分支名会变，所以要记当时那个。 */
+  readonly branch: string
+  readonly baseBranch: string
+  readonly state: 'open' | 'merged' | 'closed'
+  readonly mergeable: 'mergeable' | 'conflicting' | 'unknown'
+  readonly mergedAt?: number | undefined
+  readonly createdAt: number
+  readonly updatedAt: number
+}
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
 
@@ -134,6 +166,7 @@ interface TaskRow {
   blocked_by_json: string
   lease_json: string | null
   archived_at: number | null
+  done_at: number | null
   created_at: number
   updated_at: number
 }
@@ -182,6 +215,7 @@ function toTask(row: TaskRow): Task {
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
+    ...(row.done_at === null ? {} : { doneAt: row.done_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -198,6 +232,40 @@ function toAttachment(row: AttachmentRow): Attachment {
     // NULL 与空串是两回事：前者是规格附件，后者是还没发出去的草稿。
     ...(row.comment_id === null ? {} : { commentId: row.comment_id }),
     at: row.at,
+  }
+}
+
+interface PullRequestRow {
+  id: string
+  task_id: string
+  number: number
+  url: string
+  branch: string
+  base_branch: string
+  state: string
+  mergeable: string
+  merged_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+function toPullRequest(row: PullRequestRow): TaskPullRequest {
+  const state = row.state === 'merged' ? 'merged' : row.state === 'closed' ? 'closed' : 'open'
+  const mergeable = row.mergeable === 'mergeable' ? 'mergeable'
+    : row.mergeable === 'conflicting' ? 'conflicting'
+    : 'unknown'
+  return {
+    id: row.id,
+    taskId: asTaskId(row.task_id),
+    number: row.number,
+    url: row.url,
+    branch: row.branch,
+    baseBranch: row.base_branch,
+    state,
+    mergeable,
+    ...(row.merged_at === null ? {} : { mergedAt: row.merged_at }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }
 
@@ -243,19 +311,27 @@ export class Storage {
 
   createProject(project: Project): void {
     this.db.prepare(
-      'INSERT INTO projects (id, name, repo_path, base_branch, created_at) VALUES (?, ?, ?, ?, ?)',
-    ).run(project.id, project.name, project.repoPath, project.baseBranch, project.createdAt)
+      'INSERT INTO projects (id, name, repo_path, base_branch, test_command, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(
+      project.id, project.name, project.repoPath, project.baseBranch,
+      project.testCommand ?? null, project.createdAt,
+    )
   }
 
   listProjects(): Project[] {
     const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at').all() as unknown as {
-      id: string; name: string; repo_path: string; base_branch: string; created_at: number
+      id: string; name: string; repo_path: string; base_branch: string
+      test_command: string | null; created_at: number
     }[]
     return rows.map((row) => ({
       id: asProjectId(row.id),
       name: row.name,
       repoPath: row.repo_path,
       baseBranch: row.base_branch,
+      // 空串与 NULL 都当没配：清空是把输入框留白，那一路存下来的是空串。
+      ...(row.test_command === null || row.test_command.trim() === ''
+        ? {}
+        : { testCommand: row.test_command }),
       createdAt: row.created_at,
     }))
   }
@@ -272,15 +348,26 @@ export class Storage {
    * 改动只影响此后新建的卡；已经建出来的卡各自记着自己的基线，不动它们，
    * 否则它们的 diff 与合并目标会在脚下悄悄换掉。
    *
+   * 启动命令也在其列，且**允许清空**：配错了要能退回"没配"的状态，而不是
+   * 只能塞一条 `true` 进去凑数。传 `null` 或空串就是清空。
+   *
    * @param id - 目标项目。
    * @param patch - 要改的字段；给空对象等于什么都不改。
    * @returns 是否改到了；false 表示这个项目不在。
    */
-  updateProject(id: ProjectId, patch: { name?: string; baseBranch?: string }): boolean {
+  updateProject(
+    id: ProjectId,
+    patch: { name?: string; baseBranch?: string; testCommand?: string | null },
+  ): boolean {
     const sets: string[] = []
-    const values: string[] = []
+    const values: (string | null)[] = []
     if (patch.name !== undefined) { sets.push('name = ?'); values.push(patch.name) }
     if (patch.baseBranch !== undefined) { sets.push('base_branch = ?'); values.push(patch.baseBranch) }
+    if (patch.testCommand !== undefined) {
+      sets.push('test_command = ?')
+      const command = patch.testCommand?.trim() ?? ''
+      values.push(command.length === 0 ? null : command)
+    }
     if (sets.length === 0) return this.getProject(id) !== null
     return this.db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`)
       .run(...values, id).changes === 1
@@ -312,6 +399,7 @@ export class Storage {
       this.db.prepare('DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM task_comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM task_attachments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM task_prs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
       if (removed.changes !== 1) {
@@ -448,6 +536,59 @@ export class Storage {
     return this.db.prepare('DELETE FROM task_attachments WHERE id = ?').run(id).changes === 1
   }
 
+  // ── Pull Request ───────────────────────────────────────────────
+
+  /**
+   * 记下（或刷新）一条 PR 的状态。
+   *
+   * 按 `(task_id, number)` 幂等：同一条 PR 被查到多少次都只有一行，每次
+   * 覆盖成最新的状态。**`created_at` 不覆盖** —— 那是"这条 PR 什么时候
+   * 进入看板视野"的时间，刷新一次就把它推到现在，历史顺序就乱了。
+   *
+   * @param pr - 最新的投影值。
+   */
+  upsertPullRequest(pr: TaskPullRequest): void {
+    this.db.prepare(`
+      INSERT INTO task_prs (
+        id, task_id, number, url, branch, base_branch, state, mergeable, merged_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, number) DO UPDATE SET
+        url = excluded.url,
+        branch = excluded.branch,
+        base_branch = excluded.base_branch,
+        state = excluded.state,
+        mergeable = excluded.mergeable,
+        merged_at = excluded.merged_at,
+        updated_at = excluded.updated_at
+    `).run(
+      pr.id, pr.taskId, pr.number, pr.url, pr.branch, pr.baseBranch,
+      pr.state, pr.mergeable, pr.mergedAt ?? null, pr.createdAt, pr.updatedAt,
+    )
+  }
+
+  /** 一张卡的 PR，新的排在前面 —— 最近那一轮才是人此刻要看的。 */
+  listPullRequests(taskId: TaskId): TaskPullRequest[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_prs WHERE task_id = ? ORDER BY number DESC',
+    ).all(taskId) as unknown as PullRequestRow[]
+    return rows.map(toPullRequest)
+  }
+
+  /** 全部 PR。看板要在卡面上标出"这张卡合过几条"，一次读完比一张卡问一次划算。 */
+  listAllPullRequests(): TaskPullRequest[] {
+    const rows = this.db.prepare('SELECT * FROM task_prs ORDER BY task_id, number DESC')
+      .all() as unknown as PullRequestRow[]
+    return rows.map(toPullRequest)
+  }
+
+  /** 还没有终态的 PR。后台那轮"合上了没有"的巡检只需要问这些。 */
+  listOpenPullRequests(): TaskPullRequest[] {
+    const rows = this.db.prepare("SELECT * FROM task_prs WHERE state = 'open' ORDER BY task_id, number")
+      .all() as unknown as PullRequestRow[]
+    return rows.map(toPullRequest)
+  }
+
   // ── Task ───────────────────────────────────────────────────────
 
   createTask(task: Task): void {
@@ -455,16 +596,16 @@ export class Storage {
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
         acceptance_json, repo_path, base_branch, preferred_provider, model,
-        blocked_by_json, lease_json, archived_at,
+        blocked_by_json, lease_json, archived_at, done_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
       JSON.stringify(task.blockedBy),
       task.lease === undefined ? null : JSON.stringify(task.lease),
-      task.archivedAt ?? null,
+      task.archivedAt ?? null, task.doneAt ?? null,
       task.createdAt, task.updatedAt,
     )
   }
@@ -497,7 +638,7 @@ export class Storage {
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
         blocked_by_json = ?, lease_json = ?,
-        archived_at = ?, updated_at = ?
+        archived_at = ?, done_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.description,
@@ -505,7 +646,7 @@ export class Storage {
       next.preferredProvider ?? null, next.model ?? null,
       JSON.stringify(next.blockedBy),
       next.lease === undefined ? null : JSON.stringify(next.lease),
-      next.archivedAt ?? null,
+      next.archivedAt ?? null, next.doneAt ?? null,
       next.updatedAt,
       next.id, next.revision - 1,
     )
@@ -534,6 +675,7 @@ export class Storage {
       // 顺序是外键定的：事件 → Run → 卡片。反过来第一步就会被 runs 的引用挡住。
       this.db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM task_attachments WHERE task_id = ?').run(id)
+      this.db.prepare('DELETE FROM task_prs WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)

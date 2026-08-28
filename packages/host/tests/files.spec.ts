@@ -134,6 +134,27 @@ describe('readFileText', () => {
     expect(file.size).toBe(MAX_FILE_BYTES + 100)
   })
 
+  it('看不了的文件不标"截断" —— 一个字都没给，谈不上只给了前一部分', async () => {
+    // 两句话同时说出来是自相矛盾的：界面会一边写"这个格式看不了"，一边写
+    // "只显示了前一部分"。文件多大，头上那行已经写着了。
+    const big = Buffer.alloc(MAX_FILE_BYTES + 100)
+    big[0] = 0
+    await writeFile(join(repo, 'huge.bin'), big)
+    const file = await readFileText(repo, join(repo, 'huge.bin'))
+    expect(file.binary).toBe(true)
+    expect(file.content).toBe('')
+    expect(file.truncated).toBe(false)
+  })
+
+  it('按呈现方式分类，PDF 与图片不回正文 —— 字节走 raw 那个口子', async () => {
+    await writeFile(join(repo, 'shot.png'), Buffer.from([0x89, 0x50, 0x00, 0x01]))
+    await writeFile(join(repo, '方案.md'), '# 标题')
+    expect(await readFileText(repo, join(repo, 'shot.png')))
+      .toMatchObject({ kind: 'image', binary: false, content: '', truncated: false })
+    expect(await readFileText(repo, join(repo, '方案.md'))).toMatchObject({ kind: 'markdown' })
+    expect(await readFileText(repo, join(repo, 'src', 'main.ts'))).toMatchObject({ kind: 'text' })
+  })
+
   it('目录不是文件', async () => {
     await expect(readFileText(repo, join(repo, 'src'))).rejects.toThrow()
   })

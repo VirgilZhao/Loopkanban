@@ -9,7 +9,7 @@
 import type { BoardId, RunId, TaskId } from './ids.ts'
 
 /** 看板的列。顺序即流转顺序。 */
-export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done', 'failed'] as const
+export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
 export type Column = (typeof COLUMNS)[number]
 
 /** 一次执行的租约。持有它才有资格动这张卡的 running 状态。 */
@@ -49,6 +49,17 @@ export interface Task {
    * 都还不确定，意见必须跟着卡走。
    */
   readonly feedback?: string | undefined
+  /**
+   * 归档时间；`undefined` 表示没归档。
+   *
+   * **刻意不做成第六列**。归档是"从视野里拿走"，不是流转的下一站 ——
+   * 一张卡可以在任何阶段被搁置：想法池里想岔了的、Review 里判定不做的、
+   * Done 里已经不用再看的。做成列的话，它既要能从每一列进来、又要能回到
+   * 原来那一列，状态机会被这一个动作撑破；而且列是可见的，归档的意义恰恰
+   * 是不可见。所以它是一个正交的标记，`column` 保持原样，取消归档就回到
+   * 搁置前的位置。
+   */
+  readonly archivedAt?: number | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -63,13 +74,15 @@ export interface Task {
 const ALLOWED: Readonly<Record<Column, readonly Column[]>> = {
   backlog: ['ready'],
   ready: ['backlog', 'running'],
-  // running 只能去 review 或 failed：直接去 done 就是跳过验收。
-  // 回 ready 也不行 —— 那是系统回收租约的专属通道，见 reclaimIfExpired。
-  running: ['review', 'failed'],
-  // 验收后：通过、打回重做、废弃记为失败、或者废弃并回想法池重新想需求。
-  review: ['done', 'ready', 'failed', 'backlog'],
+  // running 的唯一出口是 review —— **成功与失败都要过人眼**。
+  // 单独设一个 Failed 列只会攒下一堆没人再看的卡；失败的那次执行同样有
+  // 分支、日志和诊断要判读，判读完的动作也和打回一模一样。
+  // 直接去 done 是跳过验收；回 ready 也不行 —— 那是系统回收租约的专属通道，
+  // 见 reclaimIfExpired。
+  running: ['review'],
+  // 验收后：通过、打回重做、或者废弃成果回想法池重新想需求。
+  review: ['done', 'ready', 'backlog'],
   done: [],
-  failed: ['ready', 'backlog'],
 }
 
 /**
@@ -96,6 +109,9 @@ export type DomainError =
   | 'lease-mismatch'
   | 'feedback-required'
   | 'task-running'
+  | 'task-archived'
+  | 'already-archived'
+  | 'not-archived'
   | 'subject-required'
 
 const fail = <T>(reason: DomainError, detail: string): DomainResult<T> => ({ ok: false, reason, detail })
@@ -119,6 +135,58 @@ function checkRevision(task: Task, expectedRevision: number): DomainResult<Task>
     : fail('revision-conflict', `期望 revision ${String(expectedRevision)}，实际 ${String(task.revision)}`)
 }
 
+/**
+ * 归档的卡是冻结的：不能移、不能改、不能被认领。
+ *
+ * 要动它就先取消归档 —— 多按一下的代价，换来的是"搁置"这个动作有明确边界，
+ * 而不是一个既在架子上、又能被半改半跑的中间态。
+ */
+function checkNotArchived(task: Task): DomainResult<Task> {
+  return task.archivedAt === undefined
+    ? succeed(task)
+    : fail('task-archived', '这张卡已归档。要动它先取消归档')
+}
+
+export interface ArchiveRequest {
+  readonly expectedRevision: number
+  readonly now: number
+}
+
+/**
+ * 归档：把卡从视野里拿走，但保留它所在的列与全部内容。
+ *
+ * 正在执行的卡不能归档 —— Agent 还拿着租约在改仓库，从界面上把它藏起来
+ * 只会让人以为它停了。要搁置就先终止执行。
+ *
+ * @param task - 当前任务。
+ * @param request - CAS 凭据与时间。
+ */
+export function archiveTask(task: Task, request: ArchiveRequest): DomainResult<Task> {
+  const guard = checkRevision(task, request.expectedRevision)
+  if (!guard.ok) return guard
+  if (task.column === 'running') {
+    return fail('task-running', '正在执行的卡片不能归档，先终止执行')
+  }
+  if (task.archivedAt !== undefined) {
+    return fail('already-archived', '这张卡已经归档了')
+  }
+  return succeed(bump(task, { archivedAt: request.now }, request.now))
+}
+
+/**
+ * 取消归档：卡回到它被搁置时所在的列与位置。
+ * @param task - 当前任务。
+ * @param request - CAS 凭据与时间。
+ */
+export function unarchiveTask(task: Task, request: ArchiveRequest): DomainResult<Task> {
+  const guard = checkRevision(task, request.expectedRevision)
+  if (!guard.ok) return guard
+  if (task.archivedAt === undefined) {
+    return fail('not-archived', '这张卡没有归档')
+  }
+  return succeed(bump(task, { archivedAt: undefined }, request.now))
+}
+
 export interface MoveRequest {
   readonly expectedRevision: number
   readonly to: Column
@@ -136,6 +204,8 @@ export function moveTask(task: Task, request: MoveRequest): DomainResult<Task> {
   const guard = checkRevision(task, request.expectedRevision)
   if (!guard.ok) return guard
 
+  const shelved = checkNotArchived(task)
+  if (!shelved.ok) return shelved
   if (!canTransition(task.column, request.to)) {
     return fail('illegal-transition', `不允许从 ${task.column} 移到 ${request.to}`)
   }
@@ -188,6 +258,8 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
   if (task.column === 'running') {
     return fail('task-running', '正在执行的卡片不能改需求，先终止执行')
   }
+  const shelved = checkNotArchived(task)
+  if (!shelved.ok) return shelved
 
   const { edit } = request
   const subject = edit.subject?.trim()
@@ -231,6 +303,10 @@ export function acquireLease(task: Task, request: AcquireLeaseRequest): DomainRe
   const guard = checkRevision(task, request.expectedRevision)
   if (!guard.ok) return guard
 
+  // **这一条最要紧**：归档的卡在界面上是看不见的，被自动调度捡走就意味着
+  // 用户看不见的地方有 Agent 在改他的仓库。
+  const shelved = checkNotArchived(task)
+  if (!shelved.ok) return shelved
   if (task.column !== 'ready') {
     return fail('illegal-transition', `只有 ready 列的任务可以被认领，当前在 ${task.column}`)
   }
@@ -280,7 +356,8 @@ export interface RequestChangesRequest {
  *
  * 刻意不引入 `review → running` 这条流转。打回后走的仍是普通的排队路径，
  * 于是自动调度、并发上限、依赖阻塞这些规则一视同仁地作用在它身上，
- * 而"接着上次改"是执行时的实现细节（见 Runner 的续跑判定），不是状态机的分支。
+ * **ready 的入列条件也一样要满足**；而"接着上次改"是执行时的实现细节
+ * （见 Runner 的续跑判定），不是状态机的分支。
  *
  * @param task - 当前任务。
  * @param request - CAS 凭据、评审意见与时间。
@@ -288,12 +365,21 @@ export interface RequestChangesRequest {
 export function requestChanges(task: Task, request: RequestChangesRequest): DomainResult<Task> {
   const guard = checkRevision(task, request.expectedRevision)
   if (!guard.ok) return guard
+  const shelved = checkNotArchived(task)
+  if (!shelved.ok) return shelved
   if (task.column !== 'review') {
     return fail('illegal-transition', `只有 review 列的任务可以打回，当前在 ${task.column}`)
   }
   const feedback = request.feedback.trim()
   if (feedback.length === 0) {
     return fail('feedback-required', '打回必须写明要改什么，否则 Agent 只会把上次的活重做一遍')
+  }
+  // 打回的去向就是 ready，所以**入列条件在这里同样成立**。
+  // 只在 moveTask 里挡是不够的：卡在 review 期间是可以清空验收标准的，
+  // 而打回又是失败任务重新开始的主路径 —— 从这道门溜进队列的卡，Agent
+  // 照样会被派去做，做完却没人能判定它对不对。
+  if (task.acceptance.length === 0) {
+    return fail('acceptance-required', '这张卡的验收标准是空的，打回等于把一张没法验收的卡放回队列。先补上再打回')
   }
   return succeed(bump(task, { column: 'ready', feedback, lease: undefined }, request.now))
 }

@@ -12,7 +12,7 @@
  *   跑着的 Run 必须定期续租。
  * - **事件先落库再广播**。存储是真相，总线只是通知；顺序反过来的话，
  *   SSE 收到的 seq 可能还没落盘，断线重连就会漏。
- * - **失败也要有结构化的原因**。Failed 卡片上要显示人看得懂的东西，
+ * - **失败也要有结构化的原因**。卡片进 Review 后要显示人看得懂的东西，
  *   而不是一坨 stack trace。
  */
 
@@ -151,7 +151,7 @@ export class Runner {
         storage.updateRun({ ...created, status: 'failed', diagnostic: detail, endedAt: this.now })
       }
       // 副作用建到一半失败，必须把卡放回去，否则它会一直卡在 running。
-      this.release(taskId, 'failed')
+      this.release(taskId)
       return { ok: false, reason: 'launch-failed', detail }
     }
   }
@@ -338,7 +338,9 @@ export class Runner {
         storage.commitTask(consumeFeedback(current, this.now))
       }
     }
-    this.release(task.id, ok ? 'review' : 'failed')
+    // 成功与失败都进 Review：这一轮的分支、日志和诊断都要人判读，判完
+    // 要么打回重跑、要么废弃。没有 Failed 列可以让失败的卡自己待着。
+    this.release(task.id)
   }
 
   /** 终止一次执行。幂等。 */
@@ -397,14 +399,15 @@ export class Runner {
   }
 
   /**
-   * 把卡片移出 running 并释放租约。
+   * 把卡片移出 running 并释放租约。**唯一去向是 Review** —— 领域层也只开了
+   * 这一个出口，成败都得过人眼。
    * @returns 是否成功落库；卡片已不在 running 时返回 false。
    */
-  private release(taskId: TaskId, to: 'review' | 'failed'): boolean {
+  private release(taskId: TaskId): boolean {
     const { storage } = this.options
     const task = storage.getTask(taskId)
     if (task === null || task.column !== 'running') return false
-    const moved = moveTask(task, { expectedRevision: task.revision, to, now: this.now })
+    const moved = moveTask(task, { expectedRevision: task.revision, to: 'review', now: this.now })
     return moved.ok && storage.commitTask(moved.value)
   }
 
@@ -442,7 +445,7 @@ export class Runner {
       // 落库都失败了就只能靠下次启动的 reconcile 兜底。
     }
     try {
-      this.release(task.id, 'failed')
+      this.release(task.id)
     } catch {
       // 同上。
     }

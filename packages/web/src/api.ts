@@ -85,10 +85,20 @@ export const api = {
       method: 'POST', body: JSON.stringify({ feedback }),
     }),
 
-  /** 废弃这次成果，删掉分支与 worktree。 */
-  discard: (taskId: string, to: 'backlog' | 'failed' = 'failed') =>
-    call(`/api/tasks/${encodeURIComponent(taskId)}/discard`, {
-      method: 'POST', body: JSON.stringify({ to }),
+  /** 废弃这次成果：删掉分支与 worktree，卡片回想法池。 */
+  discard: (taskId: string) =>
+    call(`/api/tasks/${encodeURIComponent(taskId)}/discard`, { method: 'POST' }),
+
+  /** 归档：把卡从看板上收走，列与内容原样保留。 */
+  archive: (taskId: string, expectedRevision: number) =>
+    call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}/archive`, {
+      method: 'POST', body: JSON.stringify({ expectedRevision }),
+    }),
+
+  /** 取消归档：卡回到它被搁置时所在的列与位置。 */
+  unarchive: (taskId: string, expectedRevision: number) =>
+    call<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}/unarchive`, {
+      method: 'POST', body: JSON.stringify({ expectedRevision }),
     }),
 
   /** 移动任务。409 表示期间已被他人改动，调用方应重读后重试。 */

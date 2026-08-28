@@ -7,7 +7,7 @@
  * 主工作区，是这个工具最容易造成破坏性意外的地方。
  */
 
-import { rm } from 'node:fs/promises'
+import { access, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { moveTask, requestChanges, type Task, type TaskId } from '@openkanban/core'
 import type { Run, Storage } from '../storage/index.ts'
@@ -86,6 +86,9 @@ export class Review {
    * 默认行为：把改动提交到任务分支、移除 worktree、**保留分支**，卡片进 Done。
    * 用户拿到分支名，自己决定合并还是开 PR。
    *
+   * 失败的执行也停在 Review，所以这里必须容得下"根本没建出工作区"的卡
+   * （起进程就失败的那种）：明确拒绝，而不是让 git 在不存在的目录上炸成 500。
+   *
    * @param taskId - 目标任务。
    * @param merge - 显式要求合并回基线。前置条件不满足会明确拒绝而不是勉强执行。
    */
@@ -100,6 +103,22 @@ export class Review {
     if (run === null) return { ok: false, reason: 'no-run', detail: '这张卡没有执行记录' }
 
     const worktree = this.worktreeOf(run)
+    if (!(await access(worktree.path).then(() => true, () => false))) {
+      return {
+        ok: false,
+        reason: 'no-worktree',
+        detail: '这次执行没留下工作区，没有东西可验收 —— 打回重跑或废弃',
+      }
+    }
+
+    // **领域层的判定必须在任何副作用之前跑完**。moveTask 是纯函数，提前算一次
+    // 就是一次完整的前置校验；留到 commitAll / mergeBranch 之后才算，等于让
+    // 每一条新加的守卫都变成"主干已经被合过了，然后告诉你操作被拒绝"。
+    // 归档就踩过这个坑：archive 不改 column，上面的列检查放行，改动却在
+    // moveTask 拒绝之前已经进了用户的基线分支。
+    const verdict = moveTask(task, { expectedRevision: task.revision, to: 'done', now: this.now })
+    if (!verdict.ok) return { ok: false, reason: verdict.reason, detail: verdict.detail }
+
     const commit = await commitAll(worktree, commitMessage(task, run))
 
     let merged = false
@@ -114,9 +133,9 @@ export class Review {
     // **CAS 必须在删 worktree 之前**。反过来的话，一旦这里冲突失败，
     // worktree 已经没了、卡还停在 Review，而用户按提示重试会在不存在的目录上
     // 跑 git、直接 500 —— 这张卡就再也走不出 Review 了。
-    const moved = moveTask(task, { expectedRevision: task.revision, to: 'done', now: this.now })
-    if (!moved.ok) return { ok: false, reason: moved.reason, detail: moved.detail }
-    if (!storage.commitTask(moved.value)) {
+    // 落库用的仍是上面算好的那个值：期间没人改过这张卡的话它就是对的，
+    // 改过了则这条 CAS 会失败，正是它该做的事。
+    if (!storage.commitTask(verdict.value)) {
       return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
     }
 
@@ -149,18 +168,21 @@ export class Review {
   }
 
   /**
-   * 废弃这次成果：删掉分支与 worktree，卡片回到指定列。
+   * 废弃这次成果：删掉分支与 worktree，卡片回想法池。
+   *
+   * **去向只有 backlog**。没有"记为失败"这个终点了 —— 一张卡要么做完进 Done，
+   * 要么回到想法池等着重新想清楚需求。攒一列没人再看的死卡没有价值。
+   *
    * @param taskId - 目标任务。
-   * @param to - 回 backlog（重新想需求）还是 failed（记为失败）。
    */
-  async discard(taskId: TaskId, to: 'backlog' | 'failed' = 'failed'): Promise<ReviewResult> {
+  async discard(taskId: TaskId): Promise<ReviewResult> {
     const { storage } = this.options
     const task = storage.getTask(taskId)
     if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
 
     // 同 accept：先把状态落定，再做不可逆的删除。CAS 冲突时至少东西还在，
     // 用户重试一次就能继续；顺序反过来则是"删完了却没记上"。
-    const moved = moveTask(task, { expectedRevision: task.revision, to, now: this.now })
+    const moved = moveTask(task, { expectedRevision: task.revision, to: 'backlog', now: this.now })
     if (!moved.ok) return { ok: false, reason: moved.reason, detail: moved.detail }
     if (!storage.commitTask(moved.value)) {
       return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }

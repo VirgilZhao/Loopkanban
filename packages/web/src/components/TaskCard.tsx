@@ -1,6 +1,6 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { CircleAlert, GitBranch, ListChecks, Lock, PauseCircle } from 'lucide-react'
+import { Archive, CircleAlert, GitBranch, ListChecks, Lock, PauseCircle } from 'lucide-react'
 import { cn } from '@/lib/utils.ts'
 import type { Skip, Task } from '@/types.ts'
 
@@ -24,7 +24,12 @@ interface Props {
 }
 
 export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Props): React.JSX.Element {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: task.id })
+  const archived = task.archivedAt !== undefined
+  // 归档的卡拖不动 —— 领域层也会拒绝。在这里就关掉拖拽，免得用户拖了半天
+  // 只换来一条错误提示。
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: task.id, disabled: archived,
+  })
   const running = task.column === 'running'
   const leaseExpired = task.lease !== undefined && task.lease.expiresAt <= now
 
@@ -41,6 +46,8 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
         'hover:border-hairline-bright hover:bg-raised',
         selected && 'border-sodium-deep bg-raised',
         isDragging && 'z-50 cursor-grabbing opacity-90 shadow-[0_8px_24px_oklch(0_0_0/0.6)]',
+        // 归档的卡是背景板：看得见、认得出，但不参与任何操作。
+        archived && 'cursor-default border-dashed opacity-45',
         'rounded-[3px]',
       )}
     >
@@ -51,10 +58,11 @@ export function TaskCard({ task, now, selected, liveTool, skip, onSelect }: Prop
       <div className={cn('flex items-center gap-2', running && 'ps-1.5')}>
         <span className="tag">{task.id}</span>
         <span className="flex-1" />
+        {archived ? <Archive className="size-3 text-ink-faint" /> : null}
         {task.preferredProvider === undefined ? null : (
           <span className="chrome-label !text-[8px]">{task.preferredProvider}</span>
         )}
-        <span className="lamp" data-state={task.column} />
+        <span className="lamp" data-state={archived ? 'idle' : task.column} />
       </div>
 
       <p className={cn('mt-1.5 line-clamp-2 text-ink', running && 'ps-1.5')}>{task.subject}</p>

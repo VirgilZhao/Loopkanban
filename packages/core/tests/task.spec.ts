@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  acquireLease, asBoardId, asRunId, asTaskId, canTransition, editTask, isLeaseExpired,
-  moveTask, reclaimIfExpired, renewLease, type Task,
+  acquireLease, archiveTask, asBoardId, asRunId, asTaskId, canTransition, COLUMNS, editTask,
+  isLeaseExpired, moveTask, reclaimIfExpired, renewLease, requestChanges, unarchiveTask, type Task,
 } from '../src/index.ts'
 
 const T0 = 1_000_000
@@ -45,7 +45,6 @@ describe('canTransition', () => {
     expect(canTransition('review', 'ready')).toBe(true)
     // 废弃成果、回想法池重新想需求：无租约状态之间的整理，该放行。
     expect(canTransition('review', 'backlog')).toBe(true)
-    expect(canTransition('failed', 'ready')).toBe(true)
   })
 
   it('拦住乱跳 —— 否则「租约属于谁」无法推理', () => {
@@ -55,6 +54,11 @@ describe('canTransition', () => {
     expect(canTransition('running', 'done')).toBe(false)
     // running → ready 是系统回收租约的专属通道，人不能走。
     expect(canTransition('running', 'ready')).toBe(false)
+  })
+
+  it('没有 Failed 列 —— running 的唯一出口是 review，成败都过人眼', () => {
+    expect(COLUMNS).not.toContain('failed')
+    expect(COLUMNS).toEqual(['backlog', 'ready', 'running', 'review', 'done'])
   })
 })
 
@@ -149,7 +153,7 @@ describe('acquireLease', () => {
   })
 
   it('只有 ready 列的任务可以被认领', () => {
-    for (const column of ['backlog', 'review', 'done', 'failed'] as const) {
+    for (const column of ['backlog', 'review', 'done'] as const) {
       expect(acquire(task({ column }))).toMatchObject({ ok: false, reason: 'illegal-transition' })
     }
   })
@@ -255,6 +259,97 @@ describe('editTask', () => {
 
   it('revision 不匹配时拒绝', () => {
     expect(edit(task({ column: 'backlog', revision: 5 }), { subject: 'x' }, 4))
+      .toMatchObject({ ok: false, reason: 'revision-conflict' })
+  })
+})
+
+describe('归档', () => {
+  const archive = (t: Task) => archiveTask(t, { expectedRevision: t.revision, now: T0 + 100 })
+
+  it('归档不改变卡在哪一列 —— 它是正交的标记，不是第六列', () => {
+    for (const column of ['backlog', 'ready', 'review', 'done'] as const) {
+      const shelved = archive(task({ column }))
+      expect(shelved.ok && shelved.value.column).toBe(column)
+      expect(shelved.ok && shelved.value.archivedAt).toBe(T0 + 100)
+    }
+  })
+
+  it('取消归档后回到原位，位置也不动', () => {
+    const shelved = archive(task({ column: 'review', position: 3.5 }))
+    if (!shelved.ok) throw new Error(shelved.detail)
+    const back = unarchiveTask(shelved.value, { expectedRevision: shelved.value.revision, now: T0 + 200 })
+    expect(back.ok && back.value).toMatchObject({ column: 'review', position: 3.5 })
+    expect(back.ok && back.value.archivedAt).toBeUndefined()
+  })
+
+  it('正在执行的卡不能归档 —— 从界面上藏起来只会让人以为它停了', () => {
+    const running = acquire(task())
+    if (!running.ok) throw new Error('setup')
+    expect(archive(running.value)).toMatchObject({ ok: false, reason: 'task-running' })
+  })
+
+  it('重复归档与取消未归档都明确失败，而不是静默成功', () => {
+    const shelved = archive(task())
+    if (!shelved.ok) throw new Error(shelved.detail)
+    expect(archiveTask(shelved.value, { expectedRevision: shelved.value.revision, now: T0 }))
+      .toMatchObject({ ok: false, reason: 'already-archived' })
+    expect(unarchiveTask(task(), { expectedRevision: 1, now: T0 }))
+      .toMatchObject({ ok: false, reason: 'not-archived' })
+  })
+
+  it('归档的卡不能被认领 —— 否则看不见的地方有 Agent 在改仓库', () => {
+    const shelved = archive(task({ column: 'ready' }))
+    if (!shelved.ok) throw new Error(shelved.detail)
+    expect(acquire(shelved.value)).toMatchObject({ ok: false, reason: 'task-archived' })
+  })
+
+  it('归档的卡冻结：移不动也改不了', () => {
+    const shelved = archive(task({ column: 'backlog' }))
+    if (!shelved.ok) throw new Error(shelved.detail)
+    const t = shelved.value
+    expect(moveTask(t, { expectedRevision: t.revision, to: 'ready', now: T0 }))
+      .toMatchObject({ ok: false, reason: 'task-archived' })
+    expect(editTask(t, { expectedRevision: t.revision, edit: { subject: '改个名' }, now: T0 }))
+      .toMatchObject({ ok: false, reason: 'task-archived' })
+  })
+
+  it('归档也走 CAS —— 并发下不会有人拿着旧 revision 把卡收走', () => {
+    expect(archiveTask(task(), { expectedRevision: 99, now: T0 }))
+      .toMatchObject({ ok: false, reason: 'revision-conflict' })
+  })
+})
+
+describe('requestChanges', () => {
+  const kick = (t: Task, feedback = '连字符后面也要大写') =>
+    requestChanges(t, { expectedRevision: t.revision, feedback, now: T0 + 100 })
+
+  it('带着意见回到队列，租约一并释放', () => {
+    const result = kick(task({ column: 'review' }))
+    expect(result.ok && result.value).toMatchObject({ column: 'ready', feedback: '连字符后面也要大写' })
+    expect(result.ok && result.value.lease).toBeUndefined()
+  })
+
+  it('只有 review 列的卡能打回', () => {
+    expect(kick(task({ column: 'done' }))).toMatchObject({ ok: false, reason: 'illegal-transition' })
+  })
+
+  it('空意见被拒 —— 否则 Agent 只会把上次的活重做一遍', () => {
+    expect(kick(task({ column: 'review' }), '   ')).toMatchObject({ ok: false, reason: 'feedback-required' })
+  })
+
+  it('验收标准为空时不许打回 —— 它的去向是 ready，入列条件一视同仁', () => {
+    // review 期间是可以把验收标准清空的（editTask 只拦 ready 列），
+    // 所以这道门必须自己挡住，不能指望 moveTask。
+    const emptied = editTask(task({ column: 'review' }), {
+      expectedRevision: 1, edit: { acceptance: [] }, now: T0,
+    })
+    if (!emptied.ok) throw new Error(emptied.detail)
+    expect(emptied.value.acceptance).toEqual([])
+    expect(kick(emptied.value)).toMatchObject({ ok: false, reason: 'acceptance-required' })
+  })
+
+  it('打回也走 CAS', () => {
+    expect(requestChanges(task({ column: 'review' }), { expectedRevision: 99, feedback: 'x', now: T0 }))
       .toMatchObject({ ok: false, reason: 'revision-conflict' })
   })
 })

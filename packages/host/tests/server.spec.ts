@@ -155,6 +155,56 @@ describe('POST /api/tasks/:id/move', () => {
   })
 })
 
+describe('POST /api/tasks/:id/archive · unarchive', () => {
+  beforeEach(() => { store.createTask(task({ id: 't1' })) })
+
+  const shelf = (action: 'archive' | 'unarchive', body: unknown, id = 't1') =>
+    api(`/api/tasks/${id}/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  it('归档后卡还在原来那一列，只是多了 archivedAt', async () => {
+    const res = await shelf('archive', { expectedRevision: 1 })
+    expect(res.status).toBe(200)
+    const stored = store.getTask(asTaskId('t1'))
+    expect(stored?.column).toBe('ready')
+    expect(stored?.archivedAt).toBeGreaterThan(0)
+  })
+
+  it('取消归档后 archivedAt 落盘为空', async () => {
+    await shelf('archive', { expectedRevision: 1 })
+    const res = await shelf('unarchive', { expectedRevision: 2 })
+    expect(res.status).toBe(200)
+    expect(store.getTask(asTaskId('t1'))?.archivedAt).toBeUndefined()
+  })
+
+  it('归档的卡移不动，返回 422 而不是悄悄放行', async () => {
+    await shelf('archive', { expectedRevision: 1 })
+    const res = await api('/api/tasks/t1/move', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 2, to: 'backlog' }),
+    })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'task-archived' })
+  })
+
+  it('revision 过期返回 409，缺参数 400，卡不存在 404', async () => {
+    expect((await shelf('archive', { expectedRevision: 99 })).status).toBe(409)
+    expect((await shelf('archive', {})).status).toBe(400)
+    expect((await shelf('archive', { expectedRevision: 1 }, 'ghost')).status).toBe(404)
+  })
+
+  it('重复归档返回 422 —— 幂等地假装成功会让并发下的两次点击都以为自己赢了', async () => {
+    await shelf('archive', { expectedRevision: 1 })
+    const res = await shelf('archive', { expectedRevision: 2 })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'already-archived' })
+  })
+})
+
 describe('SSE 事件流', () => {
   const RUN = asRunId('run-1')
 

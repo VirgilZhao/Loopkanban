@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
+import { archiveTask, asBoardId, asRunId, asTaskId, type Task } from '@openkanban/core'
 import { capture } from '../src/agents/discover.ts'
 import { Review } from '../src/review/index.ts'
 import { Storage } from '../src/storage/index.ts'
@@ -151,19 +151,55 @@ describe('requestChanges', () => {
   })
 })
 
+describe('失败的执行也停在 Review', () => {
+  it('起进程就失败、没有 worktree 的卡：明确拒绝验收，而不是在不存在的目录上跑 git', async () => {
+    store.createTask(task({ id: 't1' }))
+    store.createRun({
+      id: asRunId('run-t1'), taskId: asTaskId('t1'), provider: 'codex', cliVersion: '0.150.1',
+      worktreePath: join(sandbox, 'worktrees', 'never-created'), branch: 'ok/t1-slugify',
+      status: 'failed', exitCode: 1, diagnostic: 'spawn ENOENT', startedAt: T0, endedAt: T0 + 10,
+    })
+    expect(await review.accept(asTaskId('t1'))).toMatchObject({ ok: false, reason: 'no-worktree' })
+    // 拒绝了就不该动卡片 —— 人还要靠它打回重跑。
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+  })
+
+  it('失败的卡打回后回到队列，接着重新排队执行', () => {
+    store.createTask(task({ id: 't1' }))
+    expect(review.requestChanges(asTaskId('t1'), '先把依赖装上')).toMatchObject({ ok: true })
+    expect(store.getTask(asTaskId('t1'))).toMatchObject({ column: 'ready', feedback: '先把依赖装上' })
+  })
+})
+
+describe('副作用绝不跑在领域判定之前（回归）', () => {
+  it('归档的卡验收被拒时，主干一个提交都不该动', async () => {
+    const { branch } = await reviewable()
+    const shelved = archiveTask(store.getTask(asTaskId('t1')) as Task, { expectedRevision: 1, now: T0 + 10 })
+    if (!shelved.ok) throw new Error(shelved.detail)
+    store.commitTask(shelved.value)
+
+    const mainBefore = (await git(repo, 'rev-parse', 'main')).stdout.trim()
+    const result = await review.accept(asTaskId('t1'), true)
+
+    // 归档不改 column，所以"只有 review 列能验收"那道检查是放行的；
+    // 真正拦住它的是领域层的冻结规则，而那必须在 commitAll / mergeBranch
+    // 之前生效 —— 否则用户看到"操作被拒绝"，主干却已经被合过了。
+    expect(result).toMatchObject({ ok: false, reason: 'task-archived' })
+    expect((await git(repo, 'rev-parse', 'main')).stdout.trim()).toBe(mainBefore)
+    // 分支也不该被提交上去。
+    expect((await git(repo, 'log', '--oneline', branch)).stdout.trim().split('\n')).toHaveLength(1)
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+  })
+})
+
 describe('discard', () => {
-  it('删掉分支与 worktree，卡片记为失败', async () => {
+  it('删掉分支与 worktree，卡片回想法池', async () => {
     const { branch, worktreePath } = await reviewable()
     expect(await review.discard(asTaskId('t1'))).toMatchObject({ ok: true })
 
     expect((await git(repo, 'branch', '--list', branch)).stdout.trim()).toBe('')
     await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).rejects.toThrow()
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('failed')
-  })
-
-  it('可以选择回 backlog 重新想需求', async () => {
-    await reviewable()
-    await review.discard(asTaskId('t1'), 'backlog')
+    // 没有"记为失败"这个终点了：要么进 Done，要么回想法池重新想需求。
     expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
   })
 })

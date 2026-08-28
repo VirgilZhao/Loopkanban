@@ -21,13 +21,13 @@ import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import {
-  acquireLease, asRunId, consumeFeedback, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
+  acquireLease, asRunId, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
   taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
 import type { AgentEvent, RunContext } from '../agents/types.ts'
 import type { DetectedAgent } from '../agents/index.ts'
 import type { RunBus } from '../server/bus.ts'
-import type { Run, Storage } from '../storage/index.ts'
+import type { Run, Storage, TaskComment } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
 import { branchSlug, ensureWorktree, worktreeDiff, type Worktree } from '../worktree/index.ts'
 
@@ -185,13 +185,15 @@ export class Runner {
 
     const artifactsDir = join(artifactsRoot, runId)
     await mkdir(artifactsDir, { recursive: true })
-    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task), 'utf8')
+    // 讨论线程一起写进 TASK.md：人和 Agent 的每一轮往来都是这次执行的上下文。
+    const comments = storage.listComments(task.id)
+    await writeFile(join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments), 'utf8')
 
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task, prior !== undefined),
+      prompt: renderPrompt(task, comments, prior !== undefined),
       permission: 'standard',
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
       ...(task.model === undefined ? {} : { model: task.model }),
@@ -225,8 +227,12 @@ export class Runner {
       text: `${provider.id} ${caps.version} · pid ${String(handle.pid)}`
         + (resumeSpec === null ? '' : ` · 接续会话 ${String(prior?.agentSessionId)}`),
     })
-    if (task.feedback !== undefined) {
-      this.emit(runId, 'notice', { level: 'info', text: `带着评审意见重做：${task.feedback.slice(0, 200)}` })
+    const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
+    if (lastHuman !== undefined) {
+      this.emit(runId, 'notice', {
+        level: 'info',
+        text: `带着 ${String(comments.length)} 条讨论重做，最新一条：${lastHuman.body.slice(0, 200)}`,
+      })
     }
 
     const renew = setInterval(() => { this.renewLease(task.id, runId) }, this.leaseTtl / RENEW_DIVISOR)
@@ -256,6 +262,9 @@ export class Runner {
     let lastSessionKey: string | undefined
     let finishedOk: boolean | undefined
     let diagnostic: string | undefined
+    /** Agent 这一轮的回复。finished 事件的 summary 优先，没有就退回最后一段正文。 */
+    let answer: string | undefined
+    let lastText: string | undefined
 
     const stderrChunks: Buffer[] = []
     let stderrBytes = 0
@@ -285,9 +294,11 @@ export class Runner {
           lastSessionKey = key
           sessionId = event.sessionId
         }
+        if (event.kind === 'text' && event.text.trim().length > 0) lastText = event.text
         if (event.kind === 'finished') {
           finishedOk = event.ok
           diagnostic = event.diagnostic
+          answer = event.summary
         }
         this.emit(run.id, event.kind, event as unknown as Record<string, unknown>)
       }
@@ -341,15 +352,22 @@ export class Runner {
       endedAt: this.now,
     })
 
-    // 评审意见只在真正跑出可验收结果之后才清。
-    // 在交给 Agent 的瞬间就清是错的：那一轮如果失败了，人写的意见就凭空丢了,
-    // 重新派活时 Agent 又会从头做一遍同样的活。
-    if (ok) {
-      const current = storage.getTask(task.id)
-      if (current !== null && current.feedback !== undefined) {
-        storage.commitTask(consumeFeedback(current, this.now))
-      }
+    // Agent 这一轮的回复进讨论。**失败的那一轮也记**：它说到哪儿、卡在哪儿，
+    // 正是人接下来要回应的东西 —— 只记成功的等于把最需要讨论的部分丢掉。
+    const said = (answer ?? lastText ?? '').trim()
+    if (said.length > 0) {
+      storage.addComment({
+        id: `c-${randomUUID().slice(0, 8)}`,
+        taskId: task.id,
+        author: 'agent',
+        body: said,
+        runId: run.id,
+        at: this.now,
+      })
     }
+
+    // 讨论**不消费**：这一轮的答复和人先前的留言都留着，下一轮连着一起带走。
+    // 反馈因此是累积的，而不是每次只剩最后一句。
     // 成功与失败都进 Review：这一轮的分支、日志和诊断都要人判读，判完
     // 要么打回重跑、要么废弃。没有 Failed 列可以让失败的卡自己待着。
     this.release(task.id)
@@ -481,13 +499,25 @@ export class Runner {
   }
 }
 
-/** 投喂给 Agent 的任务规格，写进 worktree 根目录。 */
-export function renderTaskSpec(task: Task): string {
+/**
+ * 投喂给 Agent 的任务规格，写进 worktree 根目录。
+ *
+ * 讨论线程整段附在后面：人和 Agent 的往来是这张卡真正的上下文，只给最后
+ * 一句会让 Agent 反复推翻自己已经确认过的结论。
+ */
+export function renderTaskSpec(task: Task, comments: readonly TaskComment[] = []): string {
   const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
   // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
   if (task.acceptance.length > 0) {
     lines.push('## 验收标准', '')
     for (const item of task.acceptance) lines.push(`- [ ] ${item}`)
+  }
+  if (comments.length > 0) {
+    lines.push('', '## 讨论', '')
+    for (const comment of comments) {
+      lines.push(`### ${comment.author === 'agent' ? 'Agent' : '人'} · ${new Date(comment.at).toISOString()}`, '')
+      lines.push(comment.body.trim(), '')
+    }
   }
   lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
   return `${lines.join('\n')}\n`
@@ -498,22 +528,23 @@ export function renderTaskSpec(task: Task): string {
  * @param task - 目标任务。
  * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
  */
-export function renderPrompt(task: Task, resuming = false): string {
+export function renderPrompt(task: Task, comments: readonly TaskComment[] = [], resuming = false): string {
   const lines: string[] = []
-  if (task.feedback === undefined) {
+  const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
+  if (lastHuman === undefined) {
     lines.push(`阅读仓库根目录的 TASK.md 并完成其中的任务：${taskTitle(task)}`)
   } else {
     lines.push(
       resuming
-        ? '你上一轮的成果被评审打回了。工作区里就是你上次的改动，请在此基础上修改：'
-        : `任务「${taskTitle(task)}」上一轮被评审打回。工作区里是上次的改动，请在此基础上修改：`,
+        ? '这张卡有了新的反馈。工作区里就是你上次的改动，请在此基础上继续：'
+        : `任务「${taskTitle(task)}」有新的反馈。工作区里是上一轮的改动，请在此基础上继续：`,
       '',
-      task.feedback,
+      lastHuman.body,
       '',
-      '完整需求见仓库根目录的 TASK.md。',
+      '完整需求与此前的往来见仓库根目录的 TASK.md 的「讨论」一节。',
     )
   }
-  lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足。')
+  lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')
   lines.push('不要提交、不要推送、不要改动 TASK.md。')
   return lines.join('\n')
 }

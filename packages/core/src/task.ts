@@ -54,13 +54,6 @@ export interface Task {
   /** `undefined` 表示未被占用；清除租约就是把它置回 undefined。 */
   readonly lease?: Lease | undefined
   /**
-   * 打回时留下的评审意见。下一次执行会把它交给 Agent，然后清空。
-   *
-   * 存在任务上而不是 Run 上：打回之后这张卡回到队列，谁来接、什么时候接
-   * 都还不确定，意见必须跟着卡走。
-   */
-  readonly feedback?: string | undefined
-  /**
    * 归档时间；`undefined` 表示没归档。
    *
    * **刻意不做成第六列**。归档是"从视野里拿走"，不是流转的下一站 ——
@@ -135,7 +128,6 @@ export type DomainError =
   | 'lease-held'
   | 'lease-missing'
   | 'lease-mismatch'
-  | 'feedback-required'
   | 'task-running'
   | 'task-archived'
   | 'already-archived'
@@ -418,46 +410,6 @@ export function renewLease(task: Task, runId: RunId, ttlMs: number, now: number)
   return succeed(bump(task, { lease: { ...task.lease, expiresAt: now + ttlMs } }, now))
 }
 
-export interface RequestChangesRequest {
-  readonly expectedRevision: number
-  readonly feedback: string
-  readonly now: number
-}
-
-/**
- * 打回重做：带着评审意见把卡片放回队列。
- *
- * 刻意不引入 `review → running` 这条流转。打回后走的仍是普通的排队路径，
- * 于是自动调度、并发上限、依赖阻塞这些规则一视同仁地作用在它身上，
- * **ready 的入列条件也一样要满足**；而"接着上次改"是执行时的实现细节
- * （见 Runner 的续跑判定），不是状态机的分支。
- *
- * @param task - 当前任务。
- * @param request - CAS 凭据、评审意见与时间。
- */
-export function requestChanges(task: Task, request: RequestChangesRequest): DomainResult<Task> {
-  const guard = checkRevision(task, request.expectedRevision)
-  if (!guard.ok) return guard
-  const shelved = checkNotArchived(task)
-  if (!shelved.ok) return shelved
-  if (task.column !== 'review') {
-    return fail('illegal-transition', `只有 review 列的任务可以打回，当前在 ${task.column}`)
-  }
-  const feedback = request.feedback.trim()
-  if (feedback.length === 0) {
-    return fail('feedback-required', '打回必须写明要改什么，否则 Agent 只会把上次的活重做一遍')
-  }
-  return succeed(bump(task, { column: 'ready', feedback, lease: undefined }, request.now))
-}
-
-/**
- * 清空已经交给 Agent 的评审意见，避免它在后续执行里被重复投喂。
- * @param task - 当前任务。
- * @param now - 当前时间。
- */
-export function consumeFeedback(task: Task, now: number): Task {
-  return task.feedback === undefined ? task : bump(task, { feedback: undefined }, now)
-}
 
 /** 租约是否已失效（不存在也算失效）。 */
 export function isLeaseExpired(task: Task, now: number): boolean {

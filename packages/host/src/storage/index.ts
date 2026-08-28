@@ -24,6 +24,22 @@ export interface Project {
   readonly createdAt: number
 }
 
+/**
+ * 讨论里的一条留言。
+ *
+ * 人和 Agent 的往来都记在这儿，按时间顺序就是这张卡的完整上下文 ——
+ * 下一次执行会把整条线程交给 Agent，所以它不只是给人看的记录。
+ */
+export interface TaskComment {
+  readonly id: string
+  readonly taskId: TaskId
+  readonly author: 'human' | 'agent'
+  readonly body: string
+  /** Agent 的回答出自哪次执行；人写的留言没有。 */
+  readonly runId?: RunId | undefined
+  readonly at: number
+}
+
 export type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
 
 export interface Run {
@@ -83,7 +99,6 @@ interface TaskRow {
   model: string | null
   blocked_by_json: string
   lease_json: string | null
-  feedback: string | null
   archived_at: number | null
   created_at: number
   updated_at: number
@@ -121,7 +136,6 @@ function toTask(row: TaskRow): Task {
     ...(row.model === null ? {} : { model: row.model }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
-    ...(row.feedback === null ? {} : { feedback: row.feedback }),
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -225,6 +239,7 @@ export class Storage {
         )
       `).run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
+      this.db.prepare('DELETE FROM task_comments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
       if (removed.changes !== 1) {
@@ -239,6 +254,31 @@ export class Storage {
     }
   }
 
+  // ── 讨论 ───────────────────────────────────────────────────────
+
+  addComment(comment: TaskComment): void {
+    this.db.prepare(
+      'INSERT INTO task_comments (id, task_id, author, body, run_id, at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(comment.id, comment.taskId, comment.author, comment.body, comment.runId ?? null, comment.at)
+  }
+
+  /** 一张卡的讨论，按时间正序 —— 它同时也是交给 Agent 的上下文顺序。 */
+  listComments(taskId: TaskId): TaskComment[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM task_comments WHERE task_id = ? ORDER BY at, id',
+    ).all(taskId) as unknown as {
+      id: string; task_id: string; author: string; body: string; run_id: string | null; at: number
+    }[]
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: asTaskId(row.task_id),
+      author: row.author === 'agent' ? 'agent' : 'human',
+      body: row.body,
+      ...(row.run_id === null ? {} : { runId: asRunId(row.run_id) }),
+      at: row.at,
+    }))
+  }
+
   // ── Task ───────────────────────────────────────────────────────
 
   createTask(task: Task): void {
@@ -246,16 +286,15 @@ export class Storage {
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
         acceptance_json, repo_path, base_branch, preferred_provider, model,
-        blocked_by_json, lease_json, feedback, archived_at,
+        blocked_by_json, lease_json, archived_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
       JSON.stringify(task.blockedBy),
       task.lease === undefined ? null : JSON.stringify(task.lease),
-      task.feedback ?? null,
       task.archivedAt ?? null,
       task.createdAt, task.updatedAt,
     )
@@ -288,7 +327,7 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
-        blocked_by_json = ?, lease_json = ?, feedback = ?,
+        blocked_by_json = ?, lease_json = ?,
         archived_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
@@ -297,7 +336,6 @@ export class Storage {
       next.preferredProvider ?? null, next.model ?? null,
       JSON.stringify(next.blockedBy),
       next.lease === undefined ? null : JSON.stringify(next.lease),
-      next.feedback ?? null,
       next.archivedAt ?? null,
       next.updatedAt,
       next.id, next.revision - 1,
@@ -325,6 +363,7 @@ export class Storage {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 顺序是外键定的：事件 → Run → 卡片。反过来第一步就会被 runs 的引用挡住。
+      this.db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)

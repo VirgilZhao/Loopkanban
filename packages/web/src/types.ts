@@ -36,7 +36,6 @@ export interface Task {
   model?: string
   blockedBy: string[]
   lease?: Lease
-  feedback?: string
   /** 归档时间；缺席表示没归档。归档正交于 column，不改变卡在哪一列。 */
   archivedAt?: number
   createdAt: number
@@ -112,6 +111,17 @@ export interface Run {
 }
 
 /** SSE 推过来的一条事件，与 host 的 AgentEvent 对齐。 */
+/** 讨论里的一条留言。人和 Agent 的往来都在这儿，也是下一次执行的上下文。 */
+export interface TaskComment {
+  id: string
+  taskId: string
+  author: 'human' | 'agent'
+  body: string
+  /** Agent 的回答出自哪次执行；人写的留言没有。 */
+  runId?: string
+  at: number
+}
+
 /** 运行中卡片的最后一条事件，看板上那行日志预览就来自它。 */
 export interface LiveLine {
   kind: string

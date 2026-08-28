@@ -54,7 +54,7 @@ export function TaskEditor({ task, project, agents, busy, onSave }: Props): Reac
     ? '正在执行，不能改需求 —— 否则你和 Agent 会对着两份不同的规格。要改先终止执行。'
     : '已归档，内容冻结。要改先从归档里取出。'
 
-  // 卡片被外部改动（打回、执行完成）后重置表单，避免拿着旧值去覆盖新状态。
+  // 卡片被外部改动（留言回队列、执行完成）后重置表单，避免拿着旧值去覆盖新状态。
   useEffect(() => { setDraft(draftOf(task)) }, [task.id, task.revision])
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(task))

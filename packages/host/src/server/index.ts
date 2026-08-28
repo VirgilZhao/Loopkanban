@@ -388,6 +388,43 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    // ── 讨论：读线程 / 留一条 ───────────────────────────────
+    const commentsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/comments$/)
+    if (commentsOf !== null) {
+      const taskId = asTaskId(decodeURIComponent(commentsOf))
+      const task = storage.getTask(taskId)
+      if (task === null) { sendJson(res, 404, { error: 'task-not-found' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, { comments: storage.listComments(taskId) }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req) as Partial<{ body: string }> | undefined
+        const text = body?.body?.trim() ?? ''
+        if (text.length === 0) {
+          sendJson(res, 400, { error: 'bad-request', detail: '留言不能为空' })
+          return
+        }
+        storage.addComment({
+          id: `c-${randomUUID().slice(0, 8)}`,
+          taskId,
+          author: 'human',
+          body: text,
+          at: Date.now(),
+        })
+        // 在 Review 里留言就是"再改一版"：卡自动回队列，下一次执行带着
+        // 整条讨论走。别的列只是留个话，不动卡的位置。
+        let moved = false
+        if (task.column === 'review') {
+          const next = moveTask(task, { expectedRevision: task.revision, to: 'ready', now: Date.now() })
+          if (next.ok) moved = storage.commitTask(next.value)
+        }
+        sendJson(res, 201, { comments: storage.listComments(taskId), requeued: moved }, extraHeaders)
+        return
+      }
+    }
+
     // ── 某任务的 Run 列表 ───────────────────────────────────
     const runsOf = matchPath(pathname, /^\/api\/tasks\/([^/]+)\/runs$/)
     if (method === 'GET' && runsOf !== null) {
@@ -559,19 +596,16 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
-    // ── 验收：通过 / 打回 / 废弃 ────────────────────────────
-    const verdict = /^\/api\/tasks\/([^/]+)\/(accept|request-changes|discard)$/.exec(pathname)
+    // ── 验收：通过 / 废弃 ───────────────────────────────────
+    const verdict = /^\/api\/tasks\/([^/]+)\/(accept|discard)$/.exec(pathname)
     if (method === 'POST' && verdict !== null) {
       if (review === undefined) { sendJson(res, 503, { error: 'no-review' }); return }
       const taskId = asTaskId(decodeURIComponent(verdict[1] as string))
-      const body = await readJsonBody(req) as
-        { merge?: boolean; feedback?: string } | undefined
+      const body = await readJsonBody(req) as { merge?: boolean } | undefined
 
       const result = verdict[2] === 'accept'
         ? await review.accept(taskId, body?.merge === true)
-        : verdict[2] === 'request-changes'
-          ? review.requestChanges(taskId, body?.feedback ?? '')
-          : await review.discard(taskId)
+        : await review.discard(taskId)
 
       if (!result.ok) {
         sendJson(res, result.reason === 'revision-conflict' ? 409 : 422, {

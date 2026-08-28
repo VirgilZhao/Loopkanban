@@ -126,31 +126,6 @@ describe('accept', () => {
   })
 })
 
-describe('requestChanges', () => {
-  it('带意见回到 ready，worktree 与分支都保留', async () => {
-    const { worktreePath } = await reviewable()
-    const result = review.requestChanges(asTaskId('t1'), '中文标题会被吃掉，要保留 Unicode 字母')
-
-    expect(result.ok).toBe(true)
-    const task = store.getTask(asTaskId('t1'))
-    expect(task?.column).toBe('ready')
-    expect(task?.feedback).toContain('Unicode')
-    // 下一次执行要接着改，工作区不能被清掉。
-    await expect(readFile(join(worktreePath, 'slugify.js'), 'utf8')).resolves.toContain('slugify')
-  })
-
-  it('空意见被拒 —— 否则 Agent 只会把上次的活重做一遍', () => {
-    store.createTask(task({ id: 't1' }))
-    expect(review.requestChanges(asTaskId('t1'), '   ')).toMatchObject({ ok: false, reason: 'feedback-required' })
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
-  })
-
-  it('只有 review 列的卡能打回', () => {
-    store.createTask(task({ id: 't1', column: 'done' }))
-    expect(review.requestChanges(asTaskId('t1'), '改一下')).toMatchObject({ ok: false, reason: 'illegal-transition' })
-  })
-})
-
 describe('失败的执行也停在 Review', () => {
   it('起进程就失败、没有 worktree 的卡：明确拒绝验收，而不是在不存在的目录上跑 git', async () => {
     store.createTask(task({ id: 't1' }))
@@ -164,11 +139,6 @@ describe('失败的执行也停在 Review', () => {
     expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
   })
 
-  it('失败的卡打回后回到队列，接着重新排队执行', () => {
-    store.createTask(task({ id: 't1' }))
-    expect(review.requestChanges(asTaskId('t1'), '先把依赖装上')).toMatchObject({ ok: true })
-    expect(store.getTask(asTaskId('t1'))).toMatchObject({ column: 'ready', feedback: '先把依赖装上' })
-  })
 })
 
 describe('副作用绝不跑在领域判定之前（回归）', () => {

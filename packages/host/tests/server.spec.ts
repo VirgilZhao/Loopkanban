@@ -472,6 +472,49 @@ describe('PATCH /api/tasks/:id', () => {
   })
 })
 
+describe('讨论', () => {
+  const say = (id: string, body: unknown) =>
+    api(`/api/tasks/${id}/comments`, { method: 'POST', body: JSON.stringify(body) })
+
+  it('在 Review 里留言 = 再改一版：卡自动回队列', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const res = await say('t1', { body: '中文标题被吃掉了，要保留 Unicode' })
+    expect(res.status).toBe(201)
+    expect(await res.json()).toMatchObject({ requeued: true })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('ready')
+    expect(store.listComments(asTaskId('t1'))[0]).toMatchObject({
+      author: 'human', body: '中文标题被吃掉了，要保留 Unicode',
+    })
+  })
+
+  it('别的列只是留个话，不动卡的位置', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    expect(await (await say('t1', { body: '顺手记一笔' })).json()).toMatchObject({ requeued: false })
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(1)
+  })
+
+  it('空留言 400，卡也不该被搬走', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    expect((await say('t1', { body: '   ' })).status).toBe(400)
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(0)
+  })
+
+  it('按时间正序读回来 —— 这也是交给 Agent 的上下文顺序', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    store.addComment({ id: 'c1', taskId: asTaskId('t1'), author: 'human', body: '第一句', at: T0 })
+    store.addComment({ id: 'c2', taskId: asTaskId('t1'), author: 'agent', body: '答复', at: T0 + 1 })
+    const body = await (await api('/api/tasks/t1/comments')).json() as
+      { comments: { author: string; body: string }[] }
+    expect(body.comments.map((c) => c.author)).toEqual(['human', 'agent'])
+  })
+
+  it('卡不存在 404', async () => {
+    expect((await say('nope', { body: 'x' })).status).toBe(404)
+  })
+})
+
 describe('DELETE /api/tasks/:id', () => {
   const del = (id: string, body?: unknown, query = '') =>
     api(`/api/tasks/${id}${query}`, {

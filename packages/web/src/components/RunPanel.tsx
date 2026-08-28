@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button.tsx'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog.tsx'
-import { Input } from '@/components/ui/input.tsx'
+import { Textarea } from '@/components/ui/textarea.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
 import {
-  Archive, ArchiveRestore, Check, GitMerge, Play, RotateCcw, Square, Trash2, TriangleAlert, X,
+  Archive, ArchiveRestore, Bot, Check, GitMerge, Play, Send, Square, Trash2, TriangleAlert, User, X,
 } from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
 import { DiffView } from '@/components/DiffView.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { summarize } from '@/lib/events.ts'
+import { renderMarkdown } from '@/lib/markdown.tsx'
 import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskEdit } from '@/types.ts'
+import type {
+  Agent, DiffView as Diff, Project, Run, StreamEvent, Task, TaskComment, TaskEdit,
+} from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
 const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
@@ -41,7 +44,7 @@ export function RunPanel({
   const [runs, setRuns] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
   const [diff, setDiff] = useState<Diff | null>(null)
-  const [feedback, setFeedback] = useState('')
+  const [comments, setComments] = useState<TaskComment[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -68,6 +71,15 @@ export function RunPanel({
     return () => { cancelled = true }
   }, [task.id, task.revision])
 
+  // 讨论跟着卡的 revision 走：跑完一轮 Agent 会往里加一条回复。
+  useEffect(() => {
+    let cancelled = false
+    void api.comments(task.id)
+      .then(({ comments: loaded }) => { if (!cancelled) setComments(loaded) })
+      .catch(() => { if (!cancelled) setComments([]) })
+    return () => { cancelled = true }
+  }, [task.id, task.revision, runs.length])
+
   useEffect(() => {
     if (latest === undefined) return undefined
     return subscribeRun(latest.id, (event) => {
@@ -75,7 +87,7 @@ export function RunPanel({
     })
   }, [latest])
 
-  // 只在有执行记录时拉 diff；卡片状态变了要重拉（打回后又跑了一轮）。
+  // 只在有执行记录时拉 diff；卡片状态变了要重拉（留言之后又跑了一轮）。
   useEffect(() => {
     if (latest === undefined) { setDiff(null); return undefined }
     let cancelled = false
@@ -295,7 +307,7 @@ export function RunPanel({
           </div>
         ) : null}
 
-        {/* 验收：通过 / 打回 / 废弃。只有 review 列的卡看得到。 */}
+        {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
         {!archived && task.column === 'review' ? (
           <div className="border-b border-hairline px-4 py-3">
             {/* 失败的执行也停在这一列，所以必须一眼看出这次是成是败 ——
@@ -308,7 +320,7 @@ export function RunPanel({
                   {latest.diagnostic === undefined ? null : (
                     <span className="mono block break-words">{latest.diagnostic}</span>
                   )}
-                  看完日志后打回重跑，或者废弃。
+                  看完日志后去讨论里说一句让它重跑，或者废弃。
                 </p>
               </div>
             ) : null}
@@ -329,27 +341,10 @@ export function RunPanel({
               />
             </div>
 
-            <div className="mt-3 flex gap-2">
-              <Input
-                value={feedback}
-                onChange={(event) => { setFeedback(event.target.value) }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && feedback.trim().length > 0) {
-                    void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
-                  }
-                }}
-                placeholder="要改什么？写清楚再打回"
-              />
-              <Action
-                icon={<RotateCcw />} label="打回" busy={busy || feedback.trim().length === 0}
-                onClick={() => {
-                  void act(() => api.requestChanges(task.id, feedback)).then(() => { setFeedback('') })
-                }}
-              />
-            </div>
             <p className="mt-2 text-xs leading-relaxed text-ink-faint">
               通过只把改动提交到分支 <span className="mono">{latest?.branch ?? ''}</span>，不动你的主工作区；
               废弃会删掉分支并把卡退回 Backlog。
+              要它再改一版，去<span className="text-sodium">讨论</span>里说 —— 留言会把卡送回队列。
             </p>
           </div>
         ) : null}
@@ -358,19 +353,24 @@ export function RunPanel({
         <Tabs defaultValue="spec" className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex-none border-b border-hairline px-4 py-2.5">
             <TabsList>
-              {([['spec', '规格'], ['diff', 'Diff'], ['stream', '事件流'], ['runs', '执行历史']] as const).map(([value, label]) => (
-                <TabsTrigger key={value} value={value} className="px-3">{label}</TabsTrigger>
+              {([
+                ['spec', '规格'],
+                ['talk', '讨论'],
+                ['diff', 'Diff'],
+                ['stream', '事件流'],
+                ['runs', '执行历史'],
+              ] as const).map(([value, label]) => (
+                <TabsTrigger key={value} value={value} className="px-3">
+                  {label}
+                  {value === 'talk' && comments.length > 0 ? (
+                    <span className="mono text-[10px] text-ink-faint">{comments.length}</span>
+                  ) : null}
+                </TabsTrigger>
               ))}
             </TabsList>
           </div>
 
           <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
-            {task.feedback === undefined ? null : (
-              <div className="border-b border-sodium-deep/40 bg-sodium/[0.06] px-4 py-3">
-                <p className="mb-1 text-sm font-medium text-sodium">待处理的评审意见</p>
-                <p className="whitespace-pre-wrap text-xs leading-relaxed text-sodium">{task.feedback}</p>
-              </div>
-            )}
             <TaskEditor
               task={task}
               project={project}
@@ -379,6 +379,24 @@ export function RunPanel({
               onSave={(edit: TaskEdit) => {
                 // 存完就收工，回到看板；存失败留在原地，让人看见错误再决定。
                 void act(() => api.edit(task.id, task.revision, edit)).then((ok) => { if (ok) onClose() })
+              }}
+            />
+          </TabsContent>
+
+          <TabsContent value="talk" className="mt-0 flex min-h-0 flex-1 flex-col">
+            <Discussion
+              comments={comments}
+              busy={busy}
+              /** Review 里留言会把卡送回队列，按钮上得先说清楚。 */
+              requeues={task.column === 'review'}
+              onSend={(body) => {
+                setBusy(true)
+                void api.comment(task.id, body)
+                  .then(({ comments: next }) => { setComments(next); onChanged() })
+                  .catch((error: unknown) => {
+                    if (error instanceof ApiError) onError(error.code, error.message)
+                  })
+                  .finally(() => { setBusy(false) })
               }}
             />
           </TabsContent>
@@ -477,4 +495,89 @@ function Action({ icon, label, onClick, busy, tone }: {
 
 function Empty({ text }: { text: string }): React.JSX.Element {
   return <p className="cjk-label p-6 text-center">{text}</p>
+}
+
+/**
+ * 讨论线程：Agent 的回复与人的留言按时间排开，底下是输入框。
+ *
+ * 这条线程不只是给人看的记录 —— 下一次执行会把它整段交给 Agent，所以
+ * 「说了什么」和「什么时候说的」都要能对上号。
+ */
+function Discussion({ comments, busy, requeues, onSend }: {
+  comments: TaskComment[]
+  busy: boolean
+  requeues: boolean
+  onSend: (body: string) => void
+}): React.JSX.Element {
+  const [draft, setDraft] = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ block: 'end' }) }, [comments.length])
+
+  const send = (): void => {
+    const body = draft.trim()
+    if (body.length === 0) return
+    onSend(body)
+    setDraft('')
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+        {comments.length === 0 ? (
+          <Empty text="还没有讨论。跑完一轮 Agent 会把它做了什么写在这儿，你也可以先留个话" />
+        ) : comments.map((comment) => (
+          <div key={comment.id} className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              {comment.author === 'agent'
+                ? <Bot className="size-3.5 text-sodium" />
+                : <User className="size-3.5 text-ink-faint" />}
+              <span className={cn(
+                'text-xs font-medium',
+                comment.author === 'agent' ? 'text-sodium' : 'text-ink',
+              )}>
+                {comment.author === 'agent' ? 'Agent' : '你'}
+              </span>
+              <span className="mono text-[10px] text-ink-faint">
+                {new Date(comment.at).toLocaleString()}
+              </span>
+            </div>
+            <div className={cn(
+              'rounded-lg border px-3 py-2 text-[13px]',
+              comment.author === 'agent'
+                ? 'border-hairline bg-sunken/40'
+                : 'border-sodium-deep/30 bg-sodium/[0.05]',
+            )}>
+              {renderMarkdown(comment.body)}
+            </div>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="flex-none space-y-2 border-t border-hairline px-4 py-3">
+        <Textarea
+          value={draft}
+          disabled={busy}
+          placeholder={requeues ? '要它再改什么？发出去这张卡就回队列' : '留一条话，下次执行会带上它'}
+          onChange={(event) => { setDraft(event.target.value) }}
+          onKeyDown={(event) => {
+            // ⌘/Ctrl + Enter 发出去；单独回车留给换行 —— 这里写的是段落，不是聊天。
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send()
+          }}
+          className="min-h-20"
+        />
+        <div className="flex items-center gap-2">
+          <p className="flex-1 text-xs text-ink-faint">
+            {requeues
+              ? '发出去这张卡回到 Ready，下一次执行会带着整条讨论走。'
+              : '下一次执行会带着整条讨论走。'}
+          </p>
+          <Button size="sm" disabled={busy || draft.trim().length === 0} onClick={send}>
+            <Send />发送
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
 }

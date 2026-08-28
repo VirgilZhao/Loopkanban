@@ -8,7 +8,7 @@
 
 import type {
   Agent, DiffView, DirListing, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState,
-  StreamEvent, Task, TaskEdit,
+  StreamEvent, Task, TaskComment, TaskEdit,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -126,11 +126,19 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ merge }) },
     ),
 
-  /** 打回重做。worktree 保留，下一次执行接着改。 */
-  requestChanges: (taskId: string, feedback: string) =>
-    call(`/api/tasks/${encodeURIComponent(taskId)}/request-changes`, {
-      method: 'POST', body: JSON.stringify({ feedback }),
-    }),
+  /** 一张卡的讨论，按时间正序。 */
+  comments: (taskId: string) =>
+    call<{ comments: TaskComment[] }>(`/api/tasks/${encodeURIComponent(taskId)}/comments`),
+
+  /**
+   * 留一条言。**在 Review 里留言就是"再改一版"**：卡自动回队列，
+   * 下一次执行会带着整条讨论走。`requeued` 说明这次有没有搬动卡片。
+   */
+  comment: (taskId: string, body: string) =>
+    call<{ comments: TaskComment[]; requeued: boolean }>(
+      `/api/tasks/${encodeURIComponent(taskId)}/comments`,
+      { method: 'POST', body: JSON.stringify({ body }) },
+    ),
 
   /** 废弃这次成果：删掉分支与 worktree，卡片回想法池。 */
   discard: (taskId: string) =>

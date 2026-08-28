@@ -103,6 +103,28 @@ export const MIGRATIONS: readonly string[] = [
   `,
   // 指定执行器之后还能指定模型。留空就用那个 CLI 自己的默认。
   `ALTER TABLE tasks ADD COLUMN model TEXT;`,
+  // 讨论取代打回。评审意见原本是任务上的一个字段，用完即弃；现在人和 Agent
+  // 的每一轮往来都留下来，下一次执行会带着整条线程走 —— 反馈得以累积，而不是
+  // 每次只剩最后一句。旧的 feedback 就地变成一条人类留言，一个字不丢。
+  `
+  CREATE TABLE task_comments (
+    id       TEXT PRIMARY KEY,
+    task_id  TEXT    NOT NULL REFERENCES tasks(id),
+    -- 'human' | 'agent'
+    author   TEXT    NOT NULL,
+    body     TEXT    NOT NULL,
+    -- Agent 的回答出自哪次执行；人写的留言为空。
+    run_id   TEXT,
+    at       INTEGER NOT NULL
+  );
+  CREATE INDEX idx_comments_task ON task_comments(task_id, at);
+
+  INSERT INTO task_comments (id, task_id, author, body, at)
+    SELECT 'c-legacy-' || id, id, 'human', feedback, updated_at
+    FROM tasks WHERE feedback IS NOT NULL AND TRIM(feedback) <> '';
+
+  ALTER TABLE tasks DROP COLUMN feedback;
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

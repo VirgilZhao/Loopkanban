@@ -317,31 +317,75 @@ describe('worktree 隔离', () => {
   })
 })
 
-describe('评审意见的生命周期', () => {
-  it('执行失败时意见留着 —— 否则人写的评审凭空丢了，重派又从头做一遍', async () => {
-    store.createTask(task({ id: 't1', feedback: '连字符后面的字母也要大写' }))
-    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: false })], 1))
+describe('讨论的生命周期', () => {
+  /** 给这张卡留一条人类留言。 */
+  const say = (body: string, at = T0) => {
+    store.addComment({ id: `c-${String(at)}`, taskId: asTaskId('t1'), author: 'human', body, at })
+  }
+
+  it('Agent 这一轮的回复进讨论 —— 它就是人接下来要回应的东西', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'finished', ok: true, summary: '改完了：slugify 现在保留中文' }),
+    ]))
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
     await settle(started.run.id)
 
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
-    expect(store.getTask(asTaskId('t1'))?.feedback).toBe('连字符后面的字母也要大写')
+    const comments = store.listComments(asTaskId('t1'))
+    expect(comments).toHaveLength(1)
+    expect(comments[0]).toMatchObject({ author: 'agent', body: '改完了：slugify 现在保留中文' })
+    expect(comments[0]?.runId).toBe(started.run.id)
   })
 
-  it('跑出可验收结果之后才清掉意见，避免下一轮重复投喂', async () => {
-    store.createTask(task({ id: 't1', feedback: '改一下' }))
+  it('失败的那一轮也记 —— 它卡在哪儿正是最该被讨论的', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'finished', ok: false, summary: '依赖装不上，npm 报 403' }),
+    ], 1))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(store.listComments(asTaskId('t1'))[0]).toMatchObject({
+      author: 'agent', body: '依赖装不上，npm 报 403',
+    })
+  })
+
+  it('讨论不消费：跑完之后先前的留言还在，下一轮连着一起带走', async () => {
+    store.createTask(task({ id: 't1' }))
+    say('连字符后面的字母也要大写')
+    const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true, summary: '好了' })]))
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    const comments = store.listComments(asTaskId('t1'))
+    expect(comments.map((c) => c.author)).toEqual(['human', 'agent'])
+    expect(comments[0]?.body).toBe('连字符后面的字母也要大写')
+  })
+
+  it('整条讨论写进 TASK.md —— 只给最后一句会让 Agent 推翻已确认的结论', async () => {
+    store.createTask(task({ id: 't1' }))
+    say('先只改 slugify，别动别的', T0)
+    store.addComment({ id: 'c-a', taskId: asTaskId('t1'), author: 'agent', body: '已改，只动了一个文件', at: T0 + 1 })
+    say('再补个中文的测试', T0 + 2)
+
     const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)
-    await settle(started.run.id)
 
-    expect(store.getTask(asTaskId('t1'))?.column).toBe('review')
-    expect(store.getTask(asTaskId('t1'))?.feedback).toBeUndefined()
+    const spec = await readFile(join(started.run.worktreePath, 'TASK.md'), 'utf8')
+    expect(spec).toContain('## 讨论')
+    expect(spec).toContain('先只改 slugify')
+    expect(spec).toContain('已改，只动了一个文件')
+    expect(spec).toContain('再补个中文的测试')
+    await settle(started.run.id)
   })
 
-  it('意见会出现在事件流里，人能看到这一轮是带着什么要求跑的', async () => {
-    store.createTask(task({ id: 't1', feedback: '要保留 Unicode' }))
+  it('最新一条留言出现在事件流里，人能看到这一轮是带着什么要求跑的', async () => {
+    store.createTask(task({ id: 't1' }))
+    say('要保留 Unicode')
     const r = runner(scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]))
     const started = await r.start(asTaskId('t1'))
     if (!started.ok) throw new Error(started.detail)

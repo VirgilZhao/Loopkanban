@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   acquireLease, archiveTask, asProjectId, asRunId, asTaskId, canTransition, COLUMNS, deleteTask,
-  dropDependency, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease, requestChanges,
+  dropDependency, editTask, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
   unarchiveTask, type Task, taskTitle,
 } from '../src/index.ts'
 
@@ -377,38 +377,6 @@ describe('dropDependency', () => {
     expect(dropDependency(running, T2, T0)?.blockedBy).toEqual([])
     const shelved = task({ column: 'ready', archivedAt: T0, blockedBy: [T2] })
     expect(dropDependency(shelved, T2, T0)?.blockedBy).toEqual([])
-  })
-})
-
-describe('requestChanges', () => {
-  const kick = (t: Task, feedback = '连字符后面也要大写') =>
-    requestChanges(t, { expectedRevision: t.revision, feedback, now: T0 + 100 })
-
-  it('带着意见回到队列，租约一并释放', () => {
-    const result = kick(task({ column: 'review' }))
-    expect(result.ok && result.value).toMatchObject({ column: 'ready', feedback: '连字符后面也要大写' })
-    expect(result.ok && result.value.lease).toBeUndefined()
-  })
-
-  it('只有 review 列的卡能打回', () => {
-    expect(kick(task({ column: 'done' }))).toMatchObject({ ok: false, reason: 'illegal-transition' })
-  })
-
-  it('空意见被拒 —— 否则 Agent 只会把上次的活重做一遍', () => {
-    expect(kick(task({ column: 'review' }), '   ')).toMatchObject({ ok: false, reason: 'feedback-required' })
-  })
-
-  it('验收标准为空也能打回 —— 判据是可选的，改什么才是必须写清楚的', () => {
-    const emptied = editTask(task({ column: 'review' }), {
-      expectedRevision: 1, edit: { acceptance: [] }, now: T0,
-    })
-    if (!emptied.ok) throw new Error(emptied.detail)
-    expect(kick(emptied.value)).toMatchObject({ ok: true })
-  })
-
-  it('打回也走 CAS', () => {
-    expect(requestChanges(task({ column: 'review' }), { expectedRevision: 99, feedback: 'x', now: T0 }))
-      .toMatchObject({ ok: false, reason: 'revision-conflict' })
   })
 })
 

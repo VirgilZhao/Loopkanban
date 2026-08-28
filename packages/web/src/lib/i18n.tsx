@@ -26,6 +26,7 @@ const zh = {
   'header.project': '项目',
   'header.allProjects': '所有项目',
   'header.base': '基线 {branch}',
+  'header.baseHint': '换基线分支 —— 只影响此后新建的卡，已有的卡各自记着自己的基线',
   'header.dismiss': '知道了',
 
   // ── 侧边栏 ─────────────────────────────────────────────
@@ -170,12 +171,17 @@ const zh = {
   'newProject.namePlaceholder': '给它一个你认得出的名字',
   'newProject.folder': '项目文件夹',
   'newProject.browse': '选择…',
-  'newProject.pathHint': '本机上的绝对路径。基线分支取仓库当前所在的分支，不用填。',
+  'newProject.pathHint': '本机上的绝对路径。',
+  'newProject.base': '基线分支',
+  'newProject.baseHint': '任务分支从这儿派生，验收通过也合回这儿。默认 main —— 从别的分支拉，每张卡都会带上那条分支的改动。',
+  'newProject.baseWaiting': '选好文件夹后在这里挑基线分支。',
+  'newProject.baseEmpty': '这个仓库还没有任何提交，暂时没有分支可选 —— 先提交一次再来。',
   'newProject.cancel': '取消',
   'newProject.submit': '新增',
   'newProject.err.not-a-repo': '这个目录不是 git 仓库。任务要在它派生出来的 worktree 上干活，不是仓库就派生不出来。',
   'newProject.err.path-not-absolute': '要绝对路径 —— 服务端不该去猜它相对于谁。',
   'newProject.err.project-exists': '这个目录已经是一个项目了。',
+  'newProject.err.no-such-branch': '这个仓库里没有这条分支。刷新一下重新选一条。',
 
   'deleteProject.title': '删除项目「{name}」？',
   'deleteProject.irreversible': '这个动作不可撤销。',
@@ -229,6 +235,7 @@ const zh = {
   'err.not-deletable': '只有 Backlog 与 Ready 的卡能删 —— 再往后 Agent 已经动过仓库了。要删就先废弃回想法池。',
   'err.no-project': '还没有项目。先在左侧新增一个 —— 任务得知道自己在哪个仓库里干活。',
   'err.task-not-found': '这张卡已经不在了，可能刚被删掉。',
+  'err.no-such-branch': '这个仓库里没有这条分支，可能刚被删掉。',
 }
 
 export type MessageKey = keyof typeof zh
@@ -241,6 +248,7 @@ const en: Record<MessageKey, string> = {
   'header.project': 'Project',
   'header.allProjects': 'all projects',
   'header.base': 'base {branch}',
+  'header.baseHint': 'Change the base branch — affects new cards only; existing cards keep the base they were created with',
   'header.dismiss': 'dismiss',
 
   'sidebar.tagline': 'agent dispatch',
@@ -374,12 +382,17 @@ const en: Record<MessageKey, string> = {
   'newProject.namePlaceholder': 'Give it a name you’ll recognize',
   'newProject.folder': 'Project folder',
   'newProject.browse': 'Browse…',
-  'newProject.pathHint': 'An absolute path on this machine. The base branch is whatever the repo is on right now — no need to fill it in.',
+  'newProject.pathHint': 'An absolute path on this machine.',
+  'newProject.base': 'Base branch',
+  'newProject.baseHint': 'Task branches are derived from it, and accepted work merges back into it. Defaults to main — branch off anything else and every card carries that branch’s changes.',
+  'newProject.baseWaiting': 'Pick a folder and its branches show up here.',
+  'newProject.baseEmpty': 'This repo has no commits yet, so there are no branches to pick — make one commit first.',
   'newProject.cancel': 'Cancel',
   'newProject.submit': 'Add',
   'newProject.err.not-a-repo': 'That folder isn’t a git repo. Tasks work in a worktree derived from it, and there’s nothing to derive from.',
   'newProject.err.path-not-absolute': 'It has to be an absolute path — the server shouldn’t have to guess what it’s relative to.',
   'newProject.err.project-exists': 'That folder is already a project.',
+  'newProject.err.no-such-branch': 'That branch isn’t in this repo. Reload and pick another one.',
 
   'deleteProject.title': 'Delete project “{name}”?',
   'deleteProject.irreversible': 'This can’t be undone.',
@@ -428,6 +441,7 @@ const en: Record<MessageKey, string> = {
   'err.not-deletable': 'Only Backlog and Ready cards can be deleted — past that an agent has already touched the repo. Discard it back to the idea pool first.',
   'err.no-project': 'No projects yet. Add one on the left — a task has to know which repo it works in.',
   'err.task-not-found': 'This card is gone; it may have just been deleted.',
+  'err.no-such-branch': 'That branch isn’t in this repo — it may have just been deleted.',
 }
 
 const TABLES: Record<Lang, Record<MessageKey, string>> = { zh, en }

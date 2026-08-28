@@ -23,7 +23,7 @@ import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
 import type { Storage } from '../storage/index.ts'
-import { detectBaseBranch, isGitRepo } from '../worktree/index.ts'
+import { branchExists, detectBaseBranch, isGitRepo, listBranches } from '../worktree/index.ts'
 import { createToken, guardRequest, tokenCookieHeader } from './auth.ts'
 import { browseDirectory, defaultBrowseRoot } from './browse.ts'
 import { RunBus } from './bus.ts'
@@ -238,6 +238,31 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       return
     }
 
+    /*
+     * 某个仓库有哪些分支，以及默认该选哪个。
+     *
+     * 新增项目时让人自己挑基线：默认值只是个猜测，猜错了每张卡都会长在
+     * 一堆无关改动上面。`base` 是推荐值（main / master 优先），不是命令。
+     */
+    if (method === 'GET' && pathname === '/api/branches') {
+      const asked = url.searchParams.get('path')?.trim() ?? ''
+      if (asked.length === 0 || !isAbsolute(asked)) {
+        sendJson(res, 422, { error: 'path-not-absolute', detail: '要绝对路径' })
+        return
+      }
+      const repoPath = resolvePath(asked)
+      if (!(await isGitRepo(repoPath))) {
+        sendJson(res, 422, { error: 'not-a-repo', detail: `${repoPath} 不是一个 git 仓库` })
+        return
+      }
+      sendJson(res, 200, {
+        path: repoPath,
+        branches: await listBranches(repoPath).catch(() => []),
+        base: await detectBaseBranch(repoPath),
+      }, extraHeaders)
+      return
+    }
+
     // ── 项目：列出与新增 ─────────────────────────────────────
     if (pathname === '/api/projects') {
       if (method === 'GET') {
@@ -245,9 +270,11 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       if (method === 'POST') {
-        const body = await readJsonBody(req) as Partial<{ name: string; path: string }> | undefined
+        const body = await readJsonBody(req) as
+          Partial<{ name: string; path: string; baseBranch: string }> | undefined
         const name = body?.name?.trim() ?? ''
         const raw = body?.path?.trim() ?? ''
+        const askedBase = body?.baseBranch?.trim() ?? ''
         if (name.length === 0 || raw.length === 0) {
           sendJson(res, 400, { error: 'bad-request', detail: '需要项目名称与目录' })
           return
@@ -262,7 +289,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           sendJson(res, 422, { error: 'not-a-repo', detail: `${repoPath} 不是一个 git 仓库` })
           return
         }
-        const baseBranch = await detectBaseBranch(repoPath)
+        // 指定了基线就得真有这个分支：写下一个不存在的名字，要等到第一次
+        // 派活建 worktree 时才炸，那时人早已不在这个弹窗前面了。
+        if (askedBase.length > 0 && !(await branchExists(repoPath, askedBase))) {
+          sendJson(res, 422, { error: 'no-such-branch', detail: `${repoPath} 里没有分支 ${askedBase}` })
+          return
+        }
+        const baseBranch = askedBase.length > 0 ? askedBase : await detectBaseBranch(repoPath)
         if (storage.listProjects().some((project) => project.repoPath === repoPath)) {
           sendJson(res, 409, { error: 'project-exists', detail: '这个目录已经是一个项目了' })
           return
@@ -323,17 +356,39 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
     }
 
-    // ── 改项目名 ────────────────────────────────────────────
+    // ── 改项目名 / 换基线分支 ───────────────────────────────
     const projectId = matchPath(pathname, /^\/api\/projects\/([^/]+)$/)
     if (method === 'PATCH' && projectId !== null) {
       const target = asProjectId(decodeURIComponent(projectId))
-      const body = await readJsonBody(req) as Partial<{ name: string }> | undefined
-      const name = body?.name?.trim() ?? ''
-      if (name.length === 0) {
+      const project = storage.getProject(target)
+      if (project === null) { sendJson(res, 404, { error: 'project-not-found' }); return }
+
+      const body = await readJsonBody(req) as Partial<{ name: string; baseBranch: string }> | undefined
+      const name = body?.name?.trim()
+      const baseBranch = body?.baseBranch?.trim()
+      if (name !== undefined && name.length === 0) {
         sendJson(res, 400, { error: 'bad-request', detail: '项目名不能为空' })
         return
       }
-      if (!storage.renameProject(target, name)) {
+      /*
+       * 换基线只影响此后新建的卡 —— 已经建出来的卡各自记着自己的基线。
+       * 把它们一起改掉会让某张正在 Review 的卡的 diff 与合并目标在脚下换掉，
+       * 而那正是人此刻在看的东西。
+       */
+      if (baseBranch !== undefined) {
+        if (baseBranch.length === 0) {
+          sendJson(res, 400, { error: 'bad-request', detail: '基线分支不能为空' })
+          return
+        }
+        if (!(await branchExists(project.repoPath, baseBranch))) {
+          sendJson(res, 422, { error: 'no-such-branch', detail: `${project.repoPath} 里没有分支 ${baseBranch}` })
+          return
+        }
+      }
+      if (!storage.updateProject(target, {
+        ...(name === undefined ? {} : { name }),
+        ...(baseBranch === undefined ? {} : { baseBranch }),
+      })) {
         sendJson(res, 404, { error: 'project-not-found' })
         return
       }

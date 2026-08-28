@@ -77,13 +77,72 @@ describe('POST /api/projects', () => {
   const create = (body: unknown) =>
     api('/api/projects', { method: 'POST', body: JSON.stringify(body) })
 
-  it('新增项目：记下名字与目录，基线分支由仓库自己说了算', async () => {
+  /** 给测试仓库做一次提交，让它真的有分支可选。 */
+  const commit = async (message: string) => {
+    for (const args of [
+      ['config', 'user.email', 't@t'], ['config', 'user.name', 'T'],
+      ['commit', '-q', '--allow-empty', '-m', message],
+    ]) {
+      await new Promise((resolve, reject) => {
+        const child = spawn('git', ['-C', repo, ...args], { stdio: 'ignore' })
+        child.on('exit', resolve)
+        child.on('error', reject)
+      })
+    }
+  }
+
+  const checkout = (branch: string) => new Promise((resolve, reject) => {
+    const child = spawn('git', ['-C', repo, 'checkout', '-q', '-b', branch], { stdio: 'ignore' })
+    child.on('exit', resolve)
+    child.on('error', reject)
+  })
+
+  it('新增项目：记下名字与目录，没指定基线时给 main', async () => {
     const res = await create({ name: '我的项目', path: repo })
     expect(res.status).toBe(201)
     const { project } = await res.json() as { project: { name: string; repoPath: string; baseBranch: string } }
     expect(project.name).toBe('我的项目')
     expect(project.baseBranch).toBe('main')
     expect(store.listProjects()).toHaveLength(2)
+  })
+
+  it('仓库停在别的分支上也不影响默认基线 —— 那条分支只是你上次干活的落脚点', async () => {
+    await commit('init')
+    await checkout('codex/some-feature')
+    const res = await create({ name: '我的项目', path: repo })
+    expect((await res.json() as { project: { baseBranch: string } }).project.baseBranch).toBe('main')
+  })
+
+  it('可以指定基线分支', async () => {
+    await commit('init')
+    await checkout('develop')
+    const res = await create({ name: '我的项目', path: repo, baseBranch: 'develop' })
+    expect(res.status).toBe(201)
+    expect((await res.json() as { project: { baseBranch: string } }).project.baseBranch).toBe('develop')
+  })
+
+  it('指定了一条不存在的分支就拒绝 —— 不然要等第一次派活建 worktree 时才炸', async () => {
+    await commit('init')
+    const res = await create({ name: '我的项目', path: repo, baseBranch: '不存在' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('no-such-branch')
+    expect(store.listProjects()).toHaveLength(1)
+  })
+
+  it('GET /api/branches：列出分支并给出推荐基线', async () => {
+    await commit('init')
+    await checkout('develop')
+    const res = await api(`/api/branches?path=${encodeURIComponent(repo)}`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { branches: string[]; base: string }
+    expect(body.branches).toContain('main')
+    expect(body.branches).toContain('develop')
+    expect(body.base).toBe('main')
+  })
+
+  it('GET /api/branches：不是仓库、或不是绝对路径，都说清楚', async () => {
+    expect((await api(`/api/branches?path=${encodeURIComponent(sandbox)}`)).status).toBe(422)
+    expect((await api('/api/branches?path=./repo')).status).toBe(422)
   })
 
   it('不是 git 仓库就拒绝 —— 任务要在它派生的 worktree 上干活，派不出来就没有意义', async () => {
@@ -145,6 +204,64 @@ describe('PATCH /api/projects/:id', () => {
 
   it('项目不存在返回 404', async () => {
     expect((await rename('nope', { name: '新名字' })).status).toBe(404)
+  })
+
+  it('换基线分支：仓库里没有这条分支就拒绝', async () => {
+    const res = await rename(PROJECT, { baseBranch: 'develop' })
+    expect(res.status).toBe(422)
+    expect((await res.json() as { error: string }).error).toBe('no-such-branch')
+    expect(store.getProject(PROJECT)?.baseBranch).toBe('main')
+  })
+})
+
+describe('PATCH /api/projects/:id 换基线', () => {
+  let sandbox: string
+  let repo: string
+  let projectId: string
+
+  beforeEach(async () => {
+    sandbox = await mkdtemp(join(tmpdir(), 'loopkanban-rebase-'))
+    repo = join(sandbox, 'repo')
+    await mkdir(repo, { recursive: true })
+    for (const args of [
+      ['init', '-q', '-b', 'main', repo],
+      ['-C', repo, 'config', 'user.email', 't@t'],
+      ['-C', repo, 'config', 'user.name', 'T'],
+      ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'init'],
+      ['-C', repo, 'branch', 'develop'],
+    ]) {
+      await new Promise((resolve, reject) => {
+        const child = spawn('git', args, { stdio: 'ignore' })
+        child.on('exit', resolve)
+        child.on('error', reject)
+      })
+    }
+    const res = await api('/api/projects', {
+      method: 'POST', body: JSON.stringify({ name: '真仓库', path: repo }),
+    })
+    projectId = (await res.json() as { project: { id: string } }).project.id
+  })
+
+  afterEach(async () => { await rm(sandbox, { recursive: true, force: true }) })
+
+  it('换成仓库里真有的分支，此后新建的卡跟着走，已有的卡不动', async () => {
+    const before = await api('/api/tasks', {
+      method: 'POST', body: JSON.stringify({ projectId, description: '换基线之前建的' }),
+    })
+    const older = (await before.json() as { task: Task }).task
+
+    const res = await api(`/api/projects/${projectId}`, {
+      method: 'PATCH', body: JSON.stringify({ baseBranch: 'develop' }),
+    })
+    expect(res.status).toBe(200)
+
+    const after = await api('/api/tasks', {
+      method: 'POST', body: JSON.stringify({ projectId, description: '换基线之后建的' }),
+    })
+    expect((await after.json() as { task: Task }).task.baseBranch).toBe('develop')
+    // 已经建出来的卡各记各的：跟着改会让一张正在 Review 的卡的 diff 与合并
+    // 目标在人眼皮底下换掉。
+    expect(store.getTask(asTaskId(older.id))?.baseBranch).toBe('main')
   })
 })
 

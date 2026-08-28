@@ -206,13 +206,25 @@ export class Storage {
   }
 
   /**
-   * 改项目的名字。只动这一个字段 —— 仓库路径与基线分支是它的身份，
-   * 改了名字还是同一个项目；要换仓库，那是另一个项目。
+   * 改项目的名字或基线分支。
    *
+   * **仓库路径不在其列** —— 那是项目的身份，换了仓库就是另一个项目。基线
+   * 分支可以改：它是一个当初猜出来的默认值，猜错了不该只能靠删掉重建来纠正。
+   * 改动只影响此后新建的卡；已经建出来的卡各自记着自己的基线，不动它们，
+   * 否则它们的 diff 与合并目标会在脚下悄悄换掉。
+   *
+   * @param id - 目标项目。
+   * @param patch - 要改的字段；给空对象等于什么都不改。
    * @returns 是否改到了；false 表示这个项目不在。
    */
-  renameProject(id: ProjectId, name: string): boolean {
-    return this.db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id).changes === 1
+  updateProject(id: ProjectId, patch: { name?: string; baseBranch?: string }): boolean {
+    const sets: string[] = []
+    const values: string[] = []
+    if (patch.name !== undefined) { sets.push('name = ?'); values.push(patch.name) }
+    if (patch.baseBranch !== undefined) { sets.push('base_branch = ?'); values.push(patch.baseBranch) }
+    if (sets.length === 0) return this.getProject(id) !== null
+    return this.db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`)
+      .run(...values, id).changes === 1
   }
 
   /**

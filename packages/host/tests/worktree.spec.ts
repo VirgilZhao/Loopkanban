@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { capture } from '../src/agents/discover.ts'
 import {
-  WORKTREE_HOME, currentBranch, detectBaseBranch, ensureWorktree, isClean, isGitRepo, worktreeDir,
+  WORKTREE_HOME, currentBranch, detectBaseBranch, ensureWorktree, isClean, isGitRepo, listBranches,
+  worktreeDir,
 } from '../src/worktree/index.ts'
 
 let sandbox: string
@@ -77,9 +78,31 @@ describe('项目探测', () => {
     expect(await isGitRepo(sandbox)).toBe(false)
   })
 
-  it('基线分支取仓库当前所在的分支', async () => {
+  it('基线默认取 main，不跟着仓库当前停在哪条分支走', async () => {
     expect(await detectBaseBranch(repo)).toBe('main')
-    await git(repo, 'checkout', '-q', '-b', 'develop')
-    expect(await detectBaseBranch(repo)).toBe('develop')
+    // 这正是要防的那一幕：人正停在某条 feature 分支上就去建项目，
+    // 基线跟着走的话，之后每张卡都长在那条分支的改动上面。
+    await git(repo, 'checkout', '-q', '-b', 'codex/some-feature')
+    expect(await detectBaseBranch(repo)).toBe('main')
+  })
+
+  it('没有 main / master 才退回当前分支', async () => {
+    await git(repo, 'branch', '-m', 'main', 'trunk')
+    expect(await detectBaseBranch(repo)).toBe('trunk')
+  })
+
+  it('还没有提交的仓库：分支清单是空的，基线退回 HEAD 指着的名字', async () => {
+    const fresh = join(sandbox, 'fresh')
+    await capture(['git', 'init', '-q', '-b', 'main', fresh])
+    expect(await listBranches(fresh)).toEqual([])
+    expect(await detectBaseBranch(fresh)).toBe('main')
+  })
+
+  it('列出本地分支，最近提交的在前', async () => {
+    await git(repo, 'checkout', '-q', '-b', 'later')
+    await writeFile(join(repo, 'x.txt'), 'x\n', 'utf8')
+    await git(repo, 'add', '-A')
+    await git(repo, 'commit', '-qm', 'later')
+    expect(await listBranches(repo)).toEqual(['later', 'main'])
   })
 })

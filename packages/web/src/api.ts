@@ -7,8 +7,8 @@
  */
 
 import type {
-  Agent, DiffView, DirListing, LiveLine, Project, Run, RunStats, SchedulerSettings, SchedulerState,
-  StreamEvent, Task, TaskComment, TaskEdit,
+  Agent, BranchListing, DiffView, DirListing, LiveLine, Project, Run, RunStats, SchedulerSettings,
+  SchedulerState, StreamEvent, Task, TaskComment, TaskEdit,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -47,10 +47,13 @@ export const api = {
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
 
-  /** 改项目名。仓库路径与基线分支是它的身份，改名不动它们。 */
-  renameProject: (projectId: string, name: string) =>
+  /**
+   * 改项目名或换基线分支。仓库路径不在其列 —— 那是项目的身份，换了仓库
+   * 就是另一个项目。换基线只影响此后新建的卡。
+   */
+  updateProject: (projectId: string, patch: { name?: string; baseBranch?: string }) =>
     call<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
-      method: 'PATCH', body: JSON.stringify({ name }),
+      method: 'PATCH', body: JSON.stringify(patch),
     }),
 
   /**
@@ -66,8 +69,15 @@ export const api = {
   browse: (path?: string) =>
     call<DirListing>(`/api/fs${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`),
 
-  /** 新增项目。目录必须是本机上的一个 git 仓库，基线分支由它自己说了算。 */
-  createProject: (input: { name: string; path: string }) =>
+  /** 某个仓库有哪些本地分支，以及推荐当基线的那条。 */
+  branches: (path: string) =>
+    call<BranchListing>(`/api/branches?path=${encodeURIComponent(path)}`),
+
+  /**
+   * 新增项目。目录必须是本机上的一个 git 仓库；不给 baseBranch 就用服务端
+   * 推荐的那条（main / master 优先）。
+   */
+  createProject: (input: { name: string; path: string; baseBranch?: string }) =>
     call<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
 
   agents: () => call<{ agents: Agent[] }>('/api/agents'),

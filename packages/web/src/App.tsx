@@ -5,6 +5,7 @@ import {
 } from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
 import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
+import { BaseBranchPicker } from '@/components/BaseBranchPicker.tsx'
 import { Column } from '@/components/Column.tsx'
 import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
 import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
@@ -235,6 +236,21 @@ export default function App(): React.JSX.Element {
     })()
   }, [refresh, activeProject, t])
 
+  /**
+   * 换项目的基线分支。
+   *
+   * 只影响此后新建的卡：已经建出来的卡各自记着自己的基线，跟着改会让某张
+   * 正在 Review 的卡的 diff 与合并目标在脚下换掉。
+   */
+  const changeBaseBranch = useCallback((project: Project, baseBranch: string) => {
+    setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, baseBranch } : p)))
+    void api.updateProject(project.id, { baseBranch })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) setNotice({ text: explain(t, error.code, error.message), tone: 'warn' })
+        void refresh()
+      })
+  }, [refresh, t])
+
   const changeScheduler = useCallback(async (patch: Parameters<typeof api.setScheduler>[0]) => {
     setSchedulerBusy(true)
     try {
@@ -308,7 +324,7 @@ export default function App(): React.JSX.Element {
         onRenameProject={(project, name) => {
           // 乐观改名：一个字段的重命名不值得让边栏闪一下。失败就用服务端的真相盖回来。
           setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, name } : p)))
-          void api.renameProject(project.id, name)
+          void api.updateProject(project.id, { name })
             .catch((error: unknown) => {
               if (error instanceof ApiError) setNotice({ text: explain(t, error.code, error.message), tone: 'warn' })
               void refresh()
@@ -336,12 +352,20 @@ export default function App(): React.JSX.Element {
           {view.kind === 'overview' ? (
             <span className="chrome-label !text-[8px]">{t('header.allProjects')}</span>
           ) : (
-            <span className="mono min-w-0 flex-1 truncate text-[10px] text-ink-faint" title={projectById.get(view.id)?.repoPath}>
-              {projectById.get(view.id)?.repoPath}
-              <span className="ms-2">
-                {t('header.base', { branch: projectById.get(view.id)?.baseBranch ?? '' })}
+            <>
+              <span className="mono min-w-0 truncate text-[10px] text-ink-faint" title={projectById.get(view.id)?.repoPath}>
+                {projectById.get(view.id)?.repoPath}
               </span>
-            </span>
+              {/* 基线就地可改：它是建项目时猜出来的默认值，猜错了每张新卡都会
+                  长在一堆无关改动上面，得有个不用删项目就能纠正的地方。
+                  路径那一段会被截断，它不能跟着一起被截掉。 */}
+              {activeProject === null ? null : (
+                <BaseBranchPicker
+                  project={activeProject}
+                  onChange={(branch) => { changeBaseBranch(activeProject, branch) }}
+                />
+              )}
+            </>
           )}
           <span className="flex-1" />
           <ThemeToggle />

@@ -64,7 +64,7 @@ async function excludeWorktreeHome(repoPath: string): Promise<void> {
 }
 
 /** 分支是否已经存在。 */
-async function branchExists(repoPath: string, branch: string): Promise<boolean> {
+export async function branchExists(repoPath: string, branch: string): Promise<boolean> {
   const { code } = await capture(['git', '-C', repoPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], 60_000)
   return code === 0
 }
@@ -138,15 +138,49 @@ export async function isGitRepo(path: string): Promise<boolean> {
   return code === 0 && stdout.trim() === 'true'
 }
 
-/** 项目的基线分支：仓库当前所在的分支。detached HEAD 时退回 main。 */
+/** 派生任务分支时优先认的基线名，按这个顺序找第一个存在的。 */
+const PREFERRED_BASE = ['main', 'master'] as const
+
+/**
+ * 项目的默认基线分支。
+ *
+ * **不取"仓库当前在哪个分支"**：那个分支很可能只是你上一次干活留下的落脚点
+ * （某个 feature 分支、某次 review 的检出），把它当基线，之后每张卡都会长在
+ * 那堆无关改动上面，合回去时才发现带了一车东西。默认应该是仓库的主干。
+ *
+ * 找不到 main / master（新仓库、或者主干另有其名）时才退回当前分支 ——
+ * 那种仓库里，当前分支是唯一比"猜一个不存在的名字"更好的答案。真正的答案
+ * 由用户在新增项目时自己选，这里只是个默认值。
+ */
 export async function detectBaseBranch(repoPath: string): Promise<string> {
+  for (const name of PREFERRED_BASE) {
+    if (await branchExists(repoPath, name).catch(() => false)) return name
+  }
   return (await currentBranch(repoPath).catch(() => null)) ?? 'main'
 }
 
-/** 当前分支名；detached HEAD 时返回 null。 */
+/**
+ * 仓库里的本地分支，最近提交的排在前面。
+ *
+ * 只列本地分支：worktree 只能从本地 ref 派生，列一堆 `origin/*` 只会让人
+ * 选中一个建不出来的东西。新仓库（还没有任何提交）返回空数组。
+ */
+export async function listBranches(repoPath: string): Promise<string[]> {
+  const out = await git(repoPath, ['for-each-ref', '--format=%(refname:short)', '--sort=-committerdate', 'refs/heads'])
+  return out.split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+}
+
+/**
+ * 当前分支名；detached HEAD 时返回 null。
+ *
+ * 用 `symbolic-ref` 而不是 `rev-parse --abbrev-ref`：还没有任何提交的仓库里
+ * 后者会直接失败，而此刻 HEAD 明明指着一个分支名 —— 那正是这种仓库唯一能
+ * 给出的基线。
+ */
 export async function currentBranch(path: string): Promise<string | null> {
-  const name = (await git(path, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
-  return name === 'HEAD' ? null : name
+  const { stdout, code } = await capture(['git', '-C', path, 'symbolic-ref', '--short', 'HEAD'], 60_000)
+  const name = stdout.trim()
+  return code !== 0 || name.length === 0 ? null : name
 }
 
 /**

@@ -65,7 +65,7 @@ export function Autopilot({ settings, busy, onChange }: Props): React.JSX.Elemen
           onChange={(next) => { onChange({ maxPerProvider: next }) }}
         />
         {/* 同一个仓库里同时跑几个。每个 Run 有自己的 worktree，所以调大是安全的；
-            默认压到 1 是为了少几次合并冲突，不是因为跑不了。 */}
+            比"每个执行器"那道压得低一点，是为了少几次合并冲突，不是因为跑不了。 */}
         <Limit
           label="limit / repo" hint={t('autopilot.repoLimitHint')} value={maxPerRepo} busy={busy}
           less={t('autopilot.repoLess')} more={t('autopilot.repoMore')}
@@ -92,7 +92,8 @@ function Limit({ label, hint, value, busy, less, more, onChange }: {
       <Step label={less} disabled={busy || value <= 1} onClick={() => { onChange(value - 1) }}>
         <Minus className="size-2.5" />
       </Step>
-      <span className="mono w-3 text-center text-[12px] text-ink">{value}</span>
+      {/* 两位数是常态（默认就是 50 / 20），所以留够两位的宽度，别让数字挤到按钮上。 */}
+      <span className="mono w-6 text-center text-[12px] text-ink">{value}</span>
       <Step label={more} disabled={busy} onClick={() => { onChange(value + 1) }}>
         <Plus className="size-2.5" />
       </Step>

@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CircleStop, ExternalLink, FlaskConical, Pencil, Play, ScrollText, X } from 'lucide-react'
+import { FlaskConical, X } from 'lucide-react'
 import { Button } from '@/components/ui/button.tsx'
-import { Input } from '@/components/ui/input.tsx'
 import { api, ApiError, subscribeTestEnv } from '@/api.ts'
 import { maybe, useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
-import type { Project, TestEnv } from '@/types.ts'
+import type { TestEnv } from '@/types.ts'
 
 /** 屏上最多留多少行日志。再往上翻的价值抵不过把一页 DOM 撑到几万个节点。 */
 const MAX_LINES = 400
@@ -21,13 +20,10 @@ export interface TestEnvHandle {
   env: TestEnv | null
   lines: Line[]
   busy: boolean
-  /** 项目上配的启动命令；空串表示还没配。 */
-  command: string
   /** 活着（还没退出）。界面上"停止"与"启动"就按它二选一。 */
   live: boolean
   start: () => void
   stop: () => void
-  saveCommand: (next: string) => void
 }
 
 /**
@@ -36,14 +32,14 @@ export interface TestEnvHandle {
  * **挂在 `RunPanel` 上而不是挂在日志那一栏上**：日志那栏是可以合上的，而这条
  * 订阅一断，服务端就开始收尸倒计时（见 host 侧 `TestEnvs.subscribe`）——
  * 合上一栏日志不该等于"我验完了"，关掉整张卡才是。
+ *
+ * 启动命令与配置文件**不在这儿配** —— 那是项目的事实，在项目设置里配一次，
+ * 所有卡都照着跑（见 `ProjectSettingsDialog`）。
  */
-export function useTestEnv({ taskId, project, enabled, onChanged, onError }: {
+export function useTestEnv({ taskId, enabled, onError }: {
   taskId: string
-  /** 启动命令记在项目上 —— 同一个仓库怎么跑起来是仓库的事实。 */
-  project: Project | null
   /** 这张卡该不该有测试环境（只有 Review 里的卡有）。false 时什么都不做。 */
   enabled: boolean
-  onChanged: () => void
   onError: (code: string, detail: string) => void
 }): TestEnvHandle {
   const [env, setEnv] = useState<TestEnv | null>(null)
@@ -105,174 +101,14 @@ export function useTestEnv({ taskId, project, enabled, onChanged, onError }: {
       .finally(() => { setBusy(false) })
   }, [taskId, fail])
 
-  const saveCommand = useCallback((next: string) => {
-    if (project === null) return
-    setBusy(true)
-    void api.updateProject(project.id, { testCommand: next.trim() })
-      .then(() => { onChanged() })
-      .catch(fail)
-      .finally(() => { setBusy(false) })
-  }, [project, onChanged, fail])
-
   return {
     env,
     lines,
     busy,
-    command: project?.testCommand ?? '',
     live: env !== null && env.status !== 'exited',
     start,
     stop,
-    saveCommand,
   }
-}
-
-/**
- * 一键试跑那一条：状态、链接、启停、以及配命令的入口。
- *
- * 日志不在这儿 —— 它在右边那一栏（{@link TestEnvLogPane}）。塞回这条里的话，
- * 卡片本身只剩一条缝：人要一边读需求一边看服务的输出，那是两样东西并排看的
- * 关系，不是叠在一起看的。
- */
-export function TestEnvBar({ handle, logOpen, onLogOpen }: {
-  handle: TestEnvHandle
-  logOpen: boolean
-  /** 开/合右边那一栏。启动的时候自动开 —— 人按下启动就是想看它起没起来。 */
-  onLogOpen: (open: boolean) => void
-}): React.JSX.Element {
-  const t = useT()
-  const { env, busy, command, live } = handle
-  // 正在编辑启动命令时的草稿；null 表示没在编辑。
-  const [draft, setDraft] = useState<string | null>(null)
-  const editing = draft !== null || (command.length === 0 && !live)
-
-  return (
-    <div className="border-b border-hairline px-4 py-3">
-      {/* 第一行只放"它现在怎么样"和按钮。链接、命令各占一行 —— 缩到半幅时
-          把它们挤在同一行，最先被折下去的恰恰是那条要点开的链接。 */}
-      <div className="flex items-center gap-2">
-        <FlaskConical className="size-3.5 flex-none text-sodium" />
-        {/* 让位的是标题，不是按钮：开着日志那一栏时卡片只有 430px 宽，
-            这一行放不下就该把"测试环境"四个字截掉，而不是把「启动测试环境」
-            那颗按钮挤出边界 —— 被裁掉一半的按钮既点不着也看不懂。 */}
-        <span className="chrome-label min-w-0 truncate">{t('testenv.title')}</span>
-        {env === null ? null : <StatusPill env={env} />}
-        <span className="flex-1" />
-
-        {env === null ? null : (
-          <button
-            type="button"
-            onClick={() => { onLogOpen(!logOpen) }}
-            title={logOpen ? t('testenv.hideLog') : t('testenv.showLog')}
-            aria-label={logOpen ? t('testenv.hideLog') : t('testenv.showLog')}
-            className={cn(
-              'flex size-6 flex-none items-center justify-center rounded-md border transition-colors',
-              logOpen
-                ? 'border-sodium/50 text-sodium'
-                : 'border-hairline text-ink-faint hover:border-sodium hover:text-sodium',
-            )}
-          >
-            <ScrollText className="size-3" />
-          </button>
-        )}
-
-        {live ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={handle.stop}
-            className="flex-none border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
-          >
-            <CircleStop />{t('testenv.stop')}
-          </Button>
-        ) : (
-          <>
-            {editing || command.length === 0 ? null : (
-              <button
-                type="button"
-                onClick={() => { setDraft(command) }}
-                title={t('testenv.edit')}
-                aria-label={t('testenv.edit')}
-                className="flex size-6 flex-none items-center justify-center rounded-md border border-hairline text-ink-faint transition-colors hover:border-sodium hover:text-sodium"
-              >
-                <Pencil className="size-3" />
-              </button>
-            )}
-            <Button
-              size="sm"
-              className="flex-none"
-              disabled={busy || command.length === 0}
-              onClick={() => { handle.start(); onLogOpen(true) }}
-            >
-              <Play />{t('testenv.start')}
-            </Button>
-          </>
-        )}
-      </div>
-
-      {/* 就绪了才给链接：没通就给出去的话，人点开看到的是连接被拒绝，
-          然后开始怀疑是不是自己哪儿配错了。 */}
-      {live && env?.url != null ? (
-        <a
-          href={env.url}
-          target="_blank"
-          rel="noreferrer"
-          className="mono mt-2 inline-flex items-center gap-1 text-[11px] text-sodium underline-offset-2 hover:underline"
-        >
-          {env.url}
-          <ExternalLink className="size-3 flex-none" />
-        </a>
-      ) : null}
-
-      {/* 命令是这个功能唯一要人配的东西。没配就把输入框直接摆在这儿 ——
-          让他为此跑一趟项目设置，是在验收的当口打断他。 */}
-      {editing ? (
-        <form
-          className="mt-2 flex items-center gap-2"
-          onSubmit={(event) => { event.preventDefault(); handle.saveCommand(draft ?? ''); setDraft(null) }}
-        >
-          <Input
-            autoFocus
-            value={draft ?? ''}
-            disabled={busy}
-            spellCheck={false}
-            autoComplete="off"
-            placeholder={t('testenv.commandPlaceholder')}
-            aria-label={t('testenv.commandLabel')}
-            onChange={(event) => { setDraft(event.target.value) }}
-            onKeyDown={(event) => {
-              // 回车自己提交。表单的隐式提交在个别环境里不触发（这个面板嵌在
-              // 弹窗里就是其中之一），而"敲回车存下这条命令"不该有环境依赖。
-              if (event.key !== 'Enter') return
-              event.preventDefault()
-              handle.saveCommand(draft ?? '')
-              setDraft(null)
-            }}
-            className="mono h-8 text-[11px]"
-          />
-          <Button type="submit" size="sm" disabled={busy}>{t('testenv.save')}</Button>
-          {command.length === 0 ? null : (
-            <button
-              type="button"
-              onClick={() => { setDraft(null) }}
-              title={t('testenv.cancelEdit')}
-              aria-label={t('testenv.cancelEdit')}
-              className="flex size-6 flex-none items-center justify-center rounded-md border border-hairline text-ink-faint transition-colors hover:border-sodium hover:text-sodium"
-            >
-              <X className="size-3" />
-            </button>
-          )}
-        </form>
-      ) : (
-        // 命令原文一直摆着。它跑在你的机器上、用你的凭据，看不见它才是问题。
-        <p className="mono mt-2 truncate text-[11px] text-ink-faint" title={command}>{command}</p>
-      )}
-
-      <p className="cjk-label mt-2">
-        {command.length === 0 && !editing ? t('testenv.needCommand') : t('testenv.commandHint')}
-      </p>
-    </div>
-  )
 }
 
 /**
@@ -343,21 +179,6 @@ export function TestEnvLogPane({ handle, onClose }: {
         </div>
       )}
     </div>
-  )
-}
-
-/** 状态灯。`running` 是活着但没监听端口 —— 那不是失败，措辞上要分得开。 */
-function StatusPill({ env }: { env: TestEnv }): React.JSX.Element {
-  const t = useT()
-  const tone = env.status === 'ready'
-    ? 'border-lamp-ok/40 text-lamp-ok'
-    : env.status === 'exited'
-      ? 'border-hairline text-ink-faint'
-      : 'border-lamp-review/40 text-lamp-review'
-  return (
-    <span className={cn('chrome-label flex-none rounded-full border px-2 py-0.5', tone)}>
-      {t(`testenv.status.${env.status}`)}
-    </span>
   )
 }
 

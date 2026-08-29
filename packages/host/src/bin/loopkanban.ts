@@ -15,6 +15,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
 import { AttachmentStore } from '../attachments/index.ts'
+import { DecisionHub } from '../decisions/index.ts'
 import { discoverBoard, serveMcp } from '../mcp/index.ts'
 import { createToken } from '../server/auth.ts'
 import { clearEndpoint, writeEndpoint } from '../server/endpoint.ts'
@@ -319,9 +320,16 @@ async function main(): Promise<void> {
 
   // ── 执行器 ───────────────────────────────────────────────
   const bus = new RunBus()
+  // 决策中枢：权限审批与向人提问都走它。runner 与 server 共用一个实例 ——
+  // 前者签发 gate 凭据，后者校验与落路由。
+  const decisions = new DecisionHub({ storage, bus })
+  // server 起来之前 gate 地址是未知的；派活只发生在请求处理里，那时它必有值。
+  const gateUrl: { value?: string } = {}
   const runner = new Runner({
     storage, bus, agents: pool,
     artifactsRoot: join(dir, 'runs'),
+    decisions,
+    gateUrl: () => gateUrl.value,
   })
   // 一键测试环境。进程只活在这个 host 里，不落库 —— 重启之后它们就不在了。
   const testEnvs = new TestEnvs({ storage })
@@ -377,12 +385,16 @@ async function main(): Promise<void> {
     attachments,
     scheduler,
     testEnvs,
+    decisions,
     bus,
     token,
     ...(webDev === undefined ? {} : { devServer: webDev }),
     ...(assets === undefined ? {} : { staticDir: assets }),
     ...(portArg === undefined ? {} : { port: Number.parseInt(portArg, 10) }),
   })
+  // 从此刻起派活的执行都能接上 gate —— 晚了没有任何关系，地址只在
+  // 启动子进程那一刻被读一次。
+  gateUrl.value = `http://127.0.0.1:${String(server.port)}`
 
   // 把地址记在数据目录里，`loopkanban mcp` 照着它找过来 —— 端口默认是随机的，
   // 而 MCP server 是另一个进程，没人给它传参。写不进去只是少了这条线索，

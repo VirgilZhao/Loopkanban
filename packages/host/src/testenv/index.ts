@@ -27,9 +27,10 @@
 
 import { createInterface } from 'node:readline'
 import { connect, createServer, type AddressInfo } from 'node:net'
-import { stat } from 'node:fs/promises'
+import { copyFile, mkdir, stat } from 'node:fs/promises'
+import { dirname, resolve as resolvePath, sep } from 'node:path'
 import type { TaskId } from '@loopkanban/core'
-import type { Storage } from '../storage/index.ts'
+import type { Project, Storage } from '../storage/index.ts'
 import { shellArgv } from '../server/shell.ts'
 import { spawnProcess, type ProcessHandle } from '../subprocess/index.ts'
 
@@ -290,6 +291,9 @@ export class TestEnvs {
     // 上一个已经退出的环境让位。留着它的日志没有意义 —— 人要看的是这一次。
     if (alive !== undefined) this.forget(taskId)
 
+    // 配置文件要赶在进程之前就位：命令跑起来第一件事可能就是读它。
+    if (project !== null) await this.copyConfigFiles(taskId, project, cwd)
+
     // 自家还活着的环境占着的号，一个都不要再发第二遍。
     const port = await freePort(new Set(
       [...this.envs.values()].filter((e) => e.view.status !== 'exited').map((e) => e.view.port),
@@ -373,6 +377,38 @@ export class TestEnvs {
   /** 这张卡当前的环境；没有则 null。 */
   view(taskId: TaskId): TestEnvView | null {
     return this.envs.get(String(taskId))?.view ?? null
+  }
+
+  /**
+   * 启动前把项目上点名的配置文件从主工作区拷进 worktree。
+   *
+   * 为什么源是主工作区：这些文件（`.env.local` 之类）多半被 gitignore，而
+   * worktree 是从 git 建出来的全新 checkout —— 它们天然不在，host 是唯一
+   * 有份拷贝的地方。
+   *
+   * 源里没有不算错：主工作区也可能还没建出那份配置，不该拿一个不存在的东西
+   * 拦住启动。拷**失败**则要留一句话进日志 —— 不然服务过一会儿以"读不到配置"
+   * 的方式倒下，人只能对着报错猜。
+   */
+  private async copyConfigFiles(taskId: TaskId, project: Project, cwd: string): Promise<void> {
+    const repoRoot = resolvePath(project.repoPath)
+    const worktreeRoot = resolvePath(cwd)
+    for (const relative of project.testEnvFiles ?? []) {
+      const from = resolvePath(repoRoot, relative)
+      const to = resolvePath(worktreeRoot, relative)
+      // 只许拷仓库里的文件、只许落进 worktree —— 路径逃出去的一律装没看见。
+      if (!from.startsWith(repoRoot + sep) || !to.startsWith(worktreeRoot + sep)) continue
+      try {
+        await mkdir(dirname(to), { recursive: true })
+        await copyFile(from, to)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') continue
+        this.emit(taskId, {
+          kind: 'log', stream: 'err',
+          text: `[loopkanban] 没拷成配置文件 ${relative}：${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
+    }
   }
 
   /**

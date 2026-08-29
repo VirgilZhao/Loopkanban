@@ -1,14 +1,14 @@
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import {
-  Archive, CircleAlert, FolderGit2, GitPullRequest, Link2, ListChecks, Lock, Paperclip,
-  PauseCircle, TriangleAlert,
+  Archive, CircleAlert, FolderGit2, GitPullRequest, Hand, Link2, ListChecks, Lock, Paperclip,
+  PauseCircle, RotateCw, TriangleAlert,
 } from 'lucide-react'
 import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { taskClockFrom } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { LiveLine, PullRequest, RunFailure, Skip, Task } from '@/types.ts'
+import type { LiveLine, PendingDecision, PullRequest, RunFailure, Skip, Task } from '@/types.ts'
 
 /** 把毫秒时长压成人能扫一眼的形式。 */
 function since(from: number, now: number): string {
@@ -37,11 +37,15 @@ interface Props {
   attachments?: number | undefined
   /** 这张卡开过的 PR，新的在前。一条都没有就不显示那枚标记。 */
   prs?: PullRequest[] | undefined
+  /** 跑过几轮。0 轮（还没派出去过）就不显示 —— 没发生的事不占卡面。 */
+  rounds?: number | undefined
+  /** 等人拍板的决策（权限审批 / 提问）。空就不显示。 */
+  pending?: PendingDecision[] | undefined
   onSelect: (task: Task) => void
 }
 
 export function TaskCard({
-  task, now, selected, live, skip, failure, projectName, attachments, prs, onSelect,
+  task, now, selected, live, skip, failure, projectName, attachments, prs, rounds, pending, onSelect,
 }: Props): React.JSX.Element {
   const t = useT()
   // Done 的卡最该一眼看出"是怎么进主干的"：合过几条 PR。还开着的那些
@@ -130,6 +134,15 @@ export function TaskCard({
         </p>
       ) : null}
 
+      {/* Agent 停下来等人了。这是整个看板最不该被错过的一行 —— 它不做任何事，
+          就在等一句回答；人不知道的话，这张卡就一直停着。 */}
+      {running && pending !== undefined && pending.length > 0 ? (
+        <p className="mt-1.5 flex items-center gap-1 ps-1.5 text-[11px] font-medium leading-snug text-sodium">
+          <Hand className="size-3 flex-none animate-pulse" />
+          {t('card.pendingDecision', { n: pending.length })}
+        </p>
+      ) : null}
+
       {/* 这一轮跑挂了。诊断挂在 title 上 —— 卡片是扫视用的，一行说清"它没跑成"
           就够，为什么挂的要去弹窗里读日志。 */}
       {failure === undefined ? null : (
@@ -161,8 +174,13 @@ export function TaskCard({
         <span className="mono flex items-center gap-1 text-[10px]">
           <ListChecks className="size-3" />{task.acceptance.length}
         </span>
+        {rounds === undefined || rounds === 0 ? null : (
+          <span className="mono flex items-center gap-1 text-[10px]" title={t('panel.roundsHint')}>
+            <RotateCw className="size-3" />{rounds}
+          </span>
+        )}
         {task.blockedBy.length > 0 ? (
-          <span className="mono flex items-center gap-1 text-[10px] text-lamp-review">
+          <span className="mono flex items-center gap-1 text-[10px] text-lamp-review" title={t('card.blocked')}>
             <Lock className="size-3" />{task.blockedBy.length}
           </span>
         ) : null}

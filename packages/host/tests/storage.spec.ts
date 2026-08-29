@@ -59,6 +59,7 @@ describe('任务往返', () => {
     const original = task({
       id: 't1',
       preferredProvider: 'codex',
+      permission: 'supervised',
       blockedBy: [asTaskId('dep')],
       acceptance: ['A', 'B'],
       lease: { runId: asRunId('r9'), provider: 'claude', acquiredAt: T0, expiresAt: T0 + 1000 },
@@ -73,6 +74,7 @@ describe('任务往返', () => {
     expect(loaded).not.toBeNull()
     expect(loaded?.lease).toBeUndefined()
     expect(loaded?.preferredProvider).toBeUndefined()
+    expect(loaded?.permission).toBeUndefined()
   })
 
   it('不存在的任务返回 null', () => {
@@ -400,6 +402,27 @@ describe('项目的启动命令', () => {
     store.updateProject(PROJECT, { name: '换个名字' })
     expect(store.getProject(PROJECT)?.testCommand).toBe('pnpm dev')
   })
+
+  it('要拷进 worktree 的配置文件存得住、读得回，空数组与 null 都是"没配"', () => {
+    expect(store.getProject(PROJECT)?.testEnvFiles).toBeUndefined()
+
+    store.updateProject(PROJECT, { testEnvFiles: ['.env.local', 'config/settings.yaml'] })
+    expect(store.getProject(PROJECT)?.testEnvFiles).toEqual(['.env.local', 'config/settings.yaml'])
+
+    // 全摘掉要能退回"没配"，界面上那行才不会一直挂着。
+    store.updateProject(PROJECT, { testEnvFiles: [] })
+    expect(store.getProject(PROJECT)?.testEnvFiles).toBeUndefined()
+
+    store.updateProject(PROJECT, { testEnvFiles: ['.env.local'] })
+    store.updateProject(PROJECT, { testEnvFiles: null })
+    expect(store.getProject(PROJECT)?.testEnvFiles).toBeUndefined()
+  })
+
+  it('改启动命令不会顺手把要拷的配置文件抹掉', () => {
+    store.updateProject(PROJECT, { testEnvFiles: ['.env.local'] })
+    store.updateProject(PROJECT, { testCommand: 'pnpm dev' })
+    expect(store.getProject(PROJECT)?.testEnvFiles).toEqual(['.env.local'])
+  })
 })
 
 describe('stats', () => {
@@ -708,5 +731,58 @@ describe('Pull Request', () => {
     store.commitTask({ ...current, column: 'ready', revision: current.revision + 1 })
     expect(store.deleteTask(asTaskId('t1'), current.revision + 1)).toBe(true)
     expect(store.listAllPullRequests()).toEqual([])
+  })
+})
+
+// ── 决策（权限审批 / 向人提问）────────────────────────────────
+
+describe('run_decisions', () => {
+  beforeEach(() => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    store.createRun(run())
+  })
+
+  const decision = (id: string) => ({
+    id, runId: asRunId('run-1'), kind: 'question' as const,
+    payload: { question: '用哪个方案？', choices: ['A', 'B'] },
+    status: 'pending' as const, createdAt: T0,
+  })
+
+  it('写入读回，负载与答复原样往返', () => {
+    store.createDecision(decision('dec-1'))
+    expect(store.getDecision('dec-1')).toMatchObject({
+      id: 'dec-1', runId: asRunId('run-1'), kind: 'question', status: 'pending', createdAt: T0,
+    })
+    expect(store.getDecision('dec-1')?.payload).toEqual({ question: '用哪个方案？', choices: ['A', 'B'] })
+    // resolvedAt 缺席读回来也是缺席，不是 null。
+    expect(store.getDecision('dec-1')?.resolvedAt).toBeUndefined()
+  })
+
+  it('resolveDecision 只从 pending 出发，终态不可改写', () => {
+    store.createDecision(decision('dec-1'))
+    expect(store.resolveDecision('dec-1', 'answered', { text: 'A' }, T0 + 5)).toBe(true)
+    expect(store.getDecision('dec-1')?.answer).toEqual({ text: 'A' })
+    // 再改一次：false，终态保持第一次的。
+    expect(store.resolveDecision('dec-1', 'timeout', null, T0 + 9)).toBe(false)
+    expect(store.getDecision('dec-1')?.status).toBe('answered')
+    expect(store.getDecision('dec-1')?.resolvedAt).toBe(T0 + 5)
+  })
+
+  it('listPendingDecisions 连带任务 id 一起给 —— 徽标一次读完', () => {
+    store.createTask(task({ id: 't2', column: 'running' }))
+    store.createRun(run({ id: asRunId('run-2'), taskId: asTaskId('t2') }))
+    store.createDecision(decision('dec-1'))
+    store.createDecision({ ...decision('dec-2'), runId: asRunId('run-2') })
+    store.resolveDecision('dec-2', 'answered', { text: 'x' }, T0 + 1)
+
+    const pending = store.listPendingDecisions()
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ id: 'dec-1', taskId: asTaskId('t1') })
+  })
+
+  it('删卡时决策跟着走 —— 外键链上的记录不留孤儿', () => {
+    store.createDecision(decision('dec-1'))
+    store.deleteTask(asTaskId('t1'), 1)
+    expect(store.getDecision('dec-1')).toBeNull()
   })
 })

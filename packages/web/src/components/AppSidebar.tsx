@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Archive, Bot, Eye, FolderGit2, LayoutGrid, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu.tsx'
 import { LanguageToggle } from '@/components/LanguageToggle.tsx'
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
@@ -32,8 +35,15 @@ interface Props {
   onNewProject: () => void
   onDeleteProject: (project: Project) => void
   onRenameProject: (project: Project, name: string) => void
-  onCreate: () => void
-  /** 概览里没有"当前项目"，新建任务无处可落，这时按钮是灰的。 */
+  /**
+   * 新建一张卡。概览里点按钮先弹项目清单选落点，选中的项目会作为参数传进来；
+   * 项目视角下直接开窗，不传参 —— 落在当前视角的项目里。
+   */
+  onCreate: (project?: Project) => void
+  /**
+   * 没处落卡时按钮才是灰的：概览里连一个项目都没有（这时连清单都弹不出来），
+   * 或项目视角下项目还没加载出来。
+   */
   canCreate: boolean
   archivedCount: number
   showArchived: boolean
@@ -86,15 +96,50 @@ export function AppSidebar({
           </SidebarMenuItem>
 
           <SidebarMenuItem>
-            <SidebarMenuButton
-              variant="primary"
-              onClick={onCreate}
-              disabled={!canCreate}
-              title={canCreate ? t('sidebar.newTask') : t('sidebar.newTaskBlocked')}
-            >
-              <Plus />
-              <span>{t('sidebar.newTask')}</span>
-            </SidebarMenuButton>
+            {view.kind === 'overview' ? (
+              // 概览没有"当前项目"可落卡 —— 先弹清单让人选，选完才建卡开窗。
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <SidebarMenuButton
+                    variant="primary"
+                    disabled={!canCreate}
+                    title={canCreate ? t('sidebar.newTask') : t('sidebar.newTaskBlocked')}
+                  >
+                    <Plus />
+                    <span>{t('sidebar.newTask')}</span>
+                  </SidebarMenuButton>
+                </DropdownMenuTrigger>
+                {/* 菜单与按钮同宽：看起来就是从按钮底下弹下来的，而不是凭空出现。 */}
+                <DropdownMenuContent
+                  side="bottom"
+                  align="start"
+                  className="min-w-(--radix-dropdown-menu-trigger-width)"
+                >
+                  <DropdownMenuLabel>{t('sidebar.newTaskPickProject')}</DropdownMenuLabel>
+                  {projects.map((project) => (
+                    <DropdownMenuItem
+                      key={project.id}
+                      title={project.repoPath}
+                      onSelect={() => { onCreate(project) }}
+                    >
+                      <FolderGit2 />
+                      <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              // 项目视角下落点已定，点了直接开窗。
+              <SidebarMenuButton
+                variant="primary"
+                onClick={() => { onCreate() }}
+                disabled={!canCreate}
+                title={canCreate ? t('sidebar.newTask') : t('sidebar.newTaskBlocked')}
+              >
+                <Plus />
+                <span>{t('sidebar.newTask')}</span>
+              </SidebarMenuButton>
+            )}
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>

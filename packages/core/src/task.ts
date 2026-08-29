@@ -12,6 +12,16 @@ import type { ProjectId, RunId, TaskId } from './ids.ts'
 export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
 export type Column = (typeof COLUMNS)[number]
 
+/**
+ * 一次执行的权限档位。各家 CLI 的说法不同，映射关系在宿主的 provider 里。
+ *
+ * `supervised` 是"人来定"：CLI 每次要权限时停下来问人，由人在界面上放行或
+ * 拒绝。它只有具备交互审批出口的 CLI 才真的支持（探测事实决定），派给不
+ * 支持的 CLI 时宿主会退回 `standard` 并明说 —— 悄悄降级等于骗人。
+ */
+export const PERMISSION_TIERS = ['strict', 'standard', 'supervised', 'yolo'] as const
+export type PermissionTier = (typeof PERMISSION_TIERS)[number]
+
 /** 一次执行的租约。持有它才有资格动这张卡的 running 状态。 */
 export interface Lease {
   readonly runId: RunId
@@ -50,6 +60,13 @@ export interface Task {
    * 只在指定了执行器时有意义：模型名是各家 CLI 自己的说法，不通用。
    */
   readonly model?: string | undefined
+  /**
+   * 这张卡的权限档位；`undefined` 等于 `standard`。
+   *
+   * 放在卡上而不是全局设置：给一个陌生仓库跑探索性任务时收着点，给自己
+   * 熟悉的仓库放开点，是同一张看板上并存的两种需求。
+   */
+  readonly permission?: PermissionTier | undefined
   readonly blockedBy: readonly TaskId[]
   /**
    * 关联的同项目卡片。**是引用，不是依赖** —— 它不拦调度、不影响流转，
@@ -352,6 +369,7 @@ export interface TaskEdit {
   readonly acceptance?: readonly string[]
   readonly preferredProvider?: string | undefined
   readonly model?: string | undefined
+  readonly permission?: PermissionTier | undefined
   readonly blockedBy?: readonly TaskId[]
   readonly relatedTo?: readonly TaskId[]
 }
@@ -382,18 +400,24 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
 
   const { edit } = request
   const acceptance = edit.acceptance?.map((item) => item.trim()).filter((item) => item.length > 0)
-  // 去重、去掉自指。「同项目」那一条要看别的卡，不在这一层的视野里 ——
-  // 由调用方在存下来之前把关（见 server 的 resolveRelated）。
+  // 去重、去掉自指。「同项目」与「是否成环」都要看别的卡，不在这一层的视野
+  // 里 —— 由调用方在存下来之前把关（见 server 的 resolveRelated / resolveBlocked）。
   const relatedTo = edit.relatedTo === undefined
     ? undefined
     : [...new Set(edit.relatedTo)].filter((id) => id !== task.id)
+  const blockedBy = edit.blockedBy === undefined
+    ? undefined
+    : [...new Set(edit.blockedBy)].filter((id) => id !== task.id)
 
   return succeed(bump(task, {
     ...(edit.description === undefined ? {} : { description: edit.description }),
     ...(acceptance === undefined ? {} : { acceptance }),
     ...('preferredProvider' in edit ? { preferredProvider: edit.preferredProvider } : {}),
     ...('model' in edit ? { model: edit.model } : {}),
-    ...(edit.blockedBy === undefined ? {} : { blockedBy: [...edit.blockedBy] }),
+    // permission 的合法值由调用方把关（要对着 PERMISSION_TIERS 拒绝），这一层
+    // 只负责"这次提没提到它"：缺席不动，显式 undefined 是清空（回到 standard）。
+    ...('permission' in edit ? { permission: edit.permission } : {}),
+    ...(blockedBy === undefined ? {} : { blockedBy }),
     ...(relatedTo === undefined ? {} : { relatedTo }),
   }, request.now))
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,15 +19,20 @@ let envs: TestEnvs
 const SERVER = "node -e \"require('http').createServer((_,r)=>r.end('ok'))"
   + ".listen(process.env.PORT,'127.0.0.1',()=>console.log('listening on '+process.env.PORT))\""
 
-function seed(testCommand?: string): void {
+function seed(
+  testCommand?: string,
+  options: { testEnvFiles?: readonly string[]; repoPath?: string } = {},
+): void {
+  const repoPath = options.repoPath ?? '/repo'
   store.createProject({
-    id: PROJECT, name: 'p', repoPath: '/repo', baseBranch: 'main',
+    id: PROJECT, name: 'p', repoPath, baseBranch: 'main',
     ...(testCommand === undefined ? {} : { testCommand }),
+    ...(options.testEnvFiles === undefined ? {} : { testEnvFiles: options.testEnvFiles }),
     createdAt: T0,
   })
   const task: Task = {
     id: TASK, projectId: PROJECT, revision: 1, column: 'review', position: 1,
-    description: '一张卡', acceptance: [], repoPath: '/repo', baseBranch: 'main',
+    description: '一张卡', acceptance: [], repoPath, baseBranch: 'main',
     blockedBy: [], relatedTo: [], createdAt: T0, updatedAt: T0,
   }
   store.createTask(task)
@@ -156,6 +161,40 @@ describe('TestEnvs.start', () => {
     if (!first.ok || !second.ok) return
     expect(second.env.port).toBe(first.env.port)
     expect(envs.size).toBe(1)
+  })
+
+  it('启动前把项目点名的配置文件从主工作区拷进 worktree；源缺失不拦启动', async () => {
+    // worktree 是 git 建的干净副本，gitignore 掉的本地配置只住在主工作区里。
+    const repo = await mkdtemp(join(tmpdir(), 'loopkanban-testenv-repo-'))
+    try {
+      await mkdir(join(repo, 'config'), { recursive: true })
+      await writeFile(join(repo, '.env.local'), 'TOKEN=local\n', 'utf8')
+      await writeFile(join(repo, 'config', 'settings.yaml'), 'a: 1\n', 'utf8')
+      seed('sleep 5', { repoPath: repo, testEnvFiles: ['.env.local', 'config/settings.yaml', 'ghost.env'] })
+      envs = new TestEnvs({ storage: store, readyTimeoutMs: 300 })
+      const started = await envs.start(TASK)
+      expect(started.ok).toBe(true)
+      expect(await readFile(join(worktree, '.env.local'), 'utf8')).toBe('TOKEN=local\n')
+      expect(await readFile(join(worktree, 'config', 'settings.yaml'), 'utf8')).toBe('a: 1\n')
+      expect(await readFile(join(worktree, 'ghost.env'), 'utf8').then(() => true, () => false)).toBe(false)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('点名的路径逃出仓库时不拷 —— ../ 与绝对路径都进不了 worktree', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'loopkanban-testenv-repo-'))
+    const outside = join(repo, '..', 'secret.env')
+    try {
+      await writeFile(outside, 'SECRET=1\n', 'utf8')
+      seed('sleep 5', { repoPath: repo, testEnvFiles: ['../secret.env', '/etc/hostname'] })
+      envs = new TestEnvs({ storage: store, readyTimeoutMs: 300 })
+      expect((await envs.start(TASK)).ok).toBe(true)
+      expect(await readFile(join(worktree, 'secret.env'), 'utf8').then(() => true, () => false)).toBe(false)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+      await rm(outside, { force: true })
+    }
   })
 })
 

@@ -1,3 +1,4 @@
+import { asRunId } from '@loopkanban/core'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,8 @@ const CAPS: AgentCaps = {
   canResume: true,
   canPickModel: true, models: [],
   permissionTiers: ['standard', 'yolo'],
+  canAskUser: false,
+  canPromptPermission: false,
   help: parseHelp(fixture('opencode-run-help.txt')),
 }
 
@@ -251,5 +254,23 @@ describe('模型自动获取', () => {
     ].join('\n'))
     // 去重、去空白、只留 provider/model 那种行。
     expect(models).toEqual(['anthropic/claude-sonnet-4-5', 'openai/gpt-5'])
+  })
+})
+
+const GATE = {
+  serverName: 'loopkanban', baseUrl: 'http://127.0.0.1:9', runId: asRunId('run-g'),
+  token: 'run-token', shimPath: '/x/gate-shim.mjs',
+  mcpConfigPath: '/x/artifacts/gate/mcp.json', envConfigPath: '/x/artifacts/gate/opencode.json',
+}
+
+describe('opencodeCliProvider gate', () => {
+  it('经 OPENCODE_CONFIG 把 gate 配置指给 CLI —— 合并语义，不顶掉用户配置', () => {
+    const spec = opencodeCliProvider.buildStart({ ...RUN, gate: GATE }, CAPS)
+    expect(spec.env?.['OPENCODE_CONFIG']).toBe(GATE.envConfigPath)
+  })
+
+  it('没接 gate 时不带 OPENCODE_CONFIG', () => {
+    const spec = opencodeCliProvider.buildStart(RUN, CAPS)
+    expect(spec.env?.['OPENCODE_CONFIG']).toBeUndefined()
   })
 })

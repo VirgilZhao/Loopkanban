@@ -4,23 +4,24 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.tsx'
 import {
-  Archive, ArchiveRestore, Bot, Check, CircleAlert, ExternalLink, GitBranch, GitMerge,
-  GitPullRequest, Paperclip, Play, RefreshCw, Send, Square, Trash2, TriangleAlert, Upload, User, X,
+  Archive, ArchiveRestore, Bot, Check, CircleAlert, CircleStop, ExternalLink, FlaskConical,
+  GitBranch, GitMerge, GitPullRequest, Hand, KeyRound, Paperclip, Play, RefreshCw, Send,
+  Square, Trash2, TriangleAlert, Upload, User, X,
 } from 'lucide-react'
 import { api, ApiError, subscribeRun, type NextRound } from '@/api.ts'
 import { AttachmentChip } from '@/components/Attachments.tsx'
 import { DiffView } from '@/components/DiffView.tsx'
 import { FilePreviewPane } from '@/components/FilePreview.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
-import { TestEnvBar, TestEnvLogPane, useTestEnv } from '@/components/TestEnvPanel.tsx'
+import { TestEnvLogPane, useTestEnv } from '@/components/TestEnvPanel.tsx'
 import { summarize } from '@/lib/events.ts'
-import { explain, maybe, useT } from '@/lib/i18n.tsx'
+import { explain, useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
 import { modelOptions, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type {
-  Agent, Attachment, DiffView as Diff, PrCapability, Project, PullRequest, Run, StreamEvent, Task,
-  TaskComment, TaskEdit,
+  Agent, Attachment, DiffView as Diff, PrCapability, Project, PullRequest, Run, RunDecision,
+  StreamEvent, Task, TaskComment, TaskEdit,
 } from '@/types.ts'
 
 /** 事件类型 → 展示样式。未知类型一律走 raw 的样子，不丢弃。 */
@@ -31,6 +32,8 @@ const EVENT_STYLE: Record<string, { label: string; tone: string }> = {
   tool:     { label: 'TOOL',     tone: 'text-sodium-deep' },
   usage:    { label: 'USAGE',    tone: 'text-ink-faint' },
   finished: { label: 'FINISH',   tone: 'text-lamp-ok' },
+  decision: { label: 'ASK',      tone: 'text-sodium' },
+  decision_resolved: { label: 'ASK', tone: 'text-sodium' },
   raw:      { label: 'RAW',      tone: 'text-ink-faint/60' },
 }
 
@@ -61,6 +64,9 @@ export function RunPanel({
   const [diff, setDiff] = useState<Diff | null>(null)
   const [comments, setComments] = useState<TaskComment[]>([])
   const [events, setEvents] = useState<StreamEvent[]>([])
+  // 这一次执行里等人拍板的决策。面板打开时拉一遍，之后靠事件流增量跟上 ——
+  // Agent 停下来等审批或等回答时，这张卡要立刻把话递到人眼前。
+  const [decisions, setDecisions] = useState<RunDecision[]>([])
   // 这张卡开过的 PR，以及这个仓库到底能不能开 PR。后者决定"通过并合并"
   // 那颗按钮的行为 —— 开不了就退回本地合并，并把原因写在按钮下面。
   const [prs, setPrs] = useState<PullRequest[]>([])
@@ -74,6 +80,18 @@ export function RunPanel({
   const [logOpen, setLogOpen] = useState(false)
   // 删除不可撤销，所以要点两次：第一次只是把按钮"上膛"。
   const [confirmDelete, setConfirmDelete] = useState(false)
+  /**
+   * 验收与归档的二次确认。这些是**对这张卡的最后一句话**：按下就回看板、
+   * worktree 就没了。第一下只把按钮点亮成"确认 ×"，再点一下才真的执行；
+   * 点别的按钮等于改了主意，焦点跟着换过去。
+   */
+  const [armed, setArmed] = useState<'merge' | 'accept' | 'discard' | 'archive' | null>(null)
+  /** 两段式按钮共用的点击逻辑：没上膛先上膛，上了膛才放行。 */
+  const requireConfirm = (kind: 'merge' | 'accept' | 'discard' | 'archive', go: () => void): void => {
+    if (armed !== kind) { setArmed(kind); return }
+    setArmed(null)
+    go()
+  }
   const [tab, setTab] = useState<Tab>('spec')
   /*
    * 这张卡上出的岔子，就摆在这张卡上。
@@ -116,6 +134,10 @@ export function RunPanel({
   const stale = prs.some((pr) => pr.state === 'open' && pr.mergeable === 'conflicting')
   /** 干活的那条分支。没跑过的卡还没有分支可言。 */
   const branch = latest?.branch
+  /** 还在等人的决策。只有这一轮真的在跑时才弹卡 —— 旧轮次里的都是历史。 */
+  const pendingDecisions = latest?.status === 'running'
+    ? decisions.filter((decision) => decision.status === 'pending')
+    : []
   /** 此刻真正摆出来的分页。 */
   const visible = TABS.filter((value) => value !== 'talk' || discussed)
 
@@ -150,8 +172,20 @@ export function RunPanel({
 
   useEffect(() => {
     if (latest === undefined) return undefined
+    // 换了一次执行就换一批决策：先清掉旧的，别让上一轮的提问挂在这一轮上。
+    setDecisions([])
+    void api.decisions(latest.id)
+      .then(({ decisions: loaded }) => { setDecisions(loaded) })
+      .catch(() => {})
     return subscribeRun(latest.id, (event) => {
       setEvents((prev) => (prev.some((e) => e.seq === event.seq) ? prev : [...prev, event]))
+      // 决策的生命周期事件直接触发一次重拉：一条列表本来就没几条，
+      // 重拉比在两处各自维护增删逻辑不容易错。
+      if (event.kind === 'decision' || event.kind === 'decision_resolved') {
+        void api.decisions(latest.id)
+          .then(({ decisions: loaded }) => { setDecisions(loaded) })
+          .catch(() => {})
+      }
     })
   }, [latest])
 
@@ -189,7 +223,7 @@ export function RunPanel({
   // 预览与分页同理：上一张卡的文档不该盖在这一张上面，新卡也该从规格看起。
   // 那条错误也一样：它说的是上一张卡上的事。
   useEffect(() => {
-    setConfirmDelete(false); setPreview(null); setTab('spec'); setFailure(null)
+    setConfirmDelete(false); setPreview(null); setTab('spec'); setFailure(null); setArmed(null)
   }, [task.id])
 
   // 上膛也不该一直挂着：手滑点开之后忘了，下一次随手一点就把卡删了。
@@ -198,6 +232,13 @@ export function RunPanel({
     const timer = setTimeout(() => { setConfirmDelete(false) }, 4_000)
     return () => { clearTimeout(timer) }
   }, [confirmDelete])
+
+  // 验收与归档的二次确认同删除一个道理：第一下只是点亮，忘了的话几秒后自己退膛。
+  useEffect(() => {
+    if (armed === null) return undefined
+    const timer = setTimeout(() => { setArmed(null) }, 4_000)
+    return () => { clearTimeout(timer) }
+  }, [armed])
 
   // 新事件到达时贴底，除非用户正在往回翻。
   useEffect(() => {
@@ -231,12 +272,11 @@ export function RunPanel({
   /*
    * 测试环境挂在这一层而不是挂在日志那一栏上：那一栏可以合上，而日志那条
    * SSE 一断，服务端就开始收环境。合上一栏日志不该等于"我验完了"。
+   * 启动命令与配置文件在项目设置里配 —— 这里只管起停。
    */
   const testEnv = useTestEnv({
     taskId: task.id,
-    project,
     enabled: !archived && task.column === 'review',
-    onChanged,
     onError: reportCode,
   })
   const side = preview !== null ? 'preview' : logOpen ? 'testenv' : null
@@ -389,7 +429,7 @@ export function RunPanel({
         showCloseButton={false}
         onEscapeKeyDown={(event) => { if (side !== null) event.preventDefault() }}
         className={cn(
-          'flex h-[82vh] max-h-[820px] gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg',
+          'flex h-[72vh] gap-0 overflow-hidden rounded-xl border-hairline bg-panel p-0 shadow-lg',
           // 预览是在右边**新开一栏**，不是盖在卡上面：文档和需求本来就要对着
           // 看 —— 盖上去的话，读到一半想核对验收标准还得先把文档关掉。
           // 任务那栏缩到正常的一半，弹窗整体让出地方给文档。
@@ -404,66 +444,143 @@ export function RunPanel({
           'flex min-w-0 flex-col',
           side === null ? 'flex-1' : 'w-[430px] max-w-[45%] flex-none',
         )}>
-          {/* 缩到半幅时按钮挤不下就整组换行 —— 标题给一个下限，不然
-              `min-w-0` 会让它一路被压成一条窄缝，而按钮仍旧赖在同一行。 */}
-          <header className="flex flex-wrap items-start gap-2 border-b border-hairline px-4 py-3">
-            <div className="min-w-[240px] flex-1">
-              <div className="flex items-center gap-2">
-                <span className="tag">{task.id}</span>
-                <span className="lamp" data-state={archived ? 'idle' : task.column} />
-                <span className="chrome-label !text-[9px]">{task.column}</span>
-                {rounds > 0 ? (
-                  <span
-                    className="mono text-[10px] text-sodium-deep"
-                    title={t('panel.roundsHint')}
-                  >
-                    {t('panel.rounds', { n: rounds })}
+          {/* 标题文字与动作按钮分成两行：文字独占一行才读得开，按钮缩成
+              一排小的贴在下面 —— 挤在标题旁边的话，长标题和长分支名都会
+              被压成一列窄条。 */}
+          <header className="border-b border-hairline px-4 py-3">
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="tag">{task.id}</span>
+                  <span className="lamp" data-state={archived ? 'idle' : task.column} />
+                  <span className="chrome-label !text-[9px]">{task.column}</span>
+                  {rounds > 0 ? (
+                    <span
+                      className="mono text-[10px] text-sodium-deep"
+                      title={t('panel.roundsHint')}
+                    >
+                      {t('panel.rounds', { n: rounds })}
+                    </span>
+                  ) : null}
+                </div>
+                <DialogTitle asChild>
+                  <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug text-ink">
+                    {taskTitle(task)}
+                  </h2>
+                </DialogTitle>
+                {/* 基线之外还要标出**自己那条分支** —— 「我的改动到底在哪儿」
+                    是打开这张卡最先想知道的事，而它此前只能去 Diff 页里翻。 */}
+                <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-faint">
+                  <span>{project?.name ?? t('panel.unknownProject')}</span>
+                  <span className="inline-flex items-center gap-1">
+                    {t('panel.baseLabel')} <span className="mono">{task.baseBranch}</span>
                   </span>
-                ) : null}
+                  {branch === undefined ? null : (
+                    <span className="inline-flex min-w-0 items-center gap-1 text-sodium-deep" title={t('panel.branchHint')}>
+                      <GitBranch className="size-3 flex-none" />
+                      <span className="mono min-w-0 truncate">{branch}</span>
+                    </span>
+                  )}
+                </DialogDescription>
               </div>
-              <DialogTitle asChild>
-                <h2 className="mt-2 line-clamp-2 text-[15px] font-semibold leading-snug text-ink">
-                  {taskTitle(task)}
-                </h2>
-              </DialogTitle>
-              {/* 基线之外还要标出**自己那条分支** —— 「我的改动到底在哪儿」
-                  是打开这张卡最先想知道的事，而它此前只能去 Diff 页里翻。
-                  没跑过的卡还没有分支，那时只说基线。 */}
-              <DialogDescription className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-faint">
-                <span>{project?.name ?? t('panel.unknownProject')}</span>
-                <span className="inline-flex items-center gap-1">
-                  {t('panel.baseLabel')} <span className="mono">{task.baseBranch}</span>
-                </span>
-                {branch === undefined ? null : (
-                  <span className="inline-flex min-w-0 items-center gap-1 text-sodium-deep" title={t('panel.branchHint')}>
-                    <GitBranch className="size-3 flex-none" />
-                    <span className="mono min-w-0 truncate">{branch}</span>
-                  </span>
-                )}
-              </DialogDescription>
+              <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={t('panel.close')} title={t('panel.closeHint')}>
+                <X />
+              </Button>
             </div>
-            {/* 三个按钮当一整组换行 —— 拆开换会变成「归档」留在标题那行、
-                「删除」孤零零掉到下一行，看着像排版出了岔子。 */}
-            <div className="ms-auto flex items-center gap-2">
+
+            {/* 动作按钮组：测试环境的起停、验收的三句话、归档，全在这一行。
+                拆到弹窗中段的话，人要上下扫两遍才凑得齐"我能对这张卡做什么"。
+                统一 xs 规格 —— 它们是高频小动作，不该在标题旁边抢地盘。 */}
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+              {/* 测试环境只留这一颗：没起就是"启动"，起着就是"停止"。
+                  配置在项目设置里 —— 这里不配命令，只管跑起来看日志。 */}
+              {!archived && task.column === 'review' ? (
+                testEnv.live ? (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    disabled={busy || testEnv.busy}
+                    onClick={testEnv.stop}
+                    className="border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
+                  >
+                    <CircleStop />{t('testenv.stop')}
+                  </Button>
+                ) : (
+                  <Button
+                    size="xs"
+                    disabled={busy || testEnv.busy}
+                    onClick={() => { testEnv.start(); setLogOpen(true) }}
+                  >
+                    <FlaskConical />{t('testenv.start')}
+                  </Button>
+                )
+              ) : null}
+              {/* 验收：通过并合并 / 通过 / 废弃。只有 review 列的卡看得到。
+                  要它再改一版，去讨论里留言。三颗都要二次确认 —— 判下去
+                  worktree 就没了，手滑一下的代价不该由用户来担。 */}
+              {!archived && task.column === 'review' ? (
+                <>
+                  <Action
+                    icon={capability?.ready === true ? <GitPullRequest /> : <GitMerge />}
+                    label={armed === 'merge' ? t('panel.acceptMergeArmed') : t('panel.acceptMerge')}
+                    tone="primary" armed={armed === 'merge'}
+                    title={armed === 'merge' ? t('panel.armedHint') : undefined}
+                    // 能力还没问回来时先按不动：这颗按钮的两种行为差得很远
+                    // （开 PR / 动你的主工作区），抢在答案之前点下去等于抽签。
+                    busy={busy || capability === null}
+                    onClick={() => requireConfirm('merge', () => {
+                      if (capability?.ready === true) { openPr(); return }
+                      void act(() => api.accept(task.id, true)).then(closeIfOk)
+                    })}
+                  />
+                  <Action
+                    icon={<Check />}
+                    label={armed === 'accept' ? t('panel.acceptArmed') : t('panel.accept')}
+                    tone="ok" armed={armed === 'accept'}
+                    title={armed === 'accept' ? t('panel.armedHint') : undefined}
+                    busy={busy}
+                    onClick={() => requireConfirm('accept', () => {
+                      void act(() => api.accept(task.id, false)).then(closeIfOk)
+                    })}
+                  />
+                  <Action
+                    icon={<Trash2 />}
+                    label={armed === 'discard' ? t('panel.discardArmed') : t('panel.discard')}
+                    tone="fail" armed={armed === 'discard'}
+                    title={armed === 'discard' ? t('panel.armedHint') : undefined}
+                    busy={busy}
+                    onClick={() => requireConfirm('discard', () => {
+                      void act(() => api.discard(task.id)).then(closeIfOk)
+                    })}
+                  />
+                </>
+              ) : null}
               <Button
                 variant="outline"
-                size="sm"
+                size="xs"
                 disabled={busy || task.column === 'running'}
-                {...(task.column === 'running' ? { title: t('panel.archiveBlocked') } : {})}
-                onClick={() => {
+                title={armed === 'archive'
+                  ? t('panel.armedHint')
+                  : (task.column === 'running' ? t('panel.archiveBlocked') : undefined)}
+                onClick={() => requireConfirm('archive', () => {
                   void act(() => (archived
                     ? api.unarchive(task.id, task.revision)
                     : api.archive(task.id, task.revision)))
-                }}
+                })}
+                className={cn(
+                  armed === 'archive' && 'border-sodium bg-sodium/15 text-sodium hover:bg-sodium/20 hover:text-sodium',
+                )}
               >
                 {archived
                   ? <><ArchiveRestore />{t('panel.unarchive')}</>
-                  : <><Archive />{t('panel.archive')}</>}
+                  : armed === 'archive'
+                    ? <><Archive />{t('panel.archiveArmed')}</>
+                    : <><Archive />{t('panel.archive')}</>}
               </Button>
               {deletable ? (
                 <Button
                   variant="outline"
-                  size="sm"
+                  size="xs"
                   disabled={busy}
                   title={confirmDelete ? t('panel.deleteArmed') : t('panel.deleteHint')}
                   onClick={() => {
@@ -478,9 +595,6 @@ export function RunPanel({
                   <Trash2 />{confirmDelete ? t('panel.deleteConfirm') : t('panel.delete')}
                 </Button>
               ) : null}
-              <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={t('panel.close')} title={t('panel.closeHint')}>
-                <X />
-              </Button>
             </div>
           </header>
 
@@ -588,72 +702,21 @@ export function RunPanel({
             </div>
           ) : null}
 
-          {/* 一键试跑：在这张卡自己的 worktree 里把改动跑起来。
-              放在验收动作**上面** —— 先验，再判。反过来的话，按钮的顺序是在
-              暗示可以先盖章再验货。 */}
-          {!archived && task.column === 'review' ? (
-            <TestEnvBar handle={testEnv} logOpen={logOpen} onLogOpen={setLogOpen} />
-          ) : null}
-
-          {/* 验收：通过 / 废弃。要它再改一版，去讨论里留言。只有 review 列的卡看得到。 */}
-          {!archived && task.column === 'review' ? (
+          {/* 上一次执行失败的话，先把失败摆在明处 —— 验收按钮在头顶上，
+              "这次是成是败"的理由也得跟着到头顶去，不然"通过"会摆在一堆
+              没跑完的活旁边。 */}
+          {!archived && task.column === 'review' && latest !== undefined && latest.status !== 'completed' ? (
             <div className="border-b border-hairline px-4 py-3">
-              {/* 失败的执行也停在这一列，所以必须一眼看出这次是成是败 ——
-                  否则"通过"按钮会摆在一堆没跑完的活旁边。 */}
-              {latest !== undefined && latest.status !== 'completed' ? (
-                <div className="mb-3 flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-3 py-2">
-                  <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
-                  <p className="min-w-0 text-xs leading-relaxed text-lamp-fail">
-                    {latest.status === 'aborted' ? t('panel.runAborted') : t('panel.runFailed')}
-                    {latest.diagnostic === undefined ? null : (
-                      <span className="mono block break-words">{latest.diagnostic}</span>
-                    )}
-                    {t('panel.runFailedHint')}
-                  </p>
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap items-center gap-2">
-                {/* 验收动作都是"对这张卡的最后一句话"：判完就回看板。
-                    失败留在原地，让人看见错误再决定（同保存、同留言）。 */}
-                {/* 主动作：能开 PR 就开 PR（改动推上去、开一条、冲突提前引爆），
-                    开不了才退回本地合并。两种行为都写在下面那句说明里 ——
-                    悄悄换一种做法，是这颗按钮最不该给的惊喜。 */}
-                <Action
-                  icon={capability?.ready === true ? <GitPullRequest /> : <GitMerge />}
-                  label={t('panel.acceptMerge')} tone="primary"
-                  // 能力还没问回来时先按不动：这颗按钮的两种行为差得很远
-                  // （开 PR / 动你的主工作区），抢在答案之前点下去等于抽签。
-                  busy={busy || capability === null}
-                  onClick={capability?.ready === true
-                    ? openPr
-                    : () => { void act(() => api.accept(task.id, true)).then(closeIfOk) }}
-                />
-                <Action
-                  icon={<Check />} label={t('panel.accept')} tone="ok" busy={busy}
-                  onClick={() => { void act(() => api.accept(task.id, false)).then(closeIfOk) }}
-                />
-                <span className="flex-1" />
-                <Action
-                  icon={<Trash2 />} label={t('panel.discard')} tone="fail" busy={busy}
-                  onClick={() => { void act(() => api.discard(task.id)).then(closeIfOk) }}
-                />
-              </div>
-
-              {capability === null ? null : (
-                <p className="mt-2 text-xs leading-relaxed text-ink-faint">
-                  {capability.ready
-                    ? t('pr.willOpen', { repo: capability.repo ?? '', base: task.baseBranch })
-                    // 原因按码本地化 —— 服务端那句是中文的，直接贴给英文界面
-                    // 就成了半句中文。认不出的码才退回它。
-                    : t('pr.fallback', {
-                        detail: maybe(t, `err.${capability.reason ?? ''}`, capability.detail ?? ''),
-                      })}
+              <div className="flex items-start gap-2 rounded-md border border-lamp-fail/40 bg-lamp-fail/[0.06] px-3 py-2">
+                <TriangleAlert className="mt-[3px] size-3.5 flex-none text-lamp-fail" />
+                <p className="min-w-0 text-xs leading-relaxed text-lamp-fail">
+                  {latest.status === 'aborted' ? t('panel.runAborted') : t('panel.runFailed')}
+                  {latest.diagnostic === undefined ? null : (
+                    <span className="mono block break-words">{latest.diagnostic}</span>
+                  )}
+                  {t('panel.runFailedHint')}
                 </p>
-              )}
-              <p className="mt-1 text-xs leading-relaxed text-ink-faint">
-                {t('panel.acceptNote', { branch: latest?.branch ?? '' })}
-              </p>
+              </div>
             </div>
           ) : null}
 
@@ -725,6 +788,12 @@ export function RunPanel({
             </div>
           ) : null}
 
+          {/* 等人拍板的决策摆在所有分页之上 —— 它比任何一页的内容都急：
+              Agent 此刻什么都没做，就在等这一眼。 */}
+          {pendingDecisions.length === 0 ? null : (
+            <DecisionBar runId={latest?.id ?? ''} decisions={pendingDecisions} onReport={report} />
+          )}
+
           {/* 顺序即翻卡的顺序：先看要做什么，再看做成了什么，最后才是过程。
               讨论 tab 会随线程有无进出，选中的那个可能中途消失 —— 受控着来，
               并在它不在了的时候退回规格；否则面板底下就是一片空白。 */}
@@ -746,10 +815,9 @@ export function RunPanel({
               </TabsList>
             </div>
 
-            <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
+              <TabsContent value="spec" className="mt-0 flex min-h-0 flex-1 flex-col">
               <TaskEditor
                 task={task}
-                project={project}
                 siblings={siblings}
                 agents={agents}
                 busy={busy}
@@ -883,23 +951,158 @@ export function RunPanel({
   )
 }
 
-function Action({ icon, label, onClick, busy, tone }: {
-  icon: React.ReactNode
+/**
+ * 等人拍板的决策卡：Agent 的权限请求与提问都摆在这里。
+ *
+ * 放在所有分页之上，是因为它的时间敏感性压倒一切 —— Agent 此刻什么都没
+ * 干，就在等这一眼。权限卡把要跑的工具与参数原样摆出来（人拍板看的是
+ * 事实，不是转述）；提问卡给候选按钮加一个自由输入框 —— 候选是模型猜的
+ * 答案，不是人只能选的选项。
+ */
+function DecisionBar({ runId, decisions, onReport }: {
+  runId: string
+  decisions: RunDecision[]
+  onReport: (error: unknown) => void
+}): React.JSX.Element {
+  const t = useT()
+  /** 正在提交的是哪条。同一时刻每条都该可点，但提交中的那条要按住。 */
+  const [resolving, setResolving] = useState<string | null>(null)
+  /** 提问的草稿按决策 id 分开存 —— 多条提问并存时互不串台。 */
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+
+  const send = (id: string, input: { decision?: 'allow' | 'deny'; scope?: 'once' | 'run'; answer?: string }): void => {
+    setResolving(id)
+    void api.resolveDecision(runId, id, input)
+      .catch(onReport)
+      .finally(() => { setResolving(null) })
+  }
+
+  return (
+    <div className="flex-none divide-y divide-hairline border-b border-hairline bg-sodium/[0.04]">
+      {decisions.map((decision) => {
+        if (decision.kind === 'permission') {
+          const tool = String(decision.payload['tool'] ?? '?')
+          const input = decision.payload['input']
+          return (
+            <div key={decision.id} className="px-4 py-3">
+              <div className="flex items-center gap-2">
+                <KeyRound className="size-3.5 flex-none text-sodium" />
+                <span className="chrome-label">{t('decision.permissionTag')}</span>
+                <span className="mono min-w-0 truncate text-xs font-medium text-ink" title={tool}>{tool}</span>
+                <span className="flex-1" />
+                <span className="mono flex-none text-[10px] text-ink-faint">{t('decision.timeoutHint')}</span>
+              </div>
+              {input === undefined || (typeof input === 'object' && Object.keys(input as object).length === 0) ? null : (
+                <pre className="mono mt-2 max-h-32 overflow-y-auto rounded-md border border-hairline bg-sunken/60 p-2 text-[11px] leading-relaxed text-ink-faint">
+                  {JSON.stringify(input, null, 2)}
+                </pre>
+              )}
+              <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                <Button
+                  size="xs"
+                  disabled={resolving !== null}
+                  onClick={() => { send(decision.id, { decision: 'allow' }) }}
+                >
+                  <Check />{t('decision.allow')}
+                </Button>
+                <Button
+                  variant="outline" size="xs"
+                  disabled={resolving !== null}
+                  title={t('decision.allowRunHint')}
+                  onClick={() => { send(decision.id, { decision: 'allow', scope: 'run' }) }}
+                >
+                  {t('decision.allowRun')}
+                </Button>
+                <Button
+                  variant="outline" size="xs"
+                  disabled={resolving !== null}
+                  className="border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail"
+                  onClick={() => { send(decision.id, { decision: 'deny' }) }}
+                >
+                  <X />{t('decision.deny')}
+                </Button>
+              </div>
+            </div>
+          )
+        }
+
+        const question = String(decision.payload['question'] ?? '')
+        const choices = Array.isArray(decision.payload['choices'])
+          ? (decision.payload['choices'] as unknown[]).filter((c): c is string => typeof c === 'string')
+          : []
+        const draft = drafts[decision.id] ?? ''
+        return (
+          <div key={decision.id} className="px-4 py-3">
+            <div className="flex items-center gap-2">
+              <Hand className="size-3.5 flex-none text-sodium" />
+              <span className="chrome-label">{t('decision.questionTag')}</span>
+              <span className="flex-1" />
+              <span className="mono flex-none text-[10px] text-ink-faint">{t('decision.timeoutHint')}</span>
+            </div>
+            <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{question}</p>
+            {choices.length === 0 ? null : (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {choices.map((choice) => (
+                  <Button
+                    key={choice}
+                    variant="outline" size="xs"
+                    disabled={resolving !== null}
+                    onClick={() => { send(decision.id, { answer: choice }) }}
+                  >
+                    {choice}
+                  </Button>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 flex items-end gap-2">
+              <Textarea
+                value={draft}
+                disabled={resolving !== null}
+                placeholder={t('decision.answerPlaceholder')}
+                onChange={(e) => { setDrafts((prev) => ({ ...prev, [decision.id]: e.target.value })) }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && draft.trim().length > 0) {
+                    send(decision.id, { answer: draft.trim() })
+                  }
+                }}
+                className="field-sizing-fixed h-16 text-[13px]"
+              />
+              <Button
+                size="xs"
+                disabled={resolving !== null || draft.trim().length === 0}
+                onClick={() => { send(decision.id, { answer: draft.trim() }) }}
+              >
+                <Send />{t('decision.answer')}
+              </Button>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function Action({ icon, label, onClick, busy, tone, armed, title }: {  icon: React.ReactNode
   label: string
   onClick: () => void
   busy: boolean
   /** primary 是这一屏的主动作，实心；ok / fail 只借个色，形制仍是描边。 */
   tone?: 'primary' | 'ok' | 'fail'
+  /** 二次确认点亮态：换上琥珀色，提醒"下一手就来真的了"。 */
+  armed?: boolean
+  title?: string
 }): React.JSX.Element {
   return (
     <Button
-      size="sm"
-      variant={tone === 'primary' ? 'default' : 'outline'}
+      size="xs"
+      variant={tone === 'primary' && armed !== true ? 'default' : 'outline'}
       disabled={busy}
+      title={title}
       onClick={onClick}
       className={cn(
         tone === 'ok' && 'border-lamp-ok/40 text-lamp-ok hover:bg-lamp-ok/10 hover:text-lamp-ok',
         tone === 'fail' && 'border-lamp-fail/40 text-lamp-fail hover:bg-lamp-fail/10 hover:text-lamp-fail',
+        armed === true && 'border-sodium bg-sodium/15 text-sodium hover:bg-sodium/20 hover:text-sodium',
       )}
     >
       {icon}{label}
@@ -927,7 +1130,7 @@ function Picker({ value, label, disabled, onChange, children }: {
       disabled={disabled}
       onChange={(event) => { onChange(event.target.value) }}
       className={cn(
-        'mono border-input h-8 max-w-[220px] rounded-md border bg-transparent px-2 text-xs shadow-xs',
+        'mono border-input h-7 max-w-[180px] rounded-md border bg-transparent px-1.5 text-[11px] shadow-xs',
         'transition-[color,box-shadow] outline-none dark:bg-input/30',
         'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
         'disabled:cursor-not-allowed disabled:opacity-50',
@@ -1117,7 +1320,31 @@ function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend
       </div>
 
       <div className="flex-none space-y-2 border-t border-hairline px-4 py-3">
-        {/* 整个输入区都是投放区：人拖着一张截图过来时瞄的是"写字的地方"，
+        {/* 已带上的文件摆在输入框**上面**：它们是"要说的话的一部分"，
+            而输入框底部那行是动作区，混在一起的话长文件名会把整行挤爆。 */}
+        {files.length === 0 && uploading === null ? null : (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {uploading === null ? null : (
+              <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-hairline px-1.5 py-1 text-[11px] text-ink-faint">
+                <Upload className="size-3 animate-pulse" />
+                <span className="max-w-40 truncate" title={uploading}>{uploading}</span>
+              </span>
+            )}
+            {files.map((file) => (
+              <AttachmentChip
+                key={file.id}
+                file={file}
+                removeLabel={t('talk.attachRemove')}
+                onRemove={() => { drop(file) }}
+              />
+            ))}
+            {files.length >= MAX_PER_COMMENT ? (
+              <span className="text-xs text-sodium">{t('talk.attachFull', { max: MAX_PER_COMMENT })}</span>
+            ) : null}
+          </div>
+        )}
+
+        {/* 整个输入框都是投放区：人拖着一张截图过来时瞄的是"写字的地方"，
             让他去找一个单独的小方块只是白白多一道手续。 */}
         <div
           className="relative"
@@ -1142,49 +1369,18 @@ function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend
               if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) send()
             }}
             // 固定高度：这儿贴在面板底上，跟着内容长会把上面的对话挤没了。
+            // 工具条**不叠**在框里 —— 叠进去的话光标一走到底部，字就被那行挡住。
             className={cn('field-sizing-fixed h-24', dragOver && 'border-sodium-deep')}
           />
+
           {dragOver ? (
             <div className={cn(
-              'pointer-events-none absolute inset-0 flex items-center justify-center gap-2 rounded-md',
+              'pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-md',
               // 盖实：底下那句占位文案和"松手就传上去"叠在一起，谁都读不清。
               'border border-dashed border-sodium-deep bg-sunken text-xs text-sodium',
             )}>
               <Upload className="size-3.5" />{t('talk.attachDropActive')}
             </div>
-          ) : null}
-        </div>
-
-        {/* 带上的文件与那枚回形针在同一行：它们说的是同一件事。 */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {files.map((file) => (
-            <AttachmentChip
-              key={file.id}
-              file={file}
-              removeLabel={t('talk.attachRemove')}
-              onRemove={() => { drop(file) }}
-            />
-          ))}
-          <button
-            type="button"
-            disabled={attaching}
-            onClick={() => { pickRef.current?.click() }}
-            title={t('talk.attach')}
-            className={cn(
-              'inline-flex items-center gap-1.5 rounded-md border border-dashed border-hairline px-2 py-1',
-              'text-[12px] text-ink-faint transition-colors',
-              'hover:border-hairline-bright hover:text-ink',
-              'disabled:cursor-not-allowed disabled:opacity-50',
-            )}
-          >
-            {uploading === null ? (
-              <><Paperclip className="size-3.5" />{t('talk.attach')}</>
-            ) : (
-              <><Upload className="size-3.5 animate-pulse" />{t('talk.attachUploading', { name: uploading })}</>
-            )}
-          </button>
-          {files.length >= MAX_PER_COMMENT ? (
-            <span className="text-xs text-sodium">{t('talk.attachFull', { max: MAX_PER_COMMENT })}</span>
           ) : null}
           <input
             ref={pickRef}
@@ -1199,51 +1395,64 @@ function Discussion({ task, agents, comments, busy, requeues, onOpenFile, onSend
           />
         </div>
 
-        {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}
-        {providers.length === 0 ? null : (
-          <div
-            className="flex flex-wrap items-center gap-2"
-            {...(locked ? { title: lockReason } : {})}
-          >
-            <span className="flex-none text-xs text-ink-faint">{t('talk.nextRound')}</span>
-            <Picker
-              value={provider ?? ''}
-              disabled={busy || locked}
-              label={t('editor.provider')}
-              onChange={(next) => {
-                // 换人就把模型清掉：模型名是各家 CLI 自己的说法，
-                // 留着一个别人不认识的名字只会在派活时炸。（同规格表单）
-                setProvider(next.length === 0 ? undefined : next)
-                setModel(undefined)
-              }}
-            >
-              <option value="">{t('editor.providerAny')}</option>
-              {providers.map((id) => <option key={id} value={id}>{id}</option>)}
-            </Picker>
-            {/* 能不能指定模型是**探测**出来的：不认 --model 的 CLI 这儿就没有这一栏。 */}
-            {picked === undefined || !picked.canPickModel || models.length === 0 ? null : (
-              <Picker
-                value={model ?? ''}
-                disabled={busy || locked}
-                label={t('editor.model')}
-                onChange={(next) => { setModel(next.length === 0 ? undefined : next) }}
-              >
-                <option value="">{t('editor.modelDefault')}</option>
-                {models.map((id) => <option key={id} value={id}>{id}</option>)}
-              </Picker>
+        {/* 工具条独占一行，压在输入框**外面**：带上文件、下一轮交给、发送。
+            不往框里叠的原因很实际 —— 光标走到底部时，字会被那行盖住。 */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          <button
+            type="button"
+            disabled={attaching}
+            onClick={() => { pickRef.current?.click() }}
+            title={t('talk.attach')}
+            className={cn(
+              'inline-flex flex-none items-center gap-1.5 rounded-md border border-dashed border-hairline px-2 py-1',
+              'text-[12px] text-ink-faint transition-colors',
+              'hover:border-hairline-bright hover:text-ink',
+              'disabled:cursor-not-allowed disabled:opacity-50',
             )}
-          </div>
-        )}
-
-        <div className="flex items-center gap-2">
+          >
+            <Paperclip className="size-3.5" />{t('talk.attach')}
+          </button>
+          {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}
+          {providers.length === 0 ? null : (
+            <span className="flex items-center gap-1.5" {...(locked ? { title: lockReason } : {})}>
+              <span className="flex-none text-xs text-ink-faint">{t('talk.nextRound')}</span>
+              <Picker
+                value={provider ?? ''}
+                disabled={busy || locked}
+                label={t('editor.provider')}
+                onChange={(next) => {
+                  // 换人就把模型清掉：模型名是各家 CLI 自己的说法，
+                  // 留着一个别人不认识的名字只会在派活时炸。（同规格表单）
+                  setProvider(next.length === 0 ? undefined : next)
+                  setModel(undefined)
+                }}
+              >
+                <option value="">{t('editor.providerAny')}</option>
+                {providers.map((id) => <option key={id} value={id}>{id}</option>)}
+              </Picker>
+              {/* 能不能指定模型是**探测**出来的：不认 --model 的 CLI 这儿就没有这一栏。 */}
+              {picked === undefined || !picked.canPickModel || models.length === 0 ? null : (
+                <Picker
+                  value={model ?? ''}
+                  disabled={busy || locked}
+                  label={t('editor.model')}
+                  onChange={(next) => { setModel(next.length === 0 ? undefined : next) }}
+                >
+                  <option value="">{t('editor.modelDefault')}</option>
+                  {models.map((id) => <option key={id} value={id}>{id}</option>)}
+                </Picker>
+              )}
+            </span>
+          )}
+          <span className="flex-1" />
           {failure === null ? (
-            <p className="flex-1 text-xs text-ink-faint">
+            <p className="min-w-0 truncate text-xs text-ink-faint" title={requeues ? t('talk.noteRequeue') : t('talk.note')}>
               {requeues ? t('talk.noteRequeue') : t('talk.note')}
             </p>
           ) : (
-            <p className="flex-1 text-xs text-lamp-fail">{failure}</p>
+            <p className="min-w-0 max-w-full truncate text-xs text-lamp-fail" title={failure}>{failure}</p>
           )}
-          <Button size="sm" disabled={!sendable} onClick={send}>
+          <Button size="xs" className="flex-none" disabled={!sendable} onClick={send}>
             <Send />{t('talk.send')}
           </Button>
         </div>

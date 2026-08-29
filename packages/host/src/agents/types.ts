@@ -1,8 +1,12 @@
+import type { PermissionTier, RunId } from '@loopkanban/core'
 import type { SpawnSpec } from '../subprocess/index.ts'
 import type { HelpSurface } from './help-parser.ts'
 
-/** LoopKanban 的三档权限，映射到各 CLI 自己的说法。 */
-export type PermissionTier = 'strict' | 'standard' | 'yolo'
+/** LoopKanban 的权限档位。定义在领域层，各家 CLI 的映射由 provider 负责。 */
+export type { PermissionTier }
+
+/** LoopKanban 的全部档位，供 UI 与回退逻辑枚举。 */
+export const PERMISSION_TIERS = ['strict', 'standard', 'supervised', 'yolo'] as const
 
 /**
  * 档位名字对不上实际约束时，provider 必须说出来的那句话。
@@ -47,6 +51,20 @@ export interface AgentCaps {
   /** 这个版本真正支持的权限档位。UI 只应展示这些。 */
   readonly permissionTiers: readonly PermissionTier[]
   /**
+   * 能否接上宿主的 gate（MCP），从而拥有 `ask_user`（向人提问）这类工具。
+   *
+   * 探测的是"有没有配置 MCP 服务器的入口"，不是"gate 本身"—— gate 由宿主
+   * 在派活时注入，这台机器上永远有。探测不到入口的 CLI 界面上就不许诺提问。
+   */
+  readonly canAskUser: boolean
+  /**
+   * 能否把权限审批路由给人（claude 的 `--permission-prompt-tool`）。
+   *
+   * `supervised` 档只有这个能力成立才上报。有的 CLI 把这个旗标藏在 help
+   * 之外（实测 2.1.250 接受但 help 不列），provider 只能以自己验证过的事实
+   * 为准声明它 —— 用了不存在的旗标，CLI 会在启动时立刻报错，看得见。
+   */
+  readonly canPromptPermission: boolean  /**
    * 档位语义与别家不一致时的警示；不需要提醒的 provider 不填。
    *
    * 「支持哪些档位」和「这些档位到底关不关得住」是两件事，后者藏在文档里
@@ -65,6 +83,34 @@ export interface AgentCaps {
   readonly resumeHelp?: HelpSurface
 }
 
+/**
+ * 宿主注入给一次执行的"gate"：一个由宿主提供的 MCP server，Agent 通过它
+ * 向人提问（`ask_user`）、把权限审批路由给人（`request_permission`）。
+ *
+ * 各 CLI 挂 gate 的方式不同（claude 吃配置文件、codex 吃 `-c` 覆盖、
+ * opencode 吃 `OPENCODE_CONFIG`），所以这里只给**事实**（地址、凭据、
+ * 预先写好的配置文件路径），怎么用是 provider 自己的事。
+ */
+export interface GateConfig {
+  /** MCP server 名，也是工具名的前缀：`mcp__<serverName>__ask_user`。 */
+  readonly serverName: string
+  /** 宿主 HTTP server 的地址（只监听 127.0.0.1）。 */
+  readonly baseUrl: string
+  readonly runId: RunId
+  /**
+   * 只对这次执行有效的限权 token：只能创建/轮询**这个 run** 的决策，
+   * 干不了别的。**绝不能**把宿主的全权 token 给到 Agent 的环境里 ——
+   * 那等于让它自己给自己盖章。
+   */
+  readonly token: string
+  /** shim 脚本的绝对路径（被各家 CLI 当作 MCP server 的入口拉起）。 */
+  readonly shimPath: string
+  /** claude 的 `--mcp-config` 直接吃的 JSON 文件。 */
+  readonly mcpConfigPath: string
+  /** opencode 的 `OPENCODE_CONFIG` 指向的 JSON 文件。 */
+  readonly envConfigPath: string
+}
+
 /** 一次执行需要的上下文。 */
 export interface RunContext {
   readonly runId: string
@@ -74,6 +120,8 @@ export interface RunContext {
   readonly artifactsDir: string
   readonly prompt: string
   readonly permission: PermissionTier
+  /** gate 已接好时才有；provider 据此决定挂不挂 MCP 与权限路由。 */
+  readonly gate?: GateConfig
   /** 我们预生成的会话 id；仅在 {@link AgentCaps.canPinSessionId} 为真时有意义。 */
   readonly sessionId?: string
   readonly model?: string

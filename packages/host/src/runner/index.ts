@@ -25,8 +25,10 @@ import {
   taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
 import { humanSize, stageAttachments, type StagedAttachment } from '../attachments/index.ts'
-import type { AgentEvent, RunContext } from '../agents/types.ts'
+import type { AgentEvent, GateConfig, RunContext } from '../agents/types.ts'
 import type { AgentPool, DetectedAgent } from '../agents/index.ts'
+import type { DecisionHub } from '../decisions/index.ts'
+import { writeGateConfig } from '../mcp/gate.ts'
 import type { RunBus } from '../server/bus.ts'
 import type { Run, Storage, TaskComment } from '../storage/index.ts'
 import { spawnProcess, type ProcessHandle, type SpawnSpec } from '../subprocess/index.ts'
@@ -57,6 +59,16 @@ export interface RunnerOptions {
   readonly agents: AgentPool
   /** Run 产物（原始日志、last-message）目录。 */
   readonly artifactsRoot: string
+  /**
+   * 决策中枢。给了且 CLI 支持时，这次执行会接上"向人提问 / 权限审批"
+   * 的 gate；不给就没有反向通道，行为与从前完全一样。
+   */
+  readonly decisions?: DecisionHub
+  /**
+   * 宿主 HTTP server 的地址。server 起来之后才有值，所以是惰性求值；
+   * 求不到（比如测试里没起 server）就不接 gate。
+   */
+  readonly gateUrl?: () => string | undefined
   readonly leaseTtlMs?: number
   readonly timeoutMs?: number
   /** 供测试注入假的进程启动器。 */
@@ -74,7 +86,11 @@ export type StartResult =
 interface Active {
   readonly handle: ProcessHandle
   readonly renew: NodeJS.Timeout
-  readonly timeout: NodeJS.Timeout
+  /**
+   * 到点的处理分两种：真超时要终止进程，而"在等人拍板"要顺延 —— 所以
+   * 它是可变的，顺延时重新挂一个。
+   */
+  timeout: NodeJS.Timeout | undefined
   readonly taskId: TaskId
   /** 是否是被人主动取消的。用来把它和"真的跑失败了"区分开。 */
   cancelled: boolean
@@ -218,6 +234,9 @@ export class Runner {
 
     const artifactsDir = join(artifactsRoot, runId)
     await mkdir(artifactsDir, { recursive: true })
+    // gate（向人提问 / 权限审批）能用就接上。失败是启动失败 —— 配置写不进
+    // 磁盘说明环境本身有问题，与其让 Agent 跑到一半才撞墙，不如当场停下。
+    const gate = await this.wireGate(runId, artifactsDir, caps)
     // 附件先落进 worktree，再写 TASK.md —— 清单里的每一条都得真的在那儿，
     // 拷不过去的不列出来，免得 Agent 去找一个不存在的文件。
     //
@@ -238,15 +257,21 @@ export class Runner {
       .map((id) => storage.getTask(id))
       .filter((other): other is Task => other !== null)
     await writeFile(
-      join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged, related), 'utf8',
+      join(worktree.path, 'TASK.md'), renderTaskSpec(task, comments, staged, related, gate !== undefined), 'utf8',
     )
+
+    // 卡上选的档位优先；这个 CLI 支持不了就退回 standard 并明说 —— 悄悄
+    // 降级等于骗人，人以为在 supervised，权限却被自动放掉了。
+    const requested = task.permission ?? 'standard'
+    const permission = caps.permissionTiers.includes(requested) ? requested : 'standard'
 
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
       artifactsDir,
-      prompt: renderPrompt(task, comments, prior !== undefined, staged, related),
-      permission: 'standard',
+      prompt: renderPrompt(task, comments, prior !== undefined, staged, related, gate !== undefined),
+      permission,
+      ...(gate === undefined ? {} : { gate }),
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
       ...(task.model === undefined ? {} : { model: task.model }),
       // 能不能钉住会话 id 是探测出来的事实，不按 CLI 的名字分支：
@@ -278,7 +303,9 @@ export class Runner {
     this.emit(runId, 'notice', {
       level: 'info',
       text: `${provider.id} ${caps.version} · pid ${String(handle.pid)}`
-        + (resumeSpec === null ? '' : ` · 接续会话 ${String(prior?.agentSessionId)}`),
+        + (resumeSpec === null ? '' : ` · 接续会话 ${String(prior?.agentSessionId)}`)
+        + (gate === undefined ? '' : ' · 已接通人工通道（提问 / 审批）')
+        + (permission === requested ? '' : ` · 卡上选的 ${requested} 档该 CLI 不支持，已按 ${permission} 执行`),
     })
     if (staged.length > 0) {
       this.emit(runId, 'notice', {
@@ -295,19 +322,56 @@ export class Runner {
     }
 
     const renew = setInterval(() => { this.renewLease(task.id, runId) }, this.leaseTtl / RENEW_DIVISOR)
-    const timeout = setTimeout(() => {
-      this.emit(runId, 'notice', { level: 'warn', text: '超时，正在终止整棵进程树' })
-      void handle.terminate()
-    }, this.options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS)
     renew.unref()
-    timeout.unref()
-    this.active.set(runId, { handle, renew, timeout, taskId: task.id, cancelled: false })
+    this.active.set(runId, { handle, renew, timeout: undefined, taskId: task.id, cancelled: false })
+    this.armTimeout(runId, handle)
 
     void this.consume(run, agent, handle, worktree, task).catch((error: unknown) => {
       this.emit(runId, 'notice', { level: 'warn', text: `事件流中断: ${describeError(error)}` })
     })
 
     return run
+  }
+
+  /**
+   * 挂（或重挂）单次执行的超时。
+   *
+   * 到点时先看是不是在等人拍板：有 pending 的决策就顺延一个完整周期再试 ——
+   * 决策中枢自己的超时（10 分钟）远短于此，等人的卡不会因此无限期挂着；
+   * 真没人理的决策会先被中枢收场，下一个周期照常终止。
+   */
+  private armTimeout(runId: RunId, handle: ProcessHandle): void {
+    const timer = setTimeout(() => {
+      const pending = this.options.decisions?.pendingCount(runId) ?? 0
+      if (pending > 0) {
+        this.emit(runId, 'notice', {
+          level: 'warn',
+          text: `执行超时前发现有 ${String(pending)} 件决策在等你处理，已顺延 —— 处理完若仍超时会正常终止`,
+        })
+        this.armTimeout(runId, handle)
+        return
+      }
+      this.emit(runId, 'notice', { level: 'warn', text: '超时，正在终止整棵进程树' })
+      void handle.terminate()
+    }, this.options.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS)
+    timer.unref()
+    const entry = this.active.get(runId)
+    if (entry !== undefined) entry.timeout = timer
+  }
+
+  /**
+   * 把 gate 接到这次执行上：签发限权 token、把配置落盘。
+   *
+   * 三个前提缺一个就放弃（不接 gate，行为与从前一样）：CLI 有 MCP 入口、
+   * 有决策中枢、知道宿主地址。写不出配置文件是启动失败，由 launch 的
+   * caller 兜底 —— 与 worktree 建不出来同级。
+   */
+  private async wireGate(runId: RunId, artifactsDir: string, caps: { canAskUser: boolean }): Promise<GateConfig | undefined> {
+    const hub = this.options.decisions
+    const baseUrl = this.options.gateUrl?.()
+    if (!caps.canAskUser || hub === undefined || baseUrl === undefined) return undefined
+    const token = hub.issueToken(runId)
+    return writeGateConfig({ artifactsDir, runId, baseUrl, token, execPath: process.execPath })
   }
 
   /** 逐行读 stdout、归一化、落库、广播；进程退出后收尾。 */
@@ -383,6 +447,11 @@ export class Runner {
     }
 
     const outcome = await handle.exited
+
+    // 执行到此为止，还悬着的决策没有下文了：按"执行已终止"收场，token
+    // 一并作废 —— 迟到的答复不该改写一条已经结束的执行。
+    this.options.decisions?.expireRun(run.id, 'cancelled')
+    this.options.decisions?.revokeRun(run.id)
 
     const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim()
     await writeFile(join(this.options.artifactsRoot, run.id, 'raw.log'), rawLines.join('\n'), 'utf8')
@@ -488,6 +557,10 @@ export class Runner {
         diagnostic: '上次进程退出时该 Run 仍在运行，已标记为中止',
         endedAt: this.now,
       })
+      // 崩溃前等人拍板的决策同样没有下文了 —— 不收掉的话，重启后它们会
+      // 永远是 pending，看板上挂着一块谁也处理不掉的徽标。
+      this.options.decisions?.expireRun(asRunId(run.id), 'cancelled')
+      this.options.decisions?.revokeRun(asRunId(run.id))
     }
     return orphans.length
   }
@@ -565,6 +638,13 @@ export class Runner {
       // 落库都失败了就只能靠下次启动的 reconcile 兜底。
     }
     try {
+      // 异常路径同样要把悬着的决策收掉：正常路径在 consume 的收尾里。
+      this.options.decisions?.expireRun(run.id, 'cancelled')
+      this.options.decisions?.revokeRun(run.id)
+    } catch {
+      // 同上。
+    }
+    try {
       this.release(task.id)
     } catch {
       // 同上。
@@ -638,7 +718,7 @@ const COLUMN_LABEL: Readonly<Record<Task['column'], string>> = {
  */
 export function renderTaskSpec(
   task: Task, comments: readonly TaskComment[] = [], attachments: readonly StagedAttachment[] = [],
-  related: readonly Task[] = [],
+  related: readonly Task[] = [], interactive = false,
 ): string {
   const lines = [`# ${taskTitle(task)}`, '', task.description.trim(), '']
   // 验收标准是可选的：没写就不摆一个空标题在那儿装样子。
@@ -677,7 +757,16 @@ export function renderTaskSpec(
       }
     }
   }
-  lines.push('', '## 约束', '', '- 不要提交或推送，改动留在工作区即可', '- 不要改动本文件')
+  // gate 已接通时，"有疑问怎么问"才是一条真的约束 —— 没接通的执行里
+  // 根本没有 ask_user 这个工具，写了等于让它找一个不存在的东西。
+  lines.push(
+    '', '## 约束', '',
+    '- 不要提交或推送，改动留在工作区即可',
+    '- 不要改动本文件',
+    ...(interactive
+      ? ['- 有拿不准的地方，用 loopkanban 的 ask_user 工具向人提问，不要猜']
+      : []),
+  )
   return `${lines.join('\n')}\n`
 }
 
@@ -687,13 +776,18 @@ export function renderTaskSpec(
  * 附件在这里**再点一次名**：TASK.md 里已经有完整清单，但 prompt 是 CLI
  * 唯一保证会读的东西，附件是需求的一部分，不该指望它自己翻到那一节。
  *
- * 关联的卡同样在这里点名：TASK.md 里有它们的正文，但 prompt 是 CLI 唯一
- * 保证会读的东西，而"有几张卡要一起读"这件事本身就会改变它的做法。
+ * 关联的卡同样在这里点名：TASK.md 里有它们的正文，但 prompt 是 CLI
+ * 唯一保证会读的东西，而"有几张卡要一起读"这件事本身就会改变它的做法。
+ *
+ * gate 已接通时教一句 ask_user 的用法 —— 这句话必须在 prompt 里而不是
+ * 只在 TASK.md 里：提问工具"存在且可用"这个事实，只有 prompt 能保证
+ * 它真的被读到。
  *
  * @param task - 目标任务。
  * @param resuming - 是否接续上一次会话；是的话措辞要说明这是返工而非重做。
  * @param attachments - 已经拷进 worktree 的附件。
  * @param related - 关联的同项目卡片，已经展开在 TASK.md 里。
+ * @param interactive - 是否接通了人工通道（可向人提问）。
  */
 export function renderPrompt(
   task: Task,
@@ -701,6 +795,7 @@ export function renderPrompt(
   resuming = false,
   attachments: readonly StagedAttachment[] = [],
   related: readonly Task[] = [],
+  interactive = false,
 ): string {
   const lines: string[] = []
   const lastHuman = [...comments].reverse().find((comment) => comment.author === 'human')
@@ -747,6 +842,12 @@ export function renderPrompt(
     )
   }
   lines.push('完成后简要说明你做了什么，以及验收标准是否逐条满足 —— 这段说明会作为你的回复出现在讨论里。')
+  if (interactive) {
+    lines.push(
+      '需求有歧义、做法需要拍板、缺关键信息时，调用 loopkanban 的 ask_user 工具向人提问再继续：',
+      '一次只问一个问题，把背景与候选项写清楚。没有人会实时读你输出的文字 —— 问题写在正文里是等不到回答的。',
+    )
+  }
   lines.push('不要提交、不要推送、不要改动 TASK.md。')
   return lines.join('\n')
 }

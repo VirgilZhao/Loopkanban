@@ -1,3 +1,4 @@
+import { asRunId } from '@loopkanban/core'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,8 @@ const CAPS: AgentCaps = {
   canResume: true,
   canPickModel: true, models: [],
   permissionTiers: ['strict', 'standard', 'yolo'],
+  canAskUser: false,
+  canPromptPermission: false,
   help: parseHelp(fixture('codex-exec-help.txt')),
   resumeHelp: parseHelp(fixture('codex-exec-resume-help.txt')),
 }
@@ -166,5 +169,28 @@ describe('codexCliProvider.parseLine（真实 --json 输出）', () => {
       expect(() => codexCliProvider.parseLine(line, CAPS)).not.toThrow()
     }
     expect(codexCliProvider.parseLine('不是 JSON', CAPS)[0]?.kind).toBe('raw')
+  })
+})
+
+const GATE = {
+  serverName: 'loopkanban', baseUrl: 'http://127.0.0.1:9', runId: asRunId('run-g'),
+  token: 'run-token', shimPath: '/x/gate-shim.mjs',
+  mcpConfigPath: '/x/artifacts/gate/mcp.json', envConfigPath: '/x/artifacts/gate/opencode.json',
+}
+
+describe('codexCliProvider gate', () => {
+  it('用 -c 覆盖注入 MCP server：command / args / env / tool_timeout_sec', () => {
+    const argv = codexCliProvider.buildStart({ ...RUN, gate: GATE }, CAPS).argv
+    const overrides = argv.filter((arg, index) => argv[index - 1] === '-c')
+    expect(overrides).toContain(`mcp_servers.loopkanban.command=${JSON.stringify(process.execPath)}`)
+    expect(overrides).toContain(`mcp_servers.loopkanban.args=${JSON.stringify([GATE.shimPath])}`)
+    expect(overrides.some((arg) => arg.startsWith('mcp_servers.loopkanban.env='))).toBe(true)
+    expect(overrides.some((arg) => arg.startsWith('mcp_servers.loopkanban.tool_timeout_sec='))).toBe(true)
+  })
+
+  it('supervised 档当场拒绝 —— exec 无头模式审批请求没人能答', () => {
+    expect(() => codexCliProvider.buildStart(
+      { ...RUN, permission: 'supervised', gate: GATE }, CAPS,
+    )).toThrow(/supervised/)
   })
 })

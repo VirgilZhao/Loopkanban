@@ -5,8 +5,8 @@ import { Button } from '@/components/ui/button.tsx'
 import { useT } from '@/lib/i18n.tsx'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMN_META, type Column as ColumnKey, type LiveLine, type PullRequest, type RunFailure,
-  type Skip, type Task,
+  COLUMN_META, type Column as ColumnKey, type LiveLine, type PendingDecision,
+  type PullRequest, type RunFailure, type Skip, type Task,
 } from '@/types.ts'
 import { TaskCard } from './TaskCard.tsx'
 
@@ -32,6 +32,10 @@ interface Props {
   prs: Record<string, PullRequest[]>
   /** 上一轮没跑成的卡的收场。只有 Review 那一列会有。 */
   failures: Record<string, RunFailure>
+  /** 每张卡跑过几轮；一轮都没跑过的卡不在里面。 */
+  rounds: Record<string, number>
+  /** 等人拍板的决策（权限审批 / 提问）；没有的卡不在里面。 */
+  pending: Record<string, PendingDecision[]>
   skips: Map<string, Skip>
   onSelect: (task: Task) => void
   /** 概览里同一列会来自不同仓库，给出项目名让卡片自报家门；单项目视图下不传。 */
@@ -41,7 +45,7 @@ interface Props {
 }
 
 export function Column({
-  column, tasks, now, index, selectedId, live, attachments, prs, failures, skips,
+  column, tasks, now, index, selectedId, live, attachments, prs, failures, rounds, pending, skips,
   onSelect, projectName, onCreate,
 }: Props): React.JSX.Element {
   const t = useT()
@@ -125,6 +129,8 @@ export function Column({
             attachments={attachments[task.id]}
             prs={prs[task.id]}
             failure={failures[task.id]}
+            rounds={rounds[task.id]}
+            pending={pending[task.id]}
             skip={skips.get(task.id)}
             projectName={projectName?.(task.projectId)}
             onSelect={onSelect}

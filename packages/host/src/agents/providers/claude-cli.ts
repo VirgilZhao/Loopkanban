@@ -9,23 +9,28 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { SpawnSpec } from '../../subprocess/index.ts'
+import { askUserToolName, requestPermissionToolName } from '../../mcp/gate.ts'
 import { capture, findExecutable, probeVersion } from '../discover.ts'
 import { scrubEnv } from '../env.ts'
 import { choicesOf, describeFlag, hasFlag, parseHelp } from '../help-parser.ts'
 import type { AgentCaps, AgentEvent, AgentProvider, PermissionTier, RunContext } from '../types.ts'
 
 /**
- * LoopKanban 三档 → claude 的 `--permission-mode` 取值。
+ * LoopKanban 档位 → claude 的 `--permission-mode` 取值。
  *
  * standard 用 `auto` 而不是 `acceptEdits`：实测 `acceptEdits` 只放行文件
  * 编辑，Bash 一律 `permission_denied`，Agent 写完代码跑不了测试也跑不了
  * 构建，等于交出一份没验证过的活。`auto` 走 CLI 自己的分类器，语义上才
  * 对得上 codex 的 `--approve-for-me`。
+ *
+ * supervised 是空数组：它不设 mode —— 用 CLI 的默认（逐项询问），配合
+ * `--permission-prompt-tool` 把询问路由到宿主的 gate 交给人。
  */
 const TIER_TO_MODE: Record<PermissionTier, readonly string[]> = {
   strict: ['dontAsk'],
   // 按偏好排序，取该版本支持的第一个。
   standard: ['auto', 'acceptEdits'],
+  supervised: [],
   yolo: ['bypassPermissions'],
 }
 
@@ -35,8 +40,12 @@ function resolveMode(tier: PermissionTier, available: readonly string[]): string
 }
 
 function supportedTiers(modes: readonly string[]): PermissionTier[] {
-  if (modes.length === 0) return []
-  return (Object.keys(TIER_TO_MODE) as PermissionTier[]).filter((tier) => resolveMode(tier, modes) !== undefined)
+  const tiers = (Object.keys(TIER_TO_MODE) as PermissionTier[])
+    .filter((tier) => tier !== 'supervised' && resolveMode(tier, modes) !== undefined)
+  // supervised 不吃 permission-mode：它要的是隐藏的 --permission-prompt-tool
+  // （见 probe）。能力成立就上报这档。
+  if (CAN_PROMPT_PERMISSION) tiers.push('supervised')
+  return tiers
 }
 
 /**
@@ -67,13 +76,27 @@ function pickFormat(formats: readonly string[]): 'stream-json' | 'json' | 'text'
 function baseArgv(run: RunContext, caps: AgentCaps): string[] {
   const formats = choicesOf(caps.help, 'output-format')
   const format = pickFormat(formats)
-  const argv = [caps.bin, '-p', '--output-format', format]
+  // gate 参数紧跟 -p：--allowedTools 与 --mcp-config 都是**变长**参数，会
+  // 把后面所有不像 flag 的东西吃进清单里 —— 实测它们紧邻位置参数 prompt
+  // 时，prompt 会被当成第二个工具名/配置文件。放在最前面，后面的
+  // --output-format（必有）替它们收口。
+  const argv: string[] = [caps.bin, '-p']
+  if (run.gate !== undefined) {
+    argv.push('--allowedTools', askUserToolName(run.gate.serverName))
+    argv.push('--mcp-config', run.gate.mcpConfigPath)
+  }
+  argv.push('--output-format', format)
   // stream-json 输出在 print 模式下要求 --verbose，否则 CLI 直接拒绝。
   if (format === 'stream-json' && hasFlag(caps.help, 'verbose')) argv.push('--verbose')
 
   const mode = resolveMode(run.permission, choicesOf(caps.help, 'permission-mode'))
   if (mode !== undefined) argv.push('--permission-mode', mode)
   if (run.model !== undefined && hasFlag(caps.help, 'model')) argv.push('--model', run.model)
+  // 权限审批路由：supervised 档把"要问人"的请求转给 gate 的工具。它是单值
+  // 参数，不会吞掉后面的 prompt。
+  if (run.gate !== undefined && run.permission === 'supervised' && caps.canPromptPermission) {
+    argv.push('--permission-prompt-tool', requestPermissionToolName(run.gate.serverName))
+  }
   return argv
 }
 
@@ -92,6 +115,14 @@ function num(value: unknown, key: string): number | undefined {
 
 /** 可执行文件名。宿主也要用它来说"我找过谁"，所以是 provider 声明的事实。 */
 const COMMAND = 'claude'
+
+/**
+ * claude 把权限审批路由给人的旗标。**help 不列它，但 CLI 认**（实测
+ * 2.1.250 接受并生效；这是 headless 审批的官方机制，SDK 的 canUseTool
+ * 走的也是同一套）。探测只能以自己验证过的事实为准 —— 若哪个老版本真
+ * 的没有，CLI 会在启动时对未知旗标立刻报错，看得见，不会悄悄出错。
+ */
+const CAN_PROMPT_PERMISSION = true
 
 /**
  * `PATH` 之外还该看一眼的地方。
@@ -128,6 +159,8 @@ export const claudeCliProvider: AgentProvider = {
       canPickModel: hasFlag(help, 'model'),
       models: modelsFromHelp(help),
       permissionTiers: supportedTiers(choicesOf(help, 'permission-mode')),
+      canAskUser: hasFlag(help, 'mcp-config') && hasFlag(help, 'allowedTools'),
+      canPromptPermission: CAN_PROMPT_PERMISSION,
       help,
     }
   },

@@ -18,10 +18,13 @@ import { scrubEnv } from '../env.ts'
 import { choicesOf, hasFlag, parseHelp, type HelpSurface } from '../help-parser.ts'
 import type { AgentCaps, AgentEvent, AgentProvider, PermissionTier, RunContext } from '../types.ts'
 
-/** LoopKanban 三档 → codex 的 `--sandbox` 取值。yolo 走独立的 bypass 参数。 */
+/** LoopKanban 档位 → codex 的 `--sandbox` 取值。yolo 走独立的 bypass 参数。 */
 const TIER_TO_SANDBOX: Record<Exclude<PermissionTier, 'yolo'>, string> = {
   strict: 'read-only',
   standard: 'workspace-write',
+  // codex exec 是无头的，审批请求没人能答，"人来定"这条路走不通 ——
+  // 这个键永远不会被 supportedTiers 上报，permissionArgs 碰到它就拒绝。
+  supervised: '',
 }
 
 const BYPASS_FLAG = 'dangerously-bypass-approvals-and-sandbox'
@@ -36,6 +39,7 @@ function supportedTiers(sandboxes: readonly string[], help: ReturnType<typeof pa
   if (sandboxes.includes(TIER_TO_SANDBOX.strict)) tiers.push('strict')
   if (sandboxes.includes(TIER_TO_SANDBOX.standard)) tiers.push('standard')
   if (hasFlag(help, BYPASS_FLAG)) tiers.push('yolo')
+  // codex exec 无头模式下审批请求会被直接拒掉，没有"问人"的出口 —— supervised 不上报。
   return tiers
 }
 
@@ -50,6 +54,11 @@ function permissionArgs(run: RunContext, surface: HelpSurface): string[] {
   if (run.permission === 'yolo') {
     return hasFlag(surface, BYPASS_FLAG) ? [`--${BYPASS_FLAG}`] : []
   }
+  // supervised 在 supportedTiers 里永远不会出现；落到这里说明调用方没做
+  // 回退，当场拒绝而不是拼出一条语义不明的命令。
+  if (run.permission === 'supervised') {
+    throw new Error('codex exec 是无头执行，审批请求没有人能回答，不支持 supervised 档')
+  }
   // 无人值守时优先把审批交给 codex 自己的自动审阅，否则审批请求会悬着没人回答。
   if (run.permission === 'standard' && hasFlag(surface, 'approve-for-me')) {
     return ['--approve-for-me']
@@ -58,6 +67,34 @@ function permissionArgs(run: RunContext, surface: HelpSurface): string[] {
   // 续跑路径上这些参数可能都不存在（codex 的 resume 就是），
   // 此时沿用该会话创建时的策略，这也是"接着上次继续"应有的语义。
   return choicesOf(surface, 'sandbox').includes(sandbox) ? ['-s', sandbox] : []
+}
+
+/**
+ * gate 的 `-c` 配置覆盖。
+ *
+ * codex 没有 MCP 配置文件，逐键覆盖 config.toml：`mcp_servers.<name>` 下的
+ * `command` / `args` / `env` 是它文档里的键。值直接给 TOML 字面量 ——
+ * JSON 字符串化的形式恰好就是合法 TOML（双引号字符串与内联表）。
+ *
+ * `tool_timeout_sec` 放宽到比决策超时更宽：等人的调用动辄几分钟，codex
+ * 默认的工具超时撑不住。已知限制：exec 模式下 MCP 工具调用同样要过它的
+ * 审批策略，个别版本可能把没人批准的调用自动取消 —— 模型只会看到一次
+ * 失败的工具调用并继续干活，不会挂死。
+ */
+function gateArgs(run: RunContext): string[] {
+  const gate = run.gate
+  if (gate === undefined) return []
+  const env = {
+    LOOPKANBAN_GATE_URL: gate.baseUrl,
+    LOOPKANBAN_RUN_ID: gate.runId,
+    LOOPKANBAN_TOKEN: gate.token,
+  }
+  return [
+    '-c', `mcp_servers.${gate.serverName}.command=${JSON.stringify(process.execPath)}`,
+    '-c', `mcp_servers.${gate.serverName}.args=${JSON.stringify([gate.shimPath])}`,
+    '-c', `mcp_servers.${gate.serverName}.env=${JSON.stringify(env)}`,
+    '-c', `mcp_servers.${gate.serverName}.tool_timeout_sec=${String(30 * 60)}`,
+  ]
 }
 
 /**
@@ -72,6 +109,7 @@ function commonArgs(run: RunContext, caps: AgentCaps, surface: HelpSurface): str
   // 没有 --cd 时靠子进程自身的 cwd（spawn 时已指向 worktree）。
   if (hasFlag(surface, 'cd')) args.push('-C', run.worktreePath)
   args.push(...permissionArgs(run, surface))
+  args.push(...gateArgs(run))
   if (hasFlag(surface, 'output-last-message')) args.push('-o', codexLastMessagePath(run))
   if (run.model !== undefined && hasFlag(surface, 'model')) args.push('-m', run.model)
   return args
@@ -143,6 +181,9 @@ export const codexCliProvider: AgentProvider = {
       // 给空，界面退回自由输入，而不是编一份清单出来。
       models: [],
       permissionTiers: supportedTiers(choicesOf(help, 'sandbox'), help),
+      // 有 -c 配置覆盖就能注入 MCP server（见 gateArgs）。
+      canAskUser: hasFlag(help, 'config'),
+      canPromptPermission: false,
       help,
       ...(canResume ? { resumeHelp } : {}),
     }

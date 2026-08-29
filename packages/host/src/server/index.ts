@@ -16,13 +16,15 @@ import { basename, extname, isAbsolute, join, normalize, relative, resolve as re
 import { randomUUID } from 'node:crypto'
 import {
   archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropReferences, editTask, moveTask,
-  unarchiveTask, type Column, type Task, type TaskEdit, type TaskId,
+  unarchiveTask, PERMISSION_TIERS, type Column, type Task, type TaskEdit, type TaskId,
 } from '@loopkanban/core'
 import { AgentPool, type DetectedAgent } from '../agents/index.ts'
 import {
   canInline, mimeOf, safeFilename, AttachmentStore,
   MAX_ATTACHMENTS_PER_COMMENT, MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
 } from '../attachments/index.ts'
+import type { DecisionHub } from '../decisions/index.ts'
+import { DecisionInputError } from '../decisions/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
@@ -82,6 +84,11 @@ export interface ServerOptions {
    * 而不是给一个按下去永远失败的按钮。
    */
   readonly testEnvs?: TestEnvs
+  /**
+   * 决策中枢（权限审批 / 向人提问）。不给则那几条接口一律 503，
+   * runner 那边也不会给执行接 gate —— 两边的一致性由装配处保证。
+   */
+  readonly decisions?: DecisionHub
   readonly bus?: RunBus
   /** 0 表示由系统分配随机端口（默认）。 */
   readonly port?: number
@@ -146,6 +153,10 @@ function describeAgent({ provider, caps }: DetectedAgent): Record<string, unknow
     // 探测到的模型清单。空数组表示这个 CLI 没法枚举，界面据此退回自由输入。
     models: caps.models,
     permissionTiers: caps.permissionTiers,
+    // 反向通道的能力：能不能向人提问、能不能把权限审批路由给人。
+    // 界面据此决定要不要展示 supervised 档与"提问可用"的说明。
+    canAskUser: caps.canAskUser,
+    canPromptPermission: caps.canPromptPermission,
     // 档位名字对不上实际约束时的警示，UI 有义务展示 —— 不能吞掉。
     ...(caps.permissionCaveat === undefined ? {} : { permissionCaveat: caps.permissionCaveat }),
   }
@@ -193,6 +204,78 @@ function resolveRelated(raw: unknown, siblings: readonly Task[], self: TaskId | 
     }
     const id = asTaskId(item)
     if (!ids.includes(id)) ids.push(id)
+  }
+  return { ok: true, ids }
+}
+
+/**
+ * 校验一批依赖卡片 id。
+ *
+ * 依赖与关联共用同一批基础约束 —— 同项目、必须存在、不含自己：依赖跨了项目
+ * 永远等不到完成，指向查无此卡的 id 会让调度器永远算它"依赖未完成"，而那张
+ * 卡在界面上根本不存在，没有任何操作能解开它。
+ *
+ * 依赖比关联多一条：**不许成环**。沿着依赖链走回这张卡，就是环上的卡互相等
+ * —— 谁也不会先开工，这张卡从队列里彻底消失。只拒绝"这次修改造出的、经过
+ * 自己的环"；别处已经存在的环不是这次编辑造出来的，不该由它背锅。
+ *
+ * @param raw - 请求里的原始值；`null` 与缺席都当作"清空"。
+ * @param siblings - 同项目的全部卡片，存在性按它判。
+ * @param self - 这张卡自己；建卡时还没有，给 null（新卡不可能成环）。
+ * @param all - 全部卡片，成环检测沿它走。
+ */
+function resolveBlocked(
+  raw: unknown,
+  siblings: readonly Task[],
+  self: TaskId | null,
+  all: readonly Task[],
+): RelatedResult {
+  if (raw === null || raw === undefined) return { ok: true, ids: [] }
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: 'bad-request', detail: 'blockedBy 要给一个任务 id 数组' }
+  }
+  const known = new Set(siblings.map((task) => String(task.id)))
+  const ids: TaskId[] = []
+  for (const item of raw as readonly unknown[]) {
+    if (typeof item !== 'string') {
+      return { ok: false, error: 'bad-request', detail: 'blockedBy 里只能是任务 id' }
+    }
+    if (self !== null && item === String(self)) {
+      return { ok: false, error: 'self-dependency', detail: '一张卡不能依赖它自己' }
+    }
+    if (!known.has(item)) {
+      return {
+        ok: false,
+        error: 'no-such-blocked-task',
+        detail: `${item} 不在这个项目里 —— 只能依赖同项目的卡`,
+      }
+    }
+    const id = asTaskId(item)
+    if (!ids.includes(id)) ids.push(id)
+  }
+  if (self !== null && ids.length > 0) {
+    // 从新选的依赖出发沿着 blockedBy 走：能到这张卡自己就是环。带父指针做
+    // BFS，拒绝的时候能把整条链亮给调用方看。
+    const edges = new Map(all.map((task) => [String(task.id), task.blockedBy.map(String)]))
+    const me = String(self)
+    const come = new Map<string, string | null>(ids.map((id) => [String(id), null]))
+    const queue = ids.map((id) => String(id))
+    while (queue.length > 0) {
+      const current = queue.shift() as string
+      if (current === me) {
+        const chain: string[] = []
+        let at: string | null = current
+        while (at !== null) { chain.unshift(at); at = come.get(at) ?? null }
+        return {
+          ok: false,
+          error: 'dependency-cycle',
+          detail: `依赖成环：${chain.join(' → ')} —— 沿着依赖链走回了这张卡，环上的卡互相等，谁也不会开工`,
+        }
+      }
+      for (const next of edges.get(current) ?? []) {
+        if (!come.has(next)) { come.set(next, current); queue.push(next) }
+      }
+    }
   }
   return { ok: true, ids }
 }
@@ -316,6 +399,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const review = options.review
   const scheduler = options.scheduler
   const testEnvs = options.testEnvs
+  const decisions = options.decisions
   const attachmentStore = options.attachments
   const staticDir = options.staticDir === undefined ? undefined : resolvePath(options.staticDir)
   const devServer = options.devServer === undefined ? undefined : new URL(options.devServer)
@@ -336,7 +420,20 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const port = (server.address() as AddressInfo).port
-    const guard = guardRequest(req, { token, port })
+    const guard = guardRequest(req, {
+      token, port,
+      // gate shim 只有限权 bearer token：只能为它自己的 run 创建/轮询决策。
+      // 校验逻辑在决策中枢，这里只递一个谓词过去。
+      ...(decisions === undefined ? {} : {
+        bearer: (bearer, pathname) => {
+          const owner = decisions.runIdForToken(bearer)
+          if (owner === null) return false
+          // 只有它自己这次执行的两条路：创建决策、查看/轮询决策。
+          return pathname === `/api/runs/${owner}/decisions`
+            || pathname.startsWith(`/api/runs/${owner}/decisions/`)
+        },
+      }),
+    })
     if (!guard.ok) {
       sendJson(res, guard.status, { error: guard.reason, detail: guard.detail })
       return
@@ -399,8 +496,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       for (const pr of storage.listAllPullRequests()) {
         (prs[pr.taskId] ??= []).push(pr)
       }
+      // 每张卡跑过几轮也一次读完：卡面上的"第 N 轮"标记靠它。
+      const rounds: Record<string, number> = {}
+      for (const [taskId, count] of storage.runCounts()) rounds[taskId] = count
+      // 等人拍板的决策挂在哪张卡上，也一次读完 —— Agent 停下来等审批/
+      // 等回答的时候，卡要是毫无表示，人根本不会知道有东西在等他。
+      const pending: Record<string, { id: string; kind: string }[]> = {}
+      for (const [taskId, list] of decisions?.pendingByTask() ?? []) {
+        pending[taskId] = list.map((item) => ({ id: item.id, kind: item.kind }))
+      }
       sendJson(res, 200, {
-        projects: storage.listProjects(), tasks, live, attachments, prs, failures,
+        projects: storage.listProjects(), tasks, live, attachments, prs, failures, rounds, pending,
       }, extraHeaders)
       return
     }
@@ -842,7 +948,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (project === null) { sendJson(res, 404, { error: 'project-not-found' }); return }
 
       const body = await readJsonBody(req) as
-        (Partial<{ name: string; baseBranch: string; testCommand: string | null }> & Record<string, unknown>)
+        (Partial<{ name: string; baseBranch: string; testCommand: string | null; testEnvFiles: string[] | null }> & Record<string, unknown>)
         | undefined
       const name = body?.name?.trim()
       const baseBranch = body?.baseBranch?.trim()
@@ -850,6 +956,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       // 两者必须分得开，否则改个项目名就会顺手把启动命令抹掉。
       const testCommand = body !== undefined && 'testCommand' in body
         ? (body['testCommand'] as string | null) ?? ''
+        : undefined
+      const testEnvFiles = body !== undefined && 'testEnvFiles' in body
+        ? (Array.isArray(body['testEnvFiles'])
+          ? (body['testEnvFiles'] as unknown[])
+            .filter((entry): entry is string => typeof entry === 'string')
+            .map((entry) => entry.trim())
+            .filter((entry) => entry.length > 0)
+          : [])
         : undefined
       if (name !== undefined && name.length === 0) {
         sendJson(res, 400, { error: 'bad-request', detail: '项目名不能为空' })
@@ -874,6 +988,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         ...(name === undefined ? {} : { name }),
         ...(baseBranch === undefined ? {} : { baseBranch }),
         ...(testCommand === undefined ? {} : { testCommand }),
+        ...(testEnvFiles === undefined ? {} : { testEnvFiles }),
       })) {
         sendJson(res, 404, { error: 'project-not-found' })
         return
@@ -925,7 +1040,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (method === 'POST' && pathname === '/api/tasks') {
       const body = await readJsonBody(req) as Partial<{
         projectId: string; description: string; acceptance: string[]
-        preferredProvider: string; model: string; relatedTo: string[]
+        preferredProvider: string; model: string; relatedTo: string[]; blockedBy: string[]
       }> | undefined
       // 仓库与基线跟着项目走，不由建卡方指定 —— 任务干活的地方是这个项目
       // 派生出来的 worktree，两者对不上就没有意义。
@@ -944,6 +1059,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         })
         return
       }
+      // 依赖一样建卡时就能带上。新卡还没有 id，谁也依赖不了它，成环检查天然
+      // 不用做 —— resolveBlocked 里 self 为 null 时会跳过。
+      const blocked = resolveBlocked(body?.blockedBy, tasks, null, tasks)
+      if (!blocked.ok) {
+        sendJson(res, blocked.error === 'bad-request' ? 400 : 422, {
+          error: blocked.error, detail: blocked.detail,
+        })
+        return
+      }
       const created: Task = {
         id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
         projectId: project.id,
@@ -958,7 +1082,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         baseBranch: project.baseBranch,
         ...(body?.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
         ...(body?.model === undefined ? {} : { model: body.model }),
-        blockedBy: [],
+        blockedBy: blocked.ids,
         relatedTo: related.ids,
         createdAt: now,
         updatedAt: now,
@@ -1304,6 +1428,19 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         return
       }
       const { expectedRevision, ...rest } = body
+      // permission 的取值在这里把关：不认识的档位当场拒绝，而不是存进库
+      // 里等派活时才炸。空串等价于"回到默认"，归一成 undefined（清空）。
+      if ('permission' in rest) {
+        const asked = rest['permission']
+        if (asked !== null && (typeof asked !== 'string' || !(PERMISSION_TIERS as readonly string[]).includes(asked))) {
+          sendJson(res, 422, {
+            error: 'bad-permission',
+            detail: `没有 ${String(asked)} 这一档，只能是：${PERMISSION_TIERS.join(' / ')}`,
+          })
+          return
+        }
+        if (asked === null || asked === '') rest['permission'] = null
+      }
       // null 意为"清空这个字段"。字段缺席只意味着"这次没提到它"，两者不能混为
       // 一谈 —— JSON 里没有 undefined，客户端要清空只能显式送 null。
       const edit = Object.fromEntries(
@@ -1322,6 +1459,24 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           return
         }
         checked = { ...edit, relatedTo: related.ids }
+      }
+      // 依赖的校验比关联多一层：成环的依赖链永远解不开，存进去等于让这张卡
+      // 从队列里无声消失。拒绝是整批的 —— 半截依赖比没有依赖更难查。
+      if ('blockedBy' in rest) {
+        const everyone = storage.listTasks()
+        const blocked = resolveBlocked(
+          rest['blockedBy'],
+          everyone.filter((other) => other.projectId === task.projectId),
+          task.id,
+          everyone,
+        )
+        if (!blocked.ok) {
+          sendJson(res, blocked.error === 'bad-request' ? 400 : 422, {
+            error: blocked.error, detail: blocked.detail,
+          })
+          return
+        }
+        checked = { ...checked, blockedBy: blocked.ids }
       }
       const edited = editTask(task, { expectedRevision, edit: checked, now: Date.now() })
       if (!edited.ok) {
@@ -1688,6 +1843,99 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       const stopped = await runner.cancel(asRunId(decodeURIComponent(cancelTarget)))
       sendJson(res, stopped ? 202 : 404, { stopped }, extraHeaders)
       return
+    }
+
+    /*
+     * ── 决策：权限审批 / 向人提问 ───────────────────────────
+     *
+     * 四条路，两种身份：
+     *
+     *   POST   /api/runs/:id/decisions           gate shim 创建（bearer）
+     *   GET    /api/runs/:id/decisions/:decId    gate shim 轮询（bearer + 界面恢复）
+     *   GET    /api/runs/:id/decisions           界面列出
+     *   POST   /api/runs/:id/decisions/:decId    界面拍板
+     *
+     * 创建与拍板的负载校验都做在路由里：shim 那头是 Agent 的输出，形状
+     * 不能信；界面这头要给出人能读懂的拒绝理由。
+     */
+    const decisionsOf = matchPath(pathname, /^\/api\/runs\/([^/]+)\/decisions$/)
+    if (decisionsOf !== null) {
+      const runId = asRunId(decodeURIComponent(decisionsOf))
+      if (decisions === undefined) { sendJson(res, 503, { error: 'no-decisions' }); return }
+      if (storage.getRun(runId) === null) { sendJson(res, 404, { error: 'run-not-found' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, { decisions: decisions.list(runId) }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req) as { kind?: string; payload?: unknown } | undefined
+        if (body?.kind !== 'permission' && body?.kind !== 'question') {
+          sendJson(res, 422, { error: 'bad-kind', detail: "kind 只能是 'permission' 或 'question'" })
+          return
+        }
+        try {
+          const decision = decisions.create(runId, { kind: body.kind, payload: body.payload })
+          sendJson(res, 201, { decision }, extraHeaders)
+        } catch (error) {
+          if (!(error instanceof DecisionInputError)) throw error
+          sendJson(res, 422, { error: 'bad-payload', detail: error.message })
+        }
+        return
+      }
+    }
+
+    // 这里要两个捕获组（run id + decision id），matchPath 只回第一个组 —— 直接用正则。
+    const decisionTarget = /^\/api\/runs\/([^/]+)\/decisions\/([^/]+)$/.exec(pathname)
+    if (decisionTarget !== null) {
+      if (decisions === undefined) { sendJson(res, 503, { error: 'no-decisions' }); return }
+      const runId = asRunId(decodeURIComponent(decisionTarget[1] as string))
+      const id = decodeURIComponent(decisionTarget[2] as string)
+      const decision = decisions.get(runId, id)
+      if (decision === null) { sendJson(res, 404, { error: 'decision-not-found' }); return }
+
+      if (method === 'GET') {
+        sendJson(res, 200, { decision }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req) as
+          { decision?: string; scope?: string; answer?: string } | undefined
+        let status: 'allowed' | 'denied' | 'answered'
+        let answer: unknown
+        let scope: 'once' | 'run' = 'once'
+        if (decision.kind === 'permission') {
+          // 权限的拍板必须明确 allow/deny —— 没有"算了"这个选项。
+          if (body?.decision !== 'allow' && body?.decision !== 'deny') {
+            sendJson(res, 422, { error: 'bad-decision', detail: "权限请求要明确 decision: 'allow' 或 'deny'" })
+            return
+          }
+          status = body.decision === 'allow' ? 'allowed' : 'denied'
+          scope = body.scope === 'run' ? 'run' : 'once'
+          answer = {
+            decision: body.decision,
+            scope,
+            ...(typeof body['answer'] === 'string' && body.answer.length > 0 ? { message: body.answer } : {}),
+          }
+        } else {
+          const text = body?.answer
+          if (typeof text !== 'string' || text.trim().length === 0) {
+            sendJson(res, 422, { error: 'bad-answer', detail: '回答不能是空的' })
+            return
+          }
+          status = 'answered'
+          answer = { text: text.trim() }
+        }
+        // 已被处理过（并发点了两下、或超时刚收场）是 409：重读后就没有
+        // 任何可做的了，不是"再试一次"的问题。
+        const settled = decisions.resolve(runId, id, { status, answer }, scope)
+        if (settled === null) {
+          sendJson(res, 409, { error: 'already-resolved', detail: '这条决策已经被处理过了' })
+          return
+        }
+        sendJson(res, 200, { decision: settled }, extraHeaders)
+        return
+      }
     }
 
     // ── Run 详情 ────────────────────────────────────────────

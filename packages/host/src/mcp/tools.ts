@@ -265,7 +265,8 @@ export const TOOLS: readonly ToolSpec[] = [
     title: '新建任务',
     description:
       '在某个项目下建一张卡。新卡一律落 Backlog —— 要它排队等执行，再调 move_task 到 ready。'
-      + 'relatedTo 只能指向同项目的卡，派活时它们会被展开写进 TASK.md 当参考资料。',
+      + 'relatedTo 只能指向同项目的卡，派活时它们会被展开写进 TASK.md 当参考资料。'
+      + 'blockedBy 是硬依赖：它们全部进入 Done 之前这张卡不会被认领，同样只能指向同项目的卡。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -273,6 +274,7 @@ export const TOOLS: readonly ToolSpec[] = [
         description: { type: 'string', description: '任务内容。第一行会被当作这张卡的名字' },
         acceptance: { type: 'array', items: { type: 'string' }, description: '验收标准，可选' },
         relatedTo: { type: 'array', items: { type: 'string' }, description: '关联的同项目卡片 id' },
+        blockedBy: { type: 'array', items: { type: 'string' }, description: '依赖的同项目卡片 id，全部做完这张卡才会被派出' },
         preferredProvider: { type: 'string', description: '指定执行器；不给由调度器挑' },
         model: { type: 'string', description: '指定模型；只在指定了执行器时有意义' },
       },
@@ -283,6 +285,7 @@ export const TOOLS: readonly ToolSpec[] = [
       const projectId = optionalStr(args, 'projectId')
       const acceptance = optionalStrList(args, 'acceptance')
       const relatedTo = optionalStrList(args, 'relatedTo')
+      const blockedBy = optionalStrList(args, 'blockedBy')
       const preferredProvider = optionalStr(args, 'preferredProvider')
       const model = optionalStr(args, 'model')
       const { task } = await client.post<{ task: Task }>('/api/tasks', {
@@ -290,6 +293,7 @@ export const TOOLS: readonly ToolSpec[] = [
         ...(projectId === undefined ? {} : { projectId }),
         ...(acceptance === undefined ? {} : { acceptance }),
         ...(relatedTo === undefined ? {} : { relatedTo }),
+        ...(blockedBy === undefined ? {} : { blockedBy }),
         ...(preferredProvider === undefined ? {} : { preferredProvider }),
         ...(model === undefined ? {} : { model }),
       })
@@ -300,8 +304,9 @@ export const TOOLS: readonly ToolSpec[] = [
     name: 'update_task',
     title: '改一张卡的需求',
     description:
-      '改描述、验收标准、关联、执行器或模型。**正在执行的卡改不动** —— 那会让人和 Agent '
-      + '对着两份不同的规格，要改先 cancel_run。relatedTo 给空数组就是取消全部关联。'
+      '改描述、验收标准、关联、依赖、执行器或模型。**正在执行的卡改不动** —— 那会让人和 Agent '
+      + '对着两份不同的规格，要改先 cancel_run。relatedTo 给空数组就是取消全部关联；blockedBy '
+      + '给空数组就是取消全部依赖 —— 它是硬依赖，成环会被拒。'
       + '不给 expectedRevision 时按此刻的 revision 提交；要防"读完到写入之间被人动过"就显式给。',
     inputSchema: {
       type: 'object',
@@ -310,6 +315,7 @@ export const TOOLS: readonly ToolSpec[] = [
         description: { type: 'string' },
         acceptance: { type: 'array', items: { type: 'string' } },
         relatedTo: { type: 'array', items: { type: 'string' }, description: '关联的同项目卡片 id；空数组表示全部取消' },
+        blockedBy: { type: 'array', items: { type: 'string' }, description: '依赖的同项目卡片 id；空数组表示全部取消' },
         preferredProvider: { type: 'string', description: '给 null 表示不再指定' },
         model: { type: 'string', description: '给 null 表示用该 CLI 自己的默认' },
         expectedRevision: { type: 'number', description: 'CAS 凭据；不给则用此刻的' },
@@ -336,6 +342,7 @@ export const TOOLS: readonly ToolSpec[] = [
       if ('description' in args) patch['description'] = str(args, 'description')
       if ('acceptance' in args) patch['acceptance'] = strList(args, 'acceptance')
       if ('relatedTo' in args) patch['relatedTo'] = nullableStrList(args, 'relatedTo')
+      if ('blockedBy' in args) patch['blockedBy'] = nullableStrList(args, 'blockedBy')
       if ('preferredProvider' in args) patch['preferredProvider'] = nullableStr(args, 'preferredProvider')
       if ('model' in args) patch['model'] = nullableStr(args, 'model')
       const { task } = await client.patch<{ task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, patch)

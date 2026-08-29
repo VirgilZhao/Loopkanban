@@ -8,9 +8,9 @@
 
 import type {
   Agent, Attachment, BranchListing, DiffView, DirListing, FileContent, FileListing,
-  FilePreview, LiveLine, PrCapability, Project, PullRequest, Run, RunFailure, RunStats,
-  SchedulerSettings, SchedulerState, ShellEvent, ShellSession, StreamEvent, Task, TaskComment,
-  TaskEdit, TestEnv, TestEnvEvent, Workspace,
+  FilePreview, LiveLine, PendingDecision, PrCapability, Project, PullRequest, Run, RunDecision,
+  RunFailure, RunStats, SchedulerSettings, SchedulerState, ShellEvent, ShellSession, StreamEvent,
+  Task, TaskComment, TaskEdit, TestEnv, TestEnvEvent, Workspace,
 } from './types.ts'
 
 /** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
@@ -70,6 +70,10 @@ export const api = {
     prs: Record<string, PullRequest[]>
     /** Review 里上一轮没跑成的卡；跑成了的、以及别的列的卡不在里面。 */
     failures: Record<string, RunFailure>
+    /** 每张卡跑过几轮；一轮都没跑过的卡不在里面。 */
+    rounds: Record<string, number>
+    /** 等人拍板的决策挂在哪张卡上 —— 卡面徽标的数据源。 */
+    pending: Record<string, PendingDecision[]>
   }>('/api/state'),
 
   projects: () => call<{ projects: Project[] }>('/api/projects'),
@@ -80,9 +84,9 @@ export const api = {
    */
   updateProject: (
     projectId: string,
-    // testCommand 传 null 是"清空"。省略与清空必须分得开，否则改个名字就会
-    // 顺手把启动命令抹掉。
-    patch: { name?: string; baseBranch?: string; testCommand?: string | null },
+    // testCommand / testEnvFiles 传 null 是"清空"。省略与清空必须分得开，
+    // 否则改个名字就会顺手把启动命令抹掉。
+    patch: { name?: string; baseBranch?: string; testCommand?: string | null; testEnvFiles?: string[] | null },
   ) =>
     call<{ project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
       method: 'PATCH', body: JSON.stringify(patch),
@@ -212,6 +216,29 @@ export const api = {
   /** 取消执行，会连同整棵进程树一起收掉。 */
   cancel: (runId: string) =>
     call<{ stopped: boolean }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
+
+  /**
+   * 一次执行的全部决策（权限审批 / 向人提问），按时间正序。
+   * 面板打开时拉一遍，之后靠事件流里的 decision / decision_resolved 增量更新。
+   */
+  decisions: (runId: string) =>
+    call<{ decisions: RunDecision[] }>(`/api/runs/${encodeURIComponent(runId)}/decisions`),
+
+  /**
+   * 对一条决策拍板。
+   *
+   * 权限：`decision: 'allow' | 'deny'`；`scope: 'run'` 表示本次执行内对该
+   * 工具不再询问。提问：`answer` 是回给 Agent 的那句话。
+   */
+  resolveDecision: (
+    runId: string,
+    id: string,
+    input: { decision?: 'allow' | 'deny'; scope?: 'once' | 'run'; answer?: string },
+  ) =>
+    call<{ decision: RunDecision }>(
+      `/api/runs/${encodeURIComponent(runId)}/decisions/${encodeURIComponent(id)}`,
+      { method: 'POST', body: JSON.stringify(input) },
+    ),
 
   /** 编辑任务内容。执行中的卡片会被拒绝。 */
   edit: (taskId: string, expectedRevision: number, edit: TaskEdit) =>
@@ -494,7 +521,10 @@ export function subscribeTestEnv(taskId: string, onEvent: (event: TestEnvEvent) 
 
 export function subscribeRun(runId: string, onEvent: (event: StreamEvent) => void): () => void {
   const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`, { withCredentials: true })
-  const kinds = ['session', 'notice', 'text', 'tool', 'usage', 'finished', 'raw']
+  // decision / decision_resolved 是"等人拍板"那条通道上的事 ——
+  // 界面要据此把审批卡与提问卡弹出来、再把结果收掉。
+  const kinds = ['session', 'notice', 'text', 'tool', 'usage', 'finished', 'raw',
+    'decision', 'decision_resolved']
   for (const kind of kinds) {
     source.addEventListener(kind, (event) => {
       const message = event as MessageEvent<string>

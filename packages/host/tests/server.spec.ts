@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
 import { AttachmentStore, MAX_ATTACHMENTS_PER_COMMENT } from '../src/attachments/index.ts'
+import { DecisionHub } from '../src/decisions/index.ts'
 import { Storage } from '../src/storage/index.ts'
 import { GitHub } from '../src/pr/index.ts'
 import { Review } from '../src/review/index.ts'
@@ -15,6 +16,7 @@ import { capture } from '../src/agents/discover.ts'
 import { ensureWorktree } from '../src/worktree/index.ts'
 import { TestEnvs } from '../src/testenv/index.ts'
 import { startServer, type RunningServer } from '../src/server/index.ts'
+import { RunBus } from '../src/server/bus.ts'
 
 const T0 = 1_000_000
 const TOKEN = 'test-token-' + 'x'.repeat(32)
@@ -977,6 +979,26 @@ describe('POST /api/tasks', () => {
     expect(bad.status).toBe(422)
     expect(await bad.json()).toMatchObject({ error: 'no-such-related-task' })
   })
+
+  it('建卡也能带上依赖，同项目的约束一样要过', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    const res = await api('/api/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId: PROJECT, description: '排在 t1 后面', blockedBy: ['t1'] }),
+    })
+    expect(res.status).toBe(201)
+    const { task: created } = await res.json() as { task: { id: string; blockedBy: string[] } }
+    expect(created.blockedBy).toEqual(['t1'])
+
+    const bad = await api('/api/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId: PROJECT, description: 'x', blockedBy: ['t-nope'] }),
+    })
+    expect(bad.status).toBe(422)
+    expect(await bad.json()).toMatchObject({ error: 'no-such-blocked-task' })
+  })
 })
 
 describe('PATCH /api/tasks/:id', () => {
@@ -1054,6 +1076,61 @@ describe('PATCH /api/tasks/:id', () => {
     const res = await edit('t1', { expectedRevision: 1, relatedTo: ['t2'] })
     expect(res.status).toBe(422)
     expect(await res.json()).toMatchObject({ error: 'task-running' })
+  })
+
+  it('依赖同项目的卡：存下来、去重；自指是明确的拒绝', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    const self = await edit('t1', { expectedRevision: 1, blockedBy: ['t1'] })
+    expect(self.status).toBe(422)
+    expect(await self.json()).toMatchObject({ error: 'self-dependency' })
+
+    const ok = await edit('t1', { expectedRevision: 1, blockedBy: ['t2', 't2'] })
+    expect(ok.status).toBe(200)
+    expect(store.getTask(asTaskId('t1'))?.blockedBy).toEqual(['t2'])
+  })
+
+  it('依赖跨项目、或指向不存在的卡，一律拒绝', async () => {
+    const other = asProjectId('p-other')
+    store.createProject({
+      id: other, name: '另一个', repoPath: '/other', baseBranch: 'main', createdAt: T0,
+    })
+    store.createTask(task({ id: 't1', column: 'backlog' }))
+    store.createTask(task({ id: 'x1', column: 'backlog', projectId: other, repoPath: '/other' }))
+
+    const cross = await edit('t1', { expectedRevision: 1, blockedBy: ['x1'] })
+    expect(cross.status).toBe(422)
+    expect(await cross.json()).toMatchObject({ error: 'no-such-blocked-task' })
+
+    const ghost = await edit('t1', { expectedRevision: 1, blockedBy: ['t-nope'] })
+    expect(ghost.status).toBe(422)
+    // 一条都没存进去 —— 拒绝是整批的。
+    expect(store.getTask(asTaskId('t1'))?.blockedBy).toEqual([])
+  })
+
+  it('依赖成环被拒 —— 沿着依赖链走回这张卡，环上的卡互相等，谁也不会开工', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog', blockedBy: [asTaskId('t2')] }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.createTask(task({ id: 't3', column: 'backlog' }))
+
+    // t2 依赖 t3 不成环：t1 → t2 → t3 是一条直链。
+    const ok = await edit('t2', { expectedRevision: 1, blockedBy: ['t3'] })
+    expect(ok.status).toBe(200)
+
+    // t3 再回头依赖 t1 就绕死了：t3 → t1 → t2 → t3。
+    const cyclic = await edit('t3', { expectedRevision: 1, blockedBy: ['t1'] })
+    expect(cyclic.status).toBe(422)
+    expect(await cyclic.json()).toMatchObject({ error: 'dependency-cycle' })
+    // 被拒的编辑不存半截。
+    expect(store.getTask(asTaskId('t3'))?.blockedBy).toEqual([])
+  })
+
+  it('空数组就是取消全部依赖', async () => {
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+    store.createTask(task({ id: 't1', column: 'backlog', blockedBy: [asTaskId('t2')] }))
+    const res = await edit('t1', { expectedRevision: 1, blockedBy: [] })
+    expect(res.status).toBe(200)
+    expect(store.getTask(asTaskId('t1'))?.blockedBy).toEqual([])
   })
 })
 
@@ -2317,5 +2394,128 @@ describe('Done 里的二次执行', () => {
     })
     expect(await res.json()).toMatchObject({ requeued: false })
     expect(store.getTask(asTaskId('t1'))?.column).toBe('backlog')
+  })
+})
+
+// ── 决策：权限审批 / 向人提问 ───────────────────────────────
+//
+// 公共用例的 server 没接决策中枢，这一组换成带中枢的：签发的 gate token
+// 限权到"只够创建/轮询自己这次的决策"，人的拍板走 cookie。
+
+describe('决策路由（gate + 人工拍板）', () => {
+  let hub: DecisionHub
+  let gateToken: string
+  const RUN = asRunId('run-dec1')
+
+  const gateApi = (path: string, init: RequestInit = {}): Promise<Response> =>
+    fetch(`http://127.0.0.1:${String(server.port)}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${gateToken}`, 'content-type': 'application/json', ...init.headers },
+    })
+
+  beforeEach(async () => {
+    await server.close()
+    const bus = new RunBus()
+    hub = new DecisionHub({ storage: store, bus })
+    server = await startServer({ storage: store, token: TOKEN, bus, decisions: hub })
+    gateToken = hub.issueToken(RUN)
+    // 外键链：项目已在公共 beforeEach 里建好，这里补卡与 Run。
+    store.createTask(task({ id: 't1', column: 'running' }))
+    store.createRun({
+      id: RUN, taskId: asTaskId('t1'), provider: 'claude', cliVersion: '1',
+      worktreePath: '/repo', branch: 'b', status: 'running', startedAt: T0,
+    })
+  })
+
+  it('shim 用限权 token 创建决策，并轮询到它', async () => {
+    const created = await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: '用哪个方案？' } }),
+    })
+    expect(created.status).toBe(201)
+    const { decision } = await created.json() as { decision: { id: string } }
+
+    const polled = await gateApi(`/api/runs/${RUN}/decisions/${decision.id}`)
+    expect(await polled.json()).toMatchObject({ decision: { status: 'pending' } })
+  })
+
+  it('token 只对自己的 run 有效：拿它打别的 run 的决策路由会被拒', async () => {
+    const other = asRunId('run-other')
+    const res = await gateApi(`/api/runs/${other}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: 'q' } }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('没有 token 的人也创建不了 —— 创建只属于 gate 通道', async () => {
+    const res = await fetch(`http://127.0.0.1:${String(server.port)}/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: 'q' } }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('负载不成立回 422', async () => {
+    const res = await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: '' } }),
+    })
+    expect(res.status).toBe(422)
+  })
+
+  it('人拍板放行权限；再点一下是 409', async () => {
+    const { decision } = await (await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'permission', payload: { tool: 'Bash', input: { command: 'ls' } } }),
+    })).json() as { decision: { id: string } }
+
+    const allow = await api(`/api/runs/${RUN}/decisions/${decision.id}`, {
+      method: 'POST', body: JSON.stringify({ decision: 'allow' }),
+    })
+    expect(allow.status).toBe(200)
+    expect(await allow.json()).toMatchObject({ decision: { status: 'allowed' } })
+
+    const again = await api(`/api/runs/${RUN}/decisions/${decision.id}`, {
+      method: 'POST', body: JSON.stringify({ decision: 'deny' }),
+    })
+    expect(again.status).toBe(409)
+  })
+
+  it('权限的拍板必须明确 allow/deny，提问的必须带非空回答', async () => {
+    const { decision: permission } = await (await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'permission', payload: { tool: 'T', input: {} } }),
+    })).json() as { decision: { id: string } }
+    const { decision: question } = await (await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: 'q' } }),
+    })).json() as { decision: { id: string } }
+
+    const empty = await api(`/api/runs/${RUN}/decisions/${permission.id}`, {
+      method: 'POST', body: JSON.stringify({}),
+    })
+    expect(empty.status).toBe(422)
+    const blank = await api(`/api/runs/${RUN}/decisions/${question.id}`, {
+      method: 'POST', body: JSON.stringify({ answer: '  ' }),
+    })
+    expect(blank.status).toBe(422)
+  })
+
+  it('看板状态捎上每张卡还在等的决策', async () => {
+    await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: 'q' } }),
+    })
+    const state = await (await api('/api/state')).json() as
+      { pending: Record<string, { kind: string }[]> }
+    expect(state.pending['t1']).toHaveLength(1)
+    expect(state.pending['t1']?.[0]?.kind).toBe('question')
+  })
+
+  it('拍板之后回答回到 shim 的轮询里 —— 决策卡片从 pending 变终态', async () => {
+    const { decision } = await (await gateApi(`/api/runs/${RUN}/decisions`, {
+      method: 'POST', body: JSON.stringify({ kind: 'question', payload: { question: 'q' } }),
+    })).json() as { decision: { id: string } }
+    await api(`/api/runs/${RUN}/decisions/${decision.id}`, {
+      method: 'POST', body: JSON.stringify({ answer: '按方案 A' }),
+    })
+    const polled = await gateApi(`/api/runs/${RUN}/decisions/${decision.id}`)
+    const { decision: settled } = await polled.json() as
+      { decision: { status: string; answer: { text: string } } }
+    expect(settled.status).toBe('answered')
+    expect(settled.answer.text).toBe('按方案 A')
   })
 })

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { asProjectId, asRunId, asTaskId, moveTask, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
+import { DecisionHub } from '../src/decisions/index.ts'
 import { listStaged } from '../src/attachments/index.ts'
 import { capture } from '../src/agents/discover.ts'
 import { parseHelp } from '../src/agents/help-parser.ts'
@@ -58,7 +59,7 @@ function scriptedProvider(lines: string[], exitCode = 0, tail = ''): AgentProvid
 const caps = (): AgentCaps => ({
   id: 'scripted', bin: '/fake', version: '9.9.9',
   streaming: true, canPinSessionId: true, canResume: false, canPickModel: true, models: [],
-  permissionTiers: ['standard'], help: parseHelp(''),
+  permissionTiers: ['standard'], canAskUser: false, canPromptPermission: false, help: parseHelp(''),
 })
 
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {
@@ -884,5 +885,134 @@ describe('异常路径的收尾（回归）', () => {
     expect(run?.diagnostic).toContain('取消')
     // 成功率只看 completed / failed，aborted 不参与。
     expect(store.stats().failed).toBe(0)
+  })
+})
+
+// ── gate：向人提问 / 权限审批的接线 ─────────────────────────
+
+describe('runner 接通 gate', () => {
+  const gatedCaps = (tiers: readonly string[] = ['standard']): AgentCaps => ({
+    ...caps(),
+    canAskUser: true,
+    permissionTiers: tiers as AgentCaps['permissionTiers'],
+  })
+
+  function gatedRunner(
+    provider: AgentProvider,
+    capsOverride: AgentCaps,
+    hub: DecisionHub,
+  ): Runner {
+    return new Runner({
+      storage: store, bus,
+      agents: AgentPool.of([{ provider, caps: capsOverride }]),
+      artifactsRoot: join(sandbox, 'artifacts'),
+      leaseTtlMs: 60_000, timeoutMs: 20_000,
+      decisions: hub,
+      gateUrl: () => 'http://127.0.0.1:9',
+    })
+  }
+
+  /** 捕获 buildStart 收到的 RunContext，别的什么都不干。 */
+  function capturingProvider(record: (run: RunContext) => void): AgentProvider {
+    return {
+      ...scriptedProvider([JSON.stringify({ kind: 'finished', ok: true })]),
+      buildStart: (run: RunContext): SpawnSpec => {
+        record(run)
+        return scriptedProvider([], 0).buildStart(run, gatedCaps())
+      },
+    }
+  }
+
+  it('canAskUser 的 CLI 拿到 gate 配置：文件落盘、prompt 教 ask_user、TASK.md 有约束', async () => {
+    store.createTask(task({ id: 't1' }))
+    const hub = new DecisionHub({ storage: store, bus })
+    const seen: RunContext[] = []
+    const r = gatedRunner(capturingProvider((run) => { seen.push(run) }), gatedCaps(), hub)
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(seen[0]?.gate).toBeDefined()
+    expect(seen[0]?.gate?.token.length).toBeGreaterThan(0)
+    const mcpConfig = JSON.parse(
+      await readFile(seen[0]?.gate?.mcpConfigPath ?? '', 'utf8'),
+    ) as { mcpServers: Record<string, { command: string; args: string[] }> }
+    // shim 用宿主自己的 node 启动，不赌 PATH。
+    expect(mcpConfig.mcpServers['loopkanban']?.command).toBe(process.execPath)
+    expect(mcpConfig.mcpServers['loopkanban']?.args[0]).toContain('gate-shim.mjs')
+    const opencodeConfig = JSON.parse(
+      await readFile(seen[0]?.gate?.envConfigPath ?? '', 'utf8'),
+    ) as { mcp: Record<string, { type: string; timeout: number }> }
+    expect(opencodeConfig.mcp['loopkanban']?.type).toBe('local')
+    // 等人的调用动辄几分钟，工具超时必须放宽。
+    expect(opencodeConfig.mcp['loopkanban']?.timeout).toBeGreaterThan(60_000)
+    // prompt（唯一保证会读的地方）教会提问的用法。
+    expect(seen[0]?.prompt).toContain('ask_user')
+    expect(seen[0]?.prompt).toContain('没有人会实时读你输出的文字')
+  })
+
+  it('canAskUser 为假时不接 gate，prompt 也不提 ask_user', async () => {
+    store.createTask(task({ id: 't1' }))
+    const hub = new DecisionHub({ storage: store, bus })
+    const seen: RunContext[] = []
+    const r = gatedRunner(capturingProvider((run) => { seen.push(run) }), { ...gatedCaps(), canAskUser: false }, hub)
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(seen[0]?.gate).toBeUndefined()
+    expect(seen[0]?.prompt).not.toContain('ask_user')
+  })
+
+  it('卡上的 supervised 档被不支持的 CLI 退回 standard，并明说', async () => {
+    store.createTask(task({ id: 't1', permission: 'supervised' }))
+    const hub = new DecisionHub({ storage: store, bus })
+    const seen: RunContext[] = []
+    const r = gatedRunner(capturingProvider((run) => { seen.push(run) }), gatedCaps(), hub)
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(seen[0]?.permission).toBe('standard')
+    const notices = store.readEvents(started.run.id).filter((e) => e.kind === 'notice')
+    expect(notices.some((e) => String((e.payload as { text?: string }).text).includes('supervised'))).toBe(true)
+  })
+
+  it('支持的 CLI 照单全收卡上的档位', async () => {
+    store.createTask(task({ id: 't1', permission: 'supervised' }))
+    const hub = new DecisionHub({ storage: store, bus })
+    const seen: RunContext[] = []
+    const r = gatedRunner(
+      capturingProvider((run) => { seen.push(run) }),
+      gatedCaps(['standard', 'supervised']),
+      hub,
+    )
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await settle(started.run.id)
+
+    expect(seen[0]?.permission).toBe('supervised')
+  })
+
+  it('执行终止时悬着的决策被收场，gate token 作废', async () => {
+    store.createTask(task({ id: 't1' }))
+    const hub = new DecisionHub({ storage: store, bus })
+    // 一个不会自己结束的进程，给取消留时间。
+    const r = gatedRunner(scriptedProvider(['setInterval(() => {}, 1000)'], 0,
+      "setInterval(() => {}, 1000)"), gatedCaps(), hub)
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    const decision = hub.create(started.run.id, { kind: 'question', payload: { question: 'q' } })
+    expect(decision.status).toBe('pending')
+
+    await r.cancel(started.run.id)
+    await settle(started.run.id)
+
+    expect(store.getDecision(decision.id)?.status).toBe('cancelled')
   })
 })

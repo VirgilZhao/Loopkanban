@@ -31,7 +31,6 @@ import { choicesOf, hasFlag, parseHelp, type HelpSurface } from '../help-parser.
 import type {
   AgentCaps, AgentEvent, AgentProvider, PermissionCaveat, PermissionTier, RunContext,
 } from '../types.ts'
-
 /** 唯一的权限开关：自动批准没有被显式拒绝的请求。 */
 const AUTO_FLAG = 'auto'
 
@@ -114,7 +113,13 @@ function spec(run: RunContext, argv: readonly string[]): SpawnSpec {
   return {
     argv,
     cwd: run.worktreePath,
-    env: scrubEnv(process.env, run.envOverrides).env,
+    // OPENCODE_CONFIG 把 gate 指给 opencode（配置与用户自己的**合并**，已
+    // 实测确认；合并而非替换是接入的前提 —— 替换的话它的登录态就丢了）。
+    // envOverrides 仍然是唯一的注入通道，gate 只是在这里多带一个键。
+    env: scrubEnv(process.env, {
+      ...(run.gate === undefined ? {} : { OPENCODE_CONFIG: run.gate.envConfigPath }),
+      ...run.envOverrides,
+    }).env,
     // stdin 必须掐掉：万一某个请求逃过 --auto，也不能让它坐在那儿等人输入。
     stdin: 'ignore',
     stderr: 'pipe',
@@ -213,6 +218,10 @@ export const opencodeCliProvider: AgentProvider = {
       permissionTiers: supportedTiers(help),
       // 档位名字对不上实际约束，这句话必须一路传到界面上。
       permissionCaveat: OPENCODE_PERMISSION_CAVEAT,
+      // gate 走 OPENCODE_CONFIG（见 spec）：没有命令行入口要探测，
+      // 环境变量通道是 opencode 一直就有的。
+      canAskUser: true,
+      canPromptPermission: false,
       help,
       // 续跑是同一条命令，参数面就是 help 本身，不必单独记一份。
     }

@@ -225,6 +225,33 @@ describe('写入', () => {
     expect(created.relatedTo).toEqual(['t1'])
   })
 
+  it('create_task 能带上依赖，update_task 能改也能整批取消', async () => {
+    store.createTask(task({ id: 't1' }))
+    const { data } = await callTool('create_task', {
+      projectId: String(PROJECT), description: '排在 t1 后面', blockedBy: ['t1'],
+    })
+    expect((data as { blockedBy: string[] }).blockedBy).toEqual(['t1'])
+
+    store.createTask(task({ id: 't2' }))
+    const changed = await callTool('update_task', { taskId: 't2', blockedBy: ['t1'] })
+    expect(changed.isError).toBe(false)
+    expect(store.getTask(asTaskId('t2'))?.blockedBy).toEqual([asTaskId('t1')])
+
+    const cleared = await callTool('update_task', { taskId: 't2', blockedBy: [] })
+    expect(cleared.isError).toBe(false)
+    expect(store.getTask(asTaskId('t2'))?.blockedBy).toEqual([])
+  })
+
+  it('依赖成环会被看板挡下来，连链一起带回给 Agent', async () => {
+    store.createTask(task({ id: 't1', column: 'backlog', blockedBy: [asTaskId('t2')] }))
+    store.createTask(task({ id: 't2', column: 'backlog' }))
+
+    const result = await callTool('update_task', { taskId: 't2', blockedBy: ['t1'] })
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('dependency-cycle')
+    expect(result.text).toContain('谁也不会开工')
+  })
+
   it('关联跨项目会被看板挡下来，原因原样带回给 Agent', async () => {
     const other = asProjectId('p2')
     store.createProject({ id: other, name: '另一个', repoPath: '/other', baseBranch: 'main', createdAt: T0 })

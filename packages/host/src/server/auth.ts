@@ -90,6 +90,21 @@ export interface GuardConfig {
    * 这不放松任何一道关，只是换个地方取同一个 token。
    */
   readonly cookieOnly?: boolean
+  /**
+   * 限权 bearer token 的校验。
+   *
+   * gate shim（Agent 侧的反向通道）只带 `Authorization: Bearer <runToken>`，
+   * 没有 cookie。校验器自己判断这个 token 能不能走当前路径 —— 只会对
+   * 限权范围里的那几条路由放行。前三道关（Host、Origin）对它照常生效。
+   */
+  readonly bearer?: (token: string, pathname: string) => boolean
+}
+
+/** 从 `Authorization` 头里拆出 bearer token；不是这个方案就返回 null。 */
+export function readBearer(header: string | undefined): string | null {
+  if (header === undefined) return null
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim())
+  return match === null ? null : (match[1] ?? null)
 }
 
 /**
@@ -127,14 +142,20 @@ export function guardRequest(req: IncomingMessage, config: GuardConfig): GuardRe
     ? null
     : new URL(req.url ?? '/', `http://${host}`).searchParams.get('token')
   const supplied = fromQuery ?? readCookie(req.headers.cookie, TOKEN_COOKIE)
-  if (supplied === null || supplied === undefined || supplied.length === 0) {
-    return deny(401, 'missing-token', '缺少访问 token')
+  if (supplied !== null && supplied !== undefined && supplied.length > 0) {
+    if (tokensEqual(supplied, config.token)) return { ok: true }
   }
-  if (!tokensEqual(supplied, config.token)) {
-    return deny(401, 'bad-token', 'token 不匹配')
+  // 浏览器的路走不通，再看限权 bearer：gate shim 只有这一种凭据。
+  // 校验器按"这个 token 属于哪次执行、当前路径在不在它的范围内"放行。
+  if (config.bearer !== undefined) {
+    const bearer = readBearer(req.headers.authorization)
+    if (bearer !== null && config.bearer(bearer, new URL(req.url ?? '/', `http://${host}`).pathname)) {
+      return { ok: true }
+    }
   }
-
-  return { ok: true }
+  return supplied === null || supplied === undefined || supplied.length === 0
+    ? deny(401, 'missing-token', '缺少访问 token')
+    : deny(401, 'bad-token', 'token 不匹配')
 }
 
 /**

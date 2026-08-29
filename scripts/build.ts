@@ -41,6 +41,11 @@ const result = await build({
 // 前端产物随包分发；host 启动时从这里托管。
 await cp(join(ROOT, 'packages/web/dist'), join(OUT, 'web'), { recursive: true })
 
+// gate shim 是被 Agent CLI 独立 spawn 的进程入口（不是被 import 的模块），
+// esbuild 不会带上它 —— 原样拷过去。运行时按 import.meta.url 找同目录的它，
+// 开发时在 src、发布后在 dist，两边都成立。
+await cp(join(ROOT, 'packages/host/src/mcp/gate-shim.mjs'), join(OUT, 'gate-shim.mjs'))
+
 const bytes = Object.values(result.metafile.outputs).reduce((sum, o) => sum + o.bytes, 0)
 await writeFile(join(OUT, '.build-info'), `${pkg.version}\n${String(bytes)}\n`, 'utf8')
 console.log(`✓ dist/loopkanban.js  ${(bytes / 1024).toFixed(0)} KB`)

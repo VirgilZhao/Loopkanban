@@ -201,6 +201,33 @@ export const MIGRATIONS: readonly string[] = [
   // 加个标记：用到它们的地方（调度判定 vs 渲染规格）从来不重合，混在一列里
   // 每次都要先过滤一遍，而且写下"参考它"就会连带把自己锁死。旧卡默认没有关联。
   `ALTER TABLE tasks ADD COLUMN related_json TEXT NOT NULL DEFAULT '[]';`,
+  // 测试环境启动时要拷进 worktree 的配置文件（相对仓库根的路径，JSON 数组）。
+  // 这类文件（.env.local 之类）多半被 gitignore，worktree 是全新 checkout 天然
+  // 没有它们，而 dev server 没有配置往往起不来 —— 从主工作区拷过去是唯一出路。
+  `ALTER TABLE projects ADD COLUMN test_env_files_json TEXT NOT NULL DEFAULT '[]';`,
+  // 卡片的权限档位。NULL 等于 standard —— 旧卡与新卡在这个语义上没有区别。
+  `ALTER TABLE tasks ADD COLUMN permission TEXT;`,
+  // 一次执行里等人拍板的事：权限审批与向人提问。
+  //
+  // 事件日志只负责"当时发生了什么"，这里存的是**决策本身**的可查记录：
+  // 面板重开时要能恢复出还在等的请求，事后要能查"这轮谁放行了什么"。
+  // payload_json / answer_json 是各 kind 自己的形状（权限带工具名与参数，
+  // 提问带问题与选项），形状由 DecisionHub 解释，存储层不拆包。
+  `
+  CREATE TABLE run_decisions (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT    NOT NULL REFERENCES runs(id),
+    -- 'permission' | 'question'
+    kind         TEXT    NOT NULL,
+    payload_json TEXT    NOT NULL,
+    -- 'pending' | 'allowed' | 'denied' | 'answered' | 'timeout' | 'cancelled'
+    status       TEXT    NOT NULL,
+    answer_json  TEXT,
+    created_at   INTEGER NOT NULL,
+    resolved_at  INTEGER
+  );
+  CREATE INDEX idx_decisions_run ON run_decisions(run_id, created_at);
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

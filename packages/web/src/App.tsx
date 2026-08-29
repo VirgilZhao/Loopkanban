@@ -4,12 +4,14 @@ import {
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
+import { Settings } from 'lucide-react'
 import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { BaseBranchPicker } from '@/components/BaseBranchPicker.tsx'
 import { Column } from '@/components/Column.tsx'
 import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
 import { FileBrowser } from '@/components/FileBrowser.tsx'
 import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
+import { ProjectSettingsDialog } from '@/components/ProjectSettingsDialog.tsx'
 import { RunPanel } from '@/components/RunPanel.tsx'
 import { StatsBar } from '@/components/StatsBar.tsx'
 import { ThemeToggle } from '@/components/ThemeToggle.tsx'
@@ -19,9 +21,9 @@ import { insertPosition } from '@/lib/position.ts'
 import { doneOrder, isUntouchedDraft, projectActivity, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type Project, type PullRequest,
-  type RunFailure,
-  type RunStats, type SchedulerState, type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type PendingDecision,
+  type Project, type PullRequest, type RunFailure, type RunStats, type SchedulerState,
+  type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
@@ -58,6 +60,8 @@ export default function App(): React.JSX.Element {
   const [view, setView] = useState<View>({ kind: 'overview' })
   const [page, setPage] = useState<Page>('tasks')
   const [newProject, setNewProject] = useState(false)
+  // 项目设置弹窗。测试环境的启动命令与配置文件也收在里面 —— 那是项目的事实。
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [deleting, setDeleting] = useState<Project | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -70,6 +74,11 @@ export default function App(): React.JSX.Element {
   const [prs, setPrs] = useState<Record<string, PullRequest[]>>({})
   // Review 里上一轮没跑成的卡。那一列成败同处，不标出来就得一张张点开看。
   const [failures, setFailures] = useState<Record<string, RunFailure>>({})
+  // 每张卡跑过几轮。卡面上的轮次标记靠它；一轮没跑过的卡不在里面。
+  const [rounds, setRounds] = useState<Record<string, number>>({})
+  // 等人拍板的决策（权限审批 / 提问）挂在哪张卡上。Agent 停下来等人的时候，
+  // 卡面必须有个东西喊人 —— 不然关着弹窗就什么都不知道。
+  const [pending, setPending] = useState<Record<string, PendingDecision[]>>({})
   // 看板自己的那条通知：拖拽被拒、改项目、探测 CLI。**任务弹窗里的错误不走
   // 这儿** —— 那条横幅在弹窗背后，说了也看不见，它自己会显示（见 RunPanel）。
   const [notice, setNotice] = useState<{ text: string; tone: 'warn' | 'info' } | null>(null)
@@ -92,7 +101,7 @@ export default function App(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     const [
-      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls, failures: broken },
+      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls, failures: broken, rounds: laps, pending: waiting },
       state, summary,
     ] = await Promise.all([
       api.state(),
@@ -105,6 +114,8 @@ export default function App(): React.JSX.Element {
     setAttachments(clips)
     setPrs(pulls)
     setFailures(broken)
+    setRounds(laps)
+    setPending(waiting)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -226,8 +237,8 @@ export default function App(): React.JSX.Element {
   /**
    * 新卡落到哪个项目。
    *
-   * 概览里没有"当前项目"，只有一个项目时不必逼人先去点它 —— 别的情况就得
-   * 明确选一个，否则任务不知道自己该在哪个仓库里干活。
+   * 项目视角下就是那个项目；概览里没有"当前项目"，只有一个项目时把它当默认
+   * —— 顶栏的路径、基线、设置入口和想法池的"+"都指着它。
    */
   const activeProject = view.kind === 'project'
     ? projectById.get(view.id) ?? null
@@ -243,14 +254,20 @@ export default function App(): React.JSX.Element {
     return map
   }, [scheduler])
 
-  /** 建一张空白卡并立刻选中它，用户接着在弹窗里填内容。 */
-  const createTask = useCallback(() => {
-    if (activeProject === null || creating.current) return
+  /**
+   * 建一张空白卡并立刻选中它，用户接着在弹窗里填内容。
+   *
+   * 概览里点了侧边栏的"新建任务"会先弹项目清单，选中的项目从这里传进来；
+   * 项目视角下（以及想法池的"+"）不传，落当前视角的项目。
+   */
+  const createTask = useCallback((project?: Project) => {
+    const target = project ?? activeProject
+    if (target === null || creating.current) return
     creating.current = true
     void (async () => {
       try {
         // 建一张空白卡，内容在弹窗里写 —— 先落地，再动笔。
-        const { task } = await api.createTask({ projectId: activeProject.id })
+        const { task } = await api.createTask({ projectId: target.id })
         // 记下它是"新建的"：一次没存就关掉的话，这张空卡要收回去。
         draftId.current = task.id
         await refresh()
@@ -387,7 +404,9 @@ export default function App(): React.JSX.Element {
             })
         }}
         onCreate={createTask}
-        canCreate={activeProject !== null}
+        // 概览里点新建会先弹清单选项目，只要还有项目就可点；项目视角下
+        // 项目得真的在 —— 没加载出来时按钮灰着。
+        canCreate={view.kind === 'project' ? activeProject !== null : projects.length > 0}
         archivedCount={archivedCount}
         showArchived={showArchived}
         onToggleArchived={() => { setShowArchived((on) => !on) }}
@@ -450,6 +469,21 @@ export default function App(): React.JSX.Element {
             })}
           </div>
 
+          {/* 项目设置：基本信息（名称、基线）与测试环境（启动命令、要拷进
+              worktree 的配置文件）都在这儿配 —— 它们是项目的事实，不跟着
+              某一张卡走。 */}
+          {activeProject === null ? null : (
+            <button
+              type="button"
+              onClick={() => { setSettingsOpen(true) }}
+              title={t('settings.title')}
+              aria-label={t('settings.title')}
+              className="flex size-7 flex-none items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-raised hover:text-ink"
+            >
+              <Settings className="size-4" />
+            </button>
+          )}
+
           <ThemeToggle />
         </header>
 
@@ -505,6 +539,8 @@ export default function App(): React.JSX.Element {
                 attachments={attachments}
                 prs={prs}
                 failures={failures}
+                rounds={rounds}
+                pending={pending}
                 skips={skipsByTask}
                 onSelect={(task) => { setSelectedId(task.id) }}
                 // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
@@ -562,6 +598,14 @@ export default function App(): React.JSX.Element {
             onClose={() => { setDeleting(null) }}
           />
         )}
+
+        {settingsOpen && activeProject !== null ? (
+          <ProjectSettingsDialog
+            project={activeProject}
+            onSaved={(saved) => { setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p))) }}
+            onClose={() => { setSettingsOpen(false) }}
+          />
+        ) : null}
 
         {newProject ? (
           <NewProjectDialog

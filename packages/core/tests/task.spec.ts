@@ -300,6 +300,18 @@ describe('editTask', () => {
     expect(result.ok && result.value.relatedTo).toEqual([])
   })
 
+  it('permission：这次提到了才改，显式 undefined 是回到默认', () => {
+    const t = task({ column: 'backlog', permission: 'supervised' })
+    const changed = edit(t, { permission: 'strict' })
+    expect(changed.ok && changed.value.permission).toBe('strict')
+    // undefined 显式在 edit 里 = 清空，回到 standard（undefined）。
+    const cleared = edit(changed.ok ? changed.value : t, { permission: undefined })
+    expect(cleared.ok && cleared.value.permission).toBeUndefined()
+    // 这次没提到它：原值不动。
+    const untouched = edit(t, { description: '只改描述' })
+    expect(untouched.ok && untouched.value.permission).toBe('supervised')
+  })
+
   it('关联不是依赖：关联着一张没做完的卡，照样能被认领', () => {
     const linked = task({ column: 'ready', relatedTo: [asTaskId('t2')] })
     const claimed = acquireLease(linked, {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ChevronRight, FolderGit2, Link2, Plus, X } from 'lucide-react'
+import { ChevronRight, Link2, Lock, Plus, X } from 'lucide-react'
 import { Attachments } from '@/components/Attachments.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { Input } from '@/components/ui/input.tsx'
@@ -8,12 +8,12 @@ import { Textarea } from '@/components/ui/textarea.tsx'
 import { useT } from '@/lib/i18n.tsx'
 import { modelOptions, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import { COLUMN_META, type Agent, type Project, type Task, type TaskEdit } from '@/types.ts'
+import {
+  COLUMN_META, PERMISSION_TIERS, type Agent, type PermissionTier, type Task, type TaskEdit,
+} from '@/types.ts'
 
 interface Props {
   task: Task
-  /** 任务所属项目；卡片就在它派生出来的 worktree 里干活。 */
-  project: Project | null
   /**
    * 同项目的其它卡片，可供关联。**只能同项目** —— 任务在这个项目派生的
    * worktree 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
@@ -33,7 +33,9 @@ interface Draft {
   acceptance: string[]
   preferredProvider: string | undefined
   model: string | undefined
+  permission: PermissionTier | undefined
   relatedTo: string[]
+  blockedBy: string[]
 }
 
 /** 从任务取出可编辑的那部分，作为表单初值。 */
@@ -43,12 +45,14 @@ function draftOf(task: Task): Draft {
     acceptance: task.acceptance.length > 0 ? task.acceptance : [''],
     preferredProvider: task.preferredProvider,
     model: task.model,
+    permission: task.permission,
     relatedTo: [...task.relatedTo],
+    blockedBy: [...task.blockedBy],
   }
 }
 
 export function TaskEditor({
-  task, project, siblings, agents, busy, onSave, onError, onChanged,
+  task, siblings, agents, busy, onSave, onError, onChanged,
 }: Props): React.JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState(() => draftOf(task))
@@ -64,10 +68,28 @@ export function TaskEditor({
   const picked = agents.find((agent) => agent.id === draft.preferredProvider)
   /** 下拉里的选项；卡上原有的模型即使不在探测清单里也留着。 */
   const options = picked === undefined ? [] : modelOptions(picked, draft.model)
+  /** 模型这一栏眼下能不能选：没挑执行器、CLI 不认 --model、清单没探出来，都算不能。 */
+  const pickable = picked !== undefined && picked.canPickModel && options.length > 0
+  const modelHint = picked === undefined
+    ? t('editor.modelNeedProvider')
+    : !picked.canPickModel
+      ? t('editor.modelUnsupported', { provider: picked.id })
+      : options.length === 0
+        ? t('editor.modelUnknown', { provider: picked.id })
+        : t('editor.modelHint', { count: picked.models.length, provider: picked.id })
+  /** 选了指定执行器不支持的档位，就说清楚"执行时会退回 standard" —— 不许诺做不到的事。 */
+  const permissionHint = draft.permission !== undefined && picked !== undefined
+    && !picked.permissionTiers.includes(draft.permission)
+    ? t('editor.permissionUnsupported', { provider: picked.id, tier: draft.permission })
+    : t('editor.permissionHint')
 
   /** 还能关联的卡：同项目、不是自己、也还没关联上。 */
   const linkable = siblings.filter(
     (other) => other.id !== task.id && !draft.relatedTo.includes(other.id),
+  )
+  /** 还能挂上依赖的卡：同项目、不是自己、也还没挂上。 */
+  const blockable = siblings.filter(
+    (other) => other.id !== task.id && !draft.blockedBy.includes(other.id),
   )
 
   const setAcceptance = (index: number, value: string): void => {
@@ -214,6 +236,78 @@ export function TaskEditor({
           </div>
         </Collapsible>
 
+        {/* 依赖与关联长得像，性质相反：关联是派活时的参考资料，依赖是调度器
+            的硬约束 —— blockedBy 里的卡不全部进入 Done，这张卡就不会被派出。
+            成环会被服务端拒掉：环上的卡互相等，谁也不会开工。 */}
+        <Collapsible
+          label={t('editor.blocked')}
+          hint={t('editor.blockedHint')}
+          count={draft.blockedBy.length}
+          defaultOpen={task.blockedBy.length > 0}
+        >
+          <div className="space-y-2">
+            {draft.blockedBy.map((id) => {
+              const other = siblings.find((candidate) => candidate.id === id)
+              return (
+                <div key={id} className="flex items-center gap-2 rounded-md border border-hairline px-3 py-2">
+                  <Lock className="size-3.5 flex-none text-ink-faint" />
+                  <div className="min-w-0 flex-1">
+                    {/* 卡刚被删掉时它还留在草稿里 —— 显示 id 而不是装作没这回事，
+                        存下去时服务端也会拒；两边都沉默的话，人只会看到依赖凭空少了一条。 */}
+                    <p className="truncate text-sm text-ink">
+                      {other === undefined ? t('editor.blockedGone') : taskTitle(other)}
+                    </p>
+                    <p className="mono truncate text-xs text-ink-faint">
+                      {id}
+                      {other === undefined ? '' : ` · ${COLUMN_META[other.column].label}`}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label={t('editor.blockedRemove')}
+                    title={t('editor.blockedRemove')}
+                    disabled={locked}
+                    onClick={() => {
+                      setDraft((d) => ({ ...d, blockedBy: d.blockedBy.filter((item) => item !== id) }))
+                    }}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              )
+            })}
+            {blockable.length === 0 ? (
+              <p className="text-xs text-ink-faint">
+                {siblings.length === 0 ? t('editor.blockedNone') : t('editor.blockedAllPicked')}
+              </p>
+            ) : (
+              <select
+                value=""
+                disabled={locked}
+                onChange={(e) => {
+                  const picked = e.target.value
+                  if (picked.length === 0) return
+                  setDraft((d) => ({ ...d, blockedBy: [...d.blockedBy, picked] }))
+                }}
+                className={cn(
+                  'border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+                  'transition-[color,box-shadow] outline-none dark:bg-input/30',
+                  'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+                  'disabled:cursor-not-allowed disabled:opacity-50',
+                )}
+              >
+                <option value="">{t('editor.blockedAdd')}</option>
+                {blockable.map((other) => (
+                  <option key={other.id} value={other.id}>
+                    {`${COLUMN_META[other.column].label} · ${taskTitle(other)}`}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        </Collapsible>
+
         {/* 附件不折叠：它是"写需求"的一部分 —— 设计稿、报错截图、要照着做的
             那份 PDF，收起来等于让人先想起有这回事才找得到。空着时也只是一行
             提示加一个投放区，不占多少地方。 */}
@@ -226,63 +320,48 @@ export function TaskEditor({
           />
         </Field>
 
-        <Field label={t('editor.provider')} hint={t('editor.providerHint')}>
-          <div className="flex flex-wrap gap-2">
-            <Chip
-              active={draft.preferredProvider === undefined}
+        {/* 执行器与模型并排一行。都是只可选、不可填 —— 能选的都是探测出来的，
+            手打一个 CLI 不认的名字只会在派活那一刻才炸。 */}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={t('editor.provider')} hint={t('editor.providerHint')}>
+            <select
+              value={draft.preferredProvider ?? ''}
               disabled={locked}
-              onClick={() => {
-                // 不指定执行器时模型也跟着清掉：模型名是各家 CLI 自己的说法，
-                // 留着一个别人不认识的名字只会在派活时炸。
-                setDraft((d) => ({ ...d, preferredProvider: undefined, model: undefined }))
+              onChange={(e) => {
+                const next = e.target.value
+                setDraft((d) => ({
+                  ...d,
+                  // 不指定执行器时模型也跟着清掉：模型名是各家 CLI 自己的说法，
+                  // 留着一个别人不认识的名字只会在派活时炸。
+                  preferredProvider: next.length === 0 ? undefined : next,
+                  model: next === d.preferredProvider ? d.model : undefined,
+                }))
               }}
+              className={cn(
+                'border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+                'transition-[color,box-shadow] outline-none dark:bg-input/30',
+                'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+                'disabled:cursor-not-allowed disabled:opacity-50',
+              )}
             >
-              {t('editor.providerAny')}
-            </Chip>
-            {agents.map((agent) => (
-              <Chip
-                key={agent.id}
-                active={draft.preferredProvider === agent.id}
-                disabled={locked}
-                title={agent.permissionCaveat?.detail}
-                onClick={() => {
-                  setDraft((d) => ({
-                    ...d,
-                    preferredProvider: agent.id,
-                    ...(d.preferredProvider === agent.id ? {} : { model: undefined }),
-                  }))
-                }}
-              >
-                {agent.id}
-                {agent.permissionCaveat === undefined ? null : (
-                  <span className="text-sodium">{agent.permissionCaveat.label}</span>
-                )}
-              </Chip>
-            ))}
-          </div>
-        </Field>
+              <option value="">{t('editor.providerAny')}</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.permissionCaveat === undefined ? agent.id : `${agent.id} · ${agent.permissionCaveat.label}`}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        {/* 只有选定了执行器、且那个 CLI 认 --model 时才出现这一栏。
-            能不能指定模型是**探测**出来的，不是写死的。 */}
-        {picked === undefined ? null : !picked.canPickModel ? (
-          <Field label={t('editor.model')}>
-            <p className="text-xs text-ink-faint">{t('editor.modelUnsupported', { provider: picked.id })}</p>
-          </Field>
-        ) : options.length === 0 ? (
-          <Field label={t('editor.model')}>
-            <p className="text-xs text-ink-faint">{t('editor.modelUnknown', { provider: picked.id })}</p>
-          </Field>
-        ) : (
-          <Field
-            label={t('editor.model')}
-            hint={t('editor.modelHint', { count: picked.models.length, provider: picked.id })}
-          >
-            {/* 只可选、不可填：能选的都是探测出来的，手打一个 CLI 不认的名字
-                只会在派活那一刻才炸。卡上原有的模型即使不在清单里也留着，
-                免得打开一张老卡就把它的选择悄悄抹掉。 */}
+          <Field label={t('editor.model')} hint={modelHint}>
+            {/* 没选定执行器、那个 CLI 不认 --model、或者模型清单没探出来：
+                三种情况都只给"默认模型"并且按住不动 —— 不是能选的状态就别
+                装成能选的。卡上原有的模型即使不在清单里也留着，免得打开一张
+                老卡就把它的选择悄悄抹掉。 */}
             <select
               value={draft.model ?? ''}
-              disabled={locked}
+              disabled={locked || picked === undefined || !pickable}
+              title={modelHint}
               onChange={(e) => {
                 const next = e.target.value
                 setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
@@ -298,17 +377,33 @@ export function TaskEditor({
               {options.map((model) => <option key={model} value={model}>{model}</option>)}
             </select>
           </Field>
-        )}
+        </div>
 
-        <Field label={t('editor.project')} hint={t('editor.projectHint')}>
-          <div className="rounded-md border border-hairline px-3 py-2">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
-              <FolderGit2 className="size-3.5 flex-none text-ink-faint" />
-              {project?.name ?? t('panel.unknownProject')}
-            </p>
-            <p className="mono mt-1 break-all text-xs text-ink-faint">{task.repoPath}</p>
-            <p className="mono text-xs text-ink-faint">{t('editor.baseline', { branch: task.baseBranch })}</p>
-          </div>
+        {/* 权限档位。执行时的边界画在哪儿 —— 是"只许看"还是"要权限先问人"
+            还是"放开跑"，是需求的一部分，跟执行器、模型放在一起。 */}
+        <Field label={t('editor.permission')} hint={permissionHint}>
+          <select
+            value={draft.permission ?? ''}
+            disabled={locked}
+            onChange={(e) => {
+              const next = e.target.value
+              setDraft((d) => ({
+                ...d,
+                permission: next.length === 0 ? undefined : (next as PermissionTier),
+              }))
+            }}
+            className={cn(
+              'border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+              'transition-[color,box-shadow] outline-none dark:bg-input/30',
+              'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+              'disabled:cursor-not-allowed disabled:opacity-50',
+            )}
+          >
+            <option value="">{t('editor.permissionDefault')}</option>
+            {PERMISSION_TIERS.map((tier) => (
+              <option key={tier} value={tier}>{t(`editor.permission.tier.${tier}`)}</option>
+            ))}
+          </select>
         </Field>
       </div>
 
@@ -383,26 +478,5 @@ function Collapsible({ label, hint, count, defaultOpen, children }: {
         </div>
       ) : null}
     </div>
-  )
-}
-
-function Chip({ children, active, disabled, onClick, title }: {
-  children: React.ReactNode
-  active: boolean
-  disabled: boolean
-  onClick: () => void
-  title?: string
-}): React.JSX.Element {
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      disabled={disabled}
-      onClick={onClick}
-      {...(title === undefined ? {} : { title })}
-      className={cn(active && 'border-primary bg-primary/10 text-sodium hover:bg-primary/15 hover:text-sodium')}
-    >
-      {children}
-    </Button>
   )
 }

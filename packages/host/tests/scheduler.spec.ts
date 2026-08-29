@@ -42,7 +42,7 @@ function provider(id: string, lines: string[] = [JSON.stringify({ kind: 'finishe
 const caps = (id: string): AgentCaps => ({
   id, bin: '/fake', version: '1.0.0', streaming: true,
   canPinSessionId: false, canResume: false, canPickModel: true, models: [],
-  permissionTiers: ['standard'], help: parseHelp(''),
+  permissionTiers: ['standard'], canAskUser: false, canPromptPermission: false, help: parseHelp(''),
 })
 
 function task(patch: Omit<Partial<Task>, 'id'> & { id: string }): Task {

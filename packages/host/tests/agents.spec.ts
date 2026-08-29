@@ -48,7 +48,7 @@ describe('provider 注册表', () => {
       probe: () => Promise.resolve({
         id: '好的', bin: '/fake', version: '1.0', streaming: true,
         canPinSessionId: false, canResume: false, canPickModel: false,
-        models: [], permissionTiers: ['standard'],
+        models: [], permissionTiers: ['standard'], canAskUser: false, canPromptPermission: false,
         help: parseHelp(''),
       }),
     }
@@ -63,7 +63,7 @@ describe('AgentPool —— 可刷新的活视图', () => {
     caps: {
       id, bin: `/fake/${id}`, version: '1.0', streaming: true,
       canPinSessionId: false, canResume: false, canPickModel: false,
-      models: [], permissionTiers: ['standard'], help: parseHelp(''),
+      models: [], permissionTiers: ['standard'], canAskUser: false, canPromptPermission: false, help: parseHelp(''),
     },
   })
 

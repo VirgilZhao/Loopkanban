@@ -1,3 +1,4 @@
+import { asRunId } from '@loopkanban/core'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,9 @@ const CAPS: AgentCaps = {
   canResume: true,
   canPickModel: true, models: [],
   permissionTiers: ['strict', 'standard', 'yolo'],
+  // claude 的 provider 常量：help 不列 --permission-prompt-tool，但能力恒在。
+  canAskUser: true,
+  canPromptPermission: true,
   help: parseHelp(fixture('claude-help.txt')),
 }
 
@@ -175,5 +179,46 @@ describe('模型自动获取', () => {
   it('措辞变了就捞不到 —— 退回自由输入，而不是给出过期的错答案', () => {
     expect(modelsFromHelp(parseHelp('  --model <model>   Model to use'))).toEqual([])
     expect(modelsFromHelp(parseHelp('  --verbose  x'))).toEqual([])
+  })
+})
+
+const GATE = {
+  serverName: 'loopkanban', baseUrl: 'http://127.0.0.1:9', runId: asRunId('run-g'),
+  token: 'run-token', shimPath: '/x/gate-shim.mjs',
+  mcpConfigPath: '/x/artifacts/gate/mcp.json', envConfigPath: '/x/artifacts/gate/opencode.json',
+}
+
+describe('claudeCliProvider gate（向人提问 / 权限审批）', () => {
+  it('接上 gate 时挂 --mcp-config 并预放行 ask_user —— 否则调用工具本身又要权限', () => {
+    const argv = claudeCliProvider.buildStart({ ...RUN, gate: GATE }, { ...CAPS, canAskUser: true }).argv
+    expect(argv).toContain('--mcp-config')
+    expect(argv[argv.indexOf('--mcp-config') + 1]).toBe(GATE.mcpConfigPath)
+    expect(argv).toContain('--allowedTools')
+    expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('mcp__loopkanban__ask_user')
+  })
+
+  it('supervised 档：不设 permission-mode，把审批路由给 gate 的 request_permission', () => {
+    const argv = claudeCliProvider.buildStart(
+      { ...RUN, permission: 'supervised', gate: GATE }, { ...CAPS, canAskUser: true },
+    ).argv
+    expect(argv).not.toContain('--permission-mode')
+    expect(argv).toContain('--permission-prompt-tool')
+    expect(argv[argv.indexOf('--permission-prompt-tool') + 1]).toBe('mcp__loopkanban__request_permission')
+  })
+
+  it('非 supervised 档不挂审批路由；没 gate 时两个旗标都不出现', () => {
+    const standard = claudeCliProvider.buildStart({ ...RUN, permission: 'standard', gate: GATE }, CAPS).argv
+    expect(standard).not.toContain('--permission-prompt-tool')
+    const ungated = claudeCliProvider.buildStart({ ...RUN, permission: 'supervised' }, CAPS).argv
+    expect(ungated).not.toContain('--permission-prompt-tool')
+    expect(ungated).not.toContain('--mcp-config')
+  })
+
+  it('supervised 档也要走续跑路径', () => {
+    const argv = claudeCliProvider.buildResume(
+      { ...RUN, permission: 'supervised', gate: GATE }, { ...CAPS, canAskUser: true }, 'sess-9',
+    )?.argv ?? []
+    expect(argv).toContain('--permission-prompt-tool')
+    expect(argv).toContain('--mcp-config')
   })
 })

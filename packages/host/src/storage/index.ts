@@ -11,7 +11,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { Column, Lease, ProjectId, RunId, Task, TaskId } from '@loopkanban/core'
+import type { Column, Lease, PermissionTier, ProjectId, RunId, Task, TaskId } from '@loopkanban/core'
 import { asProjectId, asRunId, asTaskId } from '@loopkanban/core'
 import { migrate } from './schema.ts'
 
@@ -31,6 +31,13 @@ export interface Project {
    * 环境变量给到进程。
    */
   readonly testCommand?: string | undefined
+  /**
+   * 测试环境启动时要拷进 worktree 的配置文件，相对仓库根的路径。
+   *
+   * 这类文件多半被 gitignore（`.env.local` 之类），主工作区里有、worktree 里
+   * 没有，而服务没它往往起不来。缺席/空数组表示没配，什么都不拷。
+   */
+  readonly testEnvFiles?: readonly string[]
   readonly createdAt: number
 }
 
@@ -151,6 +158,54 @@ export interface RunEvent {
   readonly at: number
 }
 
+/** 一次执行里等人拍板的事：权限审批，或向人提的一个问题。 */
+export type DecisionKind = 'permission' | 'question'
+
+/**
+ * 一条决策的生命周期。终态互相独立：
+ * `allowed` / `denied` 只属于权限，`answered` 只属于提问，
+ * `timeout` 是等人等到超时（权限按拒绝、提问按"未获回答"处理），
+ * `cancelled` 是执行终止时悬空的决策。
+ */
+export type DecisionStatus = 'pending' | 'allowed' | 'denied' | 'answered' | 'timeout' | 'cancelled'
+
+export interface RunDecision {
+  readonly id: string
+  readonly runId: RunId
+  readonly kind: DecisionKind
+  /** 各 kind 自己的形状：权限是 `{tool, input}`，提问是 `{question, choices?}`。 */
+  readonly payload: unknown
+  readonly status: DecisionStatus
+  /** 终态才有：权限是 `{decision, scope?, message?, auto?}`，提问是 `{text, by?}`。 */
+  readonly answer?: unknown
+  readonly createdAt: number
+  readonly resolvedAt?: number | undefined
+}
+
+interface DecisionRow {
+  id: string
+  run_id: string
+  kind: string
+  payload_json: string
+  status: string
+  answer_json: string | null
+  created_at: number
+  resolved_at: number | null
+}
+
+function toDecision(row: DecisionRow): RunDecision {
+  return {
+    id: row.id,
+    runId: asRunId(row.run_id),
+    kind: row.kind === 'question' ? 'question' : 'permission',
+    payload: JSON.parse(row.payload_json) as unknown,
+    status: row.status as DecisionStatus,
+    ...(row.answer_json === null ? {} : { answer: JSON.parse(row.answer_json) as unknown }),
+    createdAt: row.created_at,
+    ...(row.resolved_at === null ? {} : { resolvedAt: row.resolved_at }),
+  }
+}
+
 interface TaskRow {
   id: string
   project_id: string
@@ -163,6 +218,7 @@ interface TaskRow {
   base_branch: string
   preferred_provider: string | null
   model: string | null
+  permission: string | null
   blocked_by_json: string
   related_json: string
   lease_json: string | null
@@ -213,6 +269,7 @@ function toTask(row: TaskRow): Task {
     baseBranch: row.base_branch,
     ...(preferred === null ? {} : { preferredProvider: preferred }),
     ...(row.model === null ? {} : { model: row.model }),
+    ...(row.permission === null ? {} : { permission: row.permission as PermissionTier }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
     relatedTo: (JSON.parse(row.related_json) as string[]).map(asTaskId),
     ...(lease === undefined ? {} : { lease }),
@@ -288,6 +345,19 @@ function toRun(row: RunRow): Run {
   }
 }
 
+/** 把库里的 JSON 路径数组读回来。坏 JSON 与非字符串条目都当"没配"，不抛。 */
+function parseFileList(json: string | null | undefined): string[] {
+  if (json === null || json === undefined) return []
+  try {
+    const parsed: unknown = JSON.parse(json)
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+      : []
+  } catch {
+    return []
+  }
+}
+
 export class Storage {
   private readonly db: DatabaseSync
 
@@ -313,29 +383,33 @@ export class Storage {
 
   createProject(project: Project): void {
     this.db.prepare(
-      'INSERT INTO projects (id, name, repo_path, base_branch, test_command, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT INTO projects (id, name, repo_path, base_branch, test_command, test_env_files_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     ).run(
       project.id, project.name, project.repoPath, project.baseBranch,
-      project.testCommand ?? null, project.createdAt,
+      project.testCommand ?? null, JSON.stringify(project.testEnvFiles ?? []), project.createdAt,
     )
   }
 
   listProjects(): Project[] {
     const rows = this.db.prepare('SELECT * FROM projects ORDER BY created_at').all() as unknown as {
       id: string; name: string; repo_path: string; base_branch: string
-      test_command: string | null; created_at: number
+      test_command: string | null; test_env_files_json: string | null; created_at: number
     }[]
-    return rows.map((row) => ({
-      id: asProjectId(row.id),
-      name: row.name,
-      repoPath: row.repo_path,
-      baseBranch: row.base_branch,
-      // 空串与 NULL 都当没配：清空是把输入框留白，那一路存下来的是空串。
-      ...(row.test_command === null || row.test_command.trim() === ''
-        ? {}
-        : { testCommand: row.test_command }),
-      createdAt: row.created_at,
-    }))
+    return rows.map((row) => {
+      const files = parseFileList(row.test_env_files_json)
+      return {
+        id: asProjectId(row.id),
+        name: row.name,
+        repoPath: row.repo_path,
+        baseBranch: row.base_branch,
+        // 空串与 NULL 都当没配：清空是把输入框留白，那一路存下来的是空串。
+        ...(row.test_command === null || row.test_command.trim() === ''
+          ? {}
+          : { testCommand: row.test_command }),
+        ...(files.length === 0 ? {} : { testEnvFiles: files }),
+        createdAt: row.created_at,
+      }
+    })
   }
 
   getProject(id: ProjectId): Project | null {
@@ -351,7 +425,8 @@ export class Storage {
    * 否则它们的 diff 与合并目标会在脚下悄悄换掉。
    *
    * 启动命令也在其列，且**允许清空**：配错了要能退回"没配"的状态，而不是
-   * 只能塞一条 `true` 进去凑数。传 `null` 或空串就是清空。
+   * 只能塞一条 `true` 进去凑数。传 `null` 或空串就是清空。要拷的配置文件
+   * 同理：`null` 或空数组就是清空。
    *
    * @param id - 目标项目。
    * @param patch - 要改的字段；给空对象等于什么都不改。
@@ -359,7 +434,7 @@ export class Storage {
    */
   updateProject(
     id: ProjectId,
-    patch: { name?: string; baseBranch?: string; testCommand?: string | null },
+    patch: { name?: string; baseBranch?: string; testCommand?: string | null; testEnvFiles?: readonly string[] | null },
   ): boolean {
     const sets: string[] = []
     const values: (string | null)[] = []
@@ -369,6 +444,10 @@ export class Storage {
       sets.push('test_command = ?')
       const command = patch.testCommand?.trim() ?? ''
       values.push(command.length === 0 ? null : command)
+    }
+    if (patch.testEnvFiles !== undefined) {
+      sets.push('test_env_files_json = ?')
+      values.push(JSON.stringify(patch.testEnvFiles ?? []))
     }
     if (sets.length === 0) return this.getProject(id) !== null
     return this.db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`)
@@ -395,6 +474,11 @@ export class Storage {
       // 顺序是外键定的：事件 → Run → 卡片 → 项目。
       this.db.prepare(`
         DELETE FROM run_events WHERE run_id IN (
+          SELECT id FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
+        )
+      `).run(id)
+      this.db.prepare(`
+        DELETE FROM run_decisions WHERE run_id IN (
           SELECT id FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
         )
       `).run(id)
@@ -597,14 +681,15 @@ export class Storage {
     this.db.prepare(`
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
-        acceptance_json, repo_path, base_branch, preferred_provider, model,
+        acceptance_json, repo_path, base_branch, preferred_provider, model, permission,
         blocked_by_json, related_json, lease_json, archived_at, done_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
+      task.permission ?? null,
       JSON.stringify(task.blockedBy), JSON.stringify(task.relatedTo),
       task.lease === undefined ? null : JSON.stringify(task.lease),
       task.archivedAt ?? null, task.doneAt ?? null,
@@ -639,13 +724,13 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
-        blocked_by_json = ?, related_json = ?, lease_json = ?,
+        permission = ?, blocked_by_json = ?, related_json = ?, lease_json = ?,
         archived_at = ?, done_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
-      next.preferredProvider ?? null, next.model ?? null,
+      next.preferredProvider ?? null, next.model ?? null, next.permission ?? null,
       JSON.stringify(next.blockedBy), JSON.stringify(next.relatedTo),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.archivedAt ?? null, next.doneAt ?? null,
@@ -678,6 +763,7 @@ export class Storage {
       this.db.prepare('DELETE FROM task_comments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM task_attachments WHERE task_id = ?').run(id)
       this.db.prepare('DELETE FROM task_prs WHERE task_id = ?').run(id)
+      this.db.prepare('DELETE FROM run_decisions WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?)').run(id)
       this.db.prepare('DELETE FROM runs WHERE task_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM tasks WHERE id = ? AND revision = ?').run(id, expectedRevision)
@@ -755,10 +841,71 @@ export class Storage {
     return byTask
   }
 
+  /**
+   * 每张卡执行过几轮。看板卡面上那个"第 N 轮"靠它 —— 看板一次请求读完全部，
+   * 一张卡问一次的话，列里有多少张卡就是多少个查询。
+   */
+  runCounts(): Map<TaskId, number> {
+    const rows = this.db
+      .prepare('SELECT task_id, COUNT(*) AS n FROM runs GROUP BY task_id')
+      .all() as unknown as { task_id: string; n: number }[]
+    const byTask = new Map<TaskId, number>()
+    for (const row of rows) byTask.set(asTaskId(row.task_id), row.n)
+    return byTask
+  }
+
   /** 启动时对账用：上次进程崩溃时留下的、状态仍是 running 的 Run。 */
   listOrphanRuns(): Run[] {
     const rows = this.db.prepare("SELECT * FROM runs WHERE status = 'running'").all()
     return (rows as unknown as RunRow[]).map(toRun)
+  }
+
+  // ── 决策（权限审批 / 向人提问）────────────────────────────────
+
+  createDecision(decision: RunDecision): void {
+    this.db.prepare(`
+      INSERT INTO run_decisions (id, run_id, kind, payload_json, status, answer_json, created_at, resolved_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      decision.id, decision.runId, decision.kind, JSON.stringify(decision.payload ?? null),
+      decision.status, decision.answer === undefined ? null : JSON.stringify(decision.answer),
+      decision.createdAt, decision.resolvedAt ?? null,
+    )
+  }
+
+  getDecision(id: string): RunDecision | null {
+    const row = this.db.prepare('SELECT * FROM run_decisions WHERE id = ?').get(id) as unknown as
+      DecisionRow | undefined
+    return row === undefined ? null : toDecision(row)
+  }
+
+  /** 一个 Run 的全部决策，按时间正序 —— 面板重开时照它恢复。 */
+  listDecisions(runId: RunId): RunDecision[] {
+    const rows = this.db.prepare('SELECT * FROM run_decisions WHERE run_id = ? ORDER BY created_at, id')
+      .all(runId) as unknown as DecisionRow[]
+    return rows.map(toDecision)
+  }
+
+  /** 还没处理的决策，**连同所属任务 id** —— 看板徽标一次读完，不逐卡去问。 */
+  listPendingDecisions(): (RunDecision & { readonly taskId: TaskId })[] {
+    const rows = this.db.prepare(`
+      SELECT d.*, r.task_id FROM run_decisions d
+      JOIN runs r ON r.id = d.run_id
+      WHERE d.status = 'pending'
+      ORDER BY d.created_at, d.id
+    `).all() as unknown as (DecisionRow & { task_id: string })[]
+    return rows.map((row) => ({ ...toDecision(row), taskId: asTaskId(row.task_id) }))
+  }
+
+  /**
+   * 把一条决策更新到新状态。**只许从 pending 出发**：已经拍过板的事不许
+   * 被改写 —— 那等于事后篡改"当时是谁放行的"。幂等返回 false。
+   */
+  resolveDecision(id: string, status: DecisionStatus, answer: unknown, resolvedAt: number): boolean {
+    return this.db.prepare(`
+      UPDATE run_decisions SET status = ?, answer_json = ?, resolved_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(status, JSON.stringify(answer ?? null), resolvedAt, id).changes === 1
   }
 
   // ── 统计 ───────────────────────────────────────────────────────

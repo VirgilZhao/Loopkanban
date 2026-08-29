@@ -3,6 +3,13 @@
 export const COLUMNS = ['backlog', 'ready', 'running', 'review', 'done'] as const
 export type Column = (typeof COLUMNS)[number]
 
+/**
+ * 一次执行的权限档位。定义与语义见 @loopkanban/core —— 这里是给前端的
+ * 同一份契约：`supervised` 表示"CLI 要权限时停下来问人"。
+ */
+export const PERMISSION_TIERS = ['strict', 'standard', 'supervised', 'yolo'] as const
+export type PermissionTier = (typeof PERMISSION_TIERS)[number]
+
 export interface Lease {
   runId: string
   provider: string
@@ -83,6 +90,8 @@ export interface Task {
   preferredProvider?: string
   /** 指定模型；留空用该 CLI 自己的默认。 */
   model?: string
+  /** 这张卡的权限档位；缺席等于 standard。 */
+  permission?: PermissionTier
   blockedBy: string[]
   /**
    * 关联的同项目卡片。**是引用，不是依赖** —— 不拦调度、不影响流转，
@@ -160,8 +169,11 @@ export interface TaskEdit {
   acceptance?: string[]
   preferredProvider?: string | undefined
   model?: string | undefined
+  permission?: PermissionTier | undefined
   /** 关联的同项目卡片 id。空数组就是取消全部关联。 */
   relatedTo?: string[]
+  /** 依赖的同项目卡片 id。空数组就是取消全部依赖；成环会被服务端拒绝。 */
+  blockedBy?: string[]
 }
 
 /** 目录选择框的一层：当前目录、上一级、以及下面的子目录。 */
@@ -290,6 +302,8 @@ export interface Project {
   baseBranch: string
   /** 一键测试环境的启动命令；缺席表示还没配。 */
   testCommand?: string
+  /** 启动时要从主工作区拷进 worktree 的配置文件（相对仓库根的路径）；缺席表示没配。 */
+  testEnvFiles?: string[]
   createdAt: number
 }
 
@@ -343,6 +357,10 @@ export interface Agent {
   /** 探测到的可用模型。空数组表示这个 CLI 没法枚举，此时只能自由输入。 */
   models: string[]
   permissionTiers: string[]
+  /** 能否接上宿主的 gate（MCP），即能否在执行中向人提问。 */
+  canAskUser: boolean
+  /** 能否把权限审批路由给人（只有 claude 支持，对应 supervised 档）。 */
+  canPromptPermission: boolean
   /** 档位语义与别家不一致时的警示；有就必须显示出来。 */
   permissionCaveat?: PermissionCaveat
 }
@@ -403,6 +421,30 @@ export interface StreamEvent {
   seq: number
   kind: string
   payload: Record<string, unknown>
+}
+
+/**
+ * 一次执行里等人拍板的事。
+ *
+ * `permission` 是 Agent 请求放行一次工具调用（supervised 档），
+ * `question` 是模型向人提的一个问题。答案原样回给 Agent，执行继续。
+ */
+export interface RunDecision {
+  id: string
+  runId: string
+  kind: 'permission' | 'question'
+  /** permission 是 `{tool, input}`；question 是 `{question, choices?}`。 */
+  payload: Record<string, unknown>
+  status: 'pending' | 'allowed' | 'denied' | 'answered' | 'timeout' | 'cancelled'
+  answer?: Record<string, unknown>
+  createdAt: number
+  resolvedAt?: number
+}
+
+/** 看板徽标：这张卡上有几件决策在等人，各自是什么。 */
+export interface PendingDecision {
+  id: string
+  kind: 'permission' | 'question'
 }
 
 export interface ProviderStats {

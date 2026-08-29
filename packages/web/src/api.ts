@@ -221,6 +221,18 @@ export const api = {
    * 一次执行的全部决策（权限审批 / 向人提问），按时间正序。
    * 面板打开时拉一遍，之后靠事件流里的 decision / decision_resolved 增量更新。
    */
+  /**
+   * 一次执行的事件日志（一次性读取，不开流）。
+   *
+   * SSE 那条是给**正在跑**的那一轮用的；历史轮次要的是"把当时的过程摊开
+   * 看一眼"，为此各开一条永不结束的流，只是白占连接。服务端只回最新的
+   * 一段（见 host 的 EVENT_PAGE），`truncated` 说明前面还有没给的。
+   */
+  runLog: (runId: string) =>
+    call<{ events: StreamEvent[]; lastSeq: number; truncated: boolean }>(
+      `/api/runs/${encodeURIComponent(runId)}/log`,
+    ),
+
   decisions: (runId: string) =>
     call<{ decisions: RunDecision[] }>(`/api/runs/${encodeURIComponent(runId)}/decisions`),
 

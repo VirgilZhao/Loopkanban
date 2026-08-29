@@ -344,10 +344,15 @@ async function main(): Promise<void> {
   const scheduler = new Scheduler({ storage, runner, agents: pool })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
+  //
+  // 卡片**不等租约到期**：上一个进程没了，它起的 CLI 也跟着没了，这是查明
+  // 的事实，不是猜测。等 90 秒只会让人对着一张不会有任何动静的 Running 卡
+  // 干等。收回 Ready 之后，自动认领（开着的话）下一拍就把它接着派出去 ——
+  // 同一个 worktree、同一个会话，接着上次干。
   const aborted = runner.reconcile()
-  const reclaimed = runner.reclaimExpired()
+  const reclaimed = runner.reclaimAbandoned()
   if (aborted > 0 || reclaimed.length > 0) {
-    console.log(C.dim(`\n  对账：${String(aborted)} 个中断的 Run，${String(reclaimed.length)} 张卡放回 Ready`))
+    console.log(C.dim(`\n  对账：${String(aborted)} 个中断的 Run，${String(reclaimed.length)} 张卡放回 Ready 接着跑`))
   }
   // 调度器的每一轮都会回收租约过期的卡片，即使自动认领是关着的 ——
   // 没有它，一次崩溃就会让任务永远卡在 Running。

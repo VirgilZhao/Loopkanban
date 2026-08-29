@@ -73,7 +73,9 @@ export function TaskCard({
       className={cn(
         // 卡片形制照抄主题预览里的 card：xl 圆角、发丝边、一层浅影。
         // 不铺底色 —— 让列的面透上来，卡片只靠边和影浮起。
-        'group relative cursor-grab overflow-hidden rounded-xl border border-hairline px-3 py-2.5 text-left',
+        // `flex-none`：列是纵向 flex，卡片默认会被压缩 —— 卡一多就集体变扁、
+        // 文字被裁掉，而那一列本来就该滚起来。
+        'group relative flex-none cursor-grab overflow-hidden rounded-xl border border-hairline px-3 py-2.5 text-left',
         'shadow-sm transition-[border-color,box-shadow] duration-150',
         'hover:border-hairline-bright hover:shadow-md',
         // 拖不动的卡不摆出"可以抓"的手势。

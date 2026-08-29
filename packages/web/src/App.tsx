@@ -4,9 +4,10 @@ import {
   type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
-import { Settings } from 'lucide-react'
+import { PanelRightOpen, Settings } from 'lucide-react'
 import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { BaseBranchPicker } from '@/components/BaseBranchPicker.tsx'
+import { ChatPanel } from '@/components/ChatPanel.tsx'
 import { Column } from '@/components/Column.tsx'
 import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
 import { FileBrowser } from '@/components/FileBrowser.tsx'
@@ -40,6 +41,19 @@ type Page = 'tasks' | 'files'
 const PAGES: readonly { key: Page; label: MessageKey }[] = [
   { key: 'tasks', label: 'header.tabTasks' },
   { key: 'files', label: 'header.tabFiles' },
+]
+
+/**
+ * 看板的版面：从左到右几条竖列，每条里从上往下摆哪几列，上下平分高度。
+ *
+ * 只有 Ready 和 Running 叠在一起 —— 排队与正在跑本来就是同一条队的前后脚，
+ * 上下摞着看，"排了几张、跑着几张"是一眼的事。别的列各占一条。
+ */
+const LANES: readonly (readonly ColumnKey[])[] = [
+  ['backlog'],
+  ['ready', 'running'],
+  ['review'],
+  ['done'],
 ]
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
@@ -91,6 +105,16 @@ export default function App(): React.JSX.Element {
   const [agentsBusy, setAgentsBusy] = useState(false)
   // 归档默认不显示 —— 归档的意义就是从视野里拿走。
   const [showArchived, setShowArchived] = useState(false)
+  // 右侧聊天。占掉最右边两列的宽度，默认开着 —— 它是这一屏的常驻部分，
+  // 不是要人先找出来的东西。收起来时看板占满。
+  const [chatOpen, setChatOpen] = useState(true)
+  /**
+   * 详情弹窗开在哪张卡上，以及要不要先摆出某份文档。
+   *
+   * 卡的日常（信息、配置、对话）都在右侧面板里，**点卡片不再弹窗** ——
+   * 弹窗留给宽屏才装得下的东西：diff、事件流、PR、测试环境、权限审批。
+   */
+  const [details, setDetails] = useState<{ taskId: string; file?: string } | null>(null)
   // 上一次看到的列，用来判断"刚刚有卡进了 Review/Failed"，据此发通知。
   const seenColumns = useRef<Map<string, ColumnKey>>(new Map())
   // 刚建出来、还一次没存过的那张卡。叉掉弹窗时它得跟着消失。
@@ -98,6 +122,9 @@ export default function App(): React.JSX.Element {
   // 建卡的请求还在路上。双击"新建任务"不该建出两张卡 —— 多出来的那张
   // 没人认领（draftId 只记得住一张），会一直空着躺在想法池里。
   const creating = useRef(false)
+
+  /** 眼下有没有弹窗开着（详情、新建项目、项目设置、删项目）。 */
+  const dialogOpen = details !== null || newProject || settingsOpen || deleting !== null
 
   const refresh = useCallback(async () => {
     const [
@@ -192,13 +219,30 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setSelectedId(null)
+      // 有弹窗开着时这一下是关弹窗（弹窗自己处理），不该顺手把卡也放开 ——
+      // 从详情退回来，人还想接着在面板上对着这张卡说话。
+      if (event.key === 'Escape' && !dialogOpen) setSelectedId(null)
     }
     window.addEventListener('keydown', onKey)
     return () => { window.removeEventListener('keydown', onKey) }
-  }, [])
+  }, [dialogOpen])
 
   const archivedCount = useMemo(() => tasks.filter((t) => t.archivedAt !== undefined).length, [tasks])
+
+  /**
+   * 摆在看板上的列。
+   *
+   * 聊天占掉右边两列的宽度，剩下的地方摆不下五列 —— 收起 Done：它装的是
+   * 已经结束的事，是五列里最不需要一直看着的那个（要翻旧账，把聊天收回去
+   * 它就回来）。**卡本身一张不动**，只是这会儿不摆在版面上。
+   */
+  const lanes = useMemo<readonly (readonly ColumnKey[])[]>(
+    () => LANES
+      .map((lane) => lane.filter((column) => !(chatOpen && column === 'done')))
+      // 滤空了的竖列不留 —— 一条空竖条会在版面上占着宽度，什么都不显示。
+      .filter((lane) => lane.length > 0),
+    [chatOpen],
+  )
 
   const byColumn = useMemo(() => {
     const grouped = Object.fromEntries(COLUMNS.map((c) => [c, [] as Task[]])) as Record<ColumnKey, Task[]>
@@ -245,6 +289,8 @@ export default function App(): React.JSX.Element {
     : projects.length === 1 ? projects[0] ?? null : null
 
   const selected = tasks.find((t) => t.id === selectedId) ?? null
+  /** 详情弹窗开在哪张卡上。卡没了（删掉、被别处收走）弹窗就自然合上。 */
+  const detailed = details === null ? null : tasks.find((t) => t.id === details.taskId) ?? null
   const dragged = tasks.find((t) => t.id === draggingId) ?? null
 
   // 「我的卡为什么不动」——调度器每一轮的跳过原因都摊到卡片上。
@@ -484,6 +530,20 @@ export default function App(): React.JSX.Element {
             </button>
           )}
 
+          {/* 聊天收起来之后要有个地方把它叫回来。开着的时候不摆 —— 收起的
+              按钮就在面板自己头上，两个地方各管一头。 */}
+          {page === 'tasks' && !chatOpen ? (
+            <button
+              type="button"
+              onClick={() => { setChatOpen(true) }}
+              title={t('chat.expand')}
+              aria-label={t('chat.expand')}
+              className="flex size-7 flex-none items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-raised hover:text-ink"
+            >
+              <PanelRightOpen className="size-4" />
+            </button>
+          ) : null}
+
           <ThemeToggle />
         </header>
 
@@ -526,30 +586,90 @@ export default function App(): React.JSX.Element {
           onDragCancel={() => { setDraggingId(null) }}
           onDragEnd={(e) => { void handleDragEnd(e) }}
         >
-          <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
-            {COLUMNS.map((column, index) => (
-              <Column
-                key={column}
-                column={column}
-                index={index}
-                tasks={byColumn[column]}
-                now={now}
-                selectedId={selectedId}
-                live={live}
-                attachments={attachments}
-                prs={prs}
-                failures={failures}
-                rounds={rounds}
-                pending={pending}
-                skips={skipsByTask}
-                onSelect={(task) => { setSelectedId(task.id) }}
-                // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
-                projectName={view.kind === 'overview'
-                  ? (id: string) => projectById.get(id)?.name
-                  : undefined}
-                onCreate={column === 'backlog' && activeProject !== null ? createTask : undefined}
-              />
+          {/* 看板与聊天并排，3 : 2 —— 右边空出来的正好是两列的宽度。
+              看板这边是几条竖列（见 LANES），装不下就在自己这块里横向滚动：
+              把列硬挤扁，卡片会先失去可读性。 */}
+          <div className="flex min-h-0 flex-1 gap-3 p-3">
+          <div className={cn(
+            'flex min-w-0 gap-3 overflow-x-auto',
+            chatOpen ? 'flex-[3]' : 'flex-1',
+          )}>
+            {lanes.map((lane, laneIndex) => (
+              // 一条竖列里的两块上下平分：各自 flex-1，谁的卡多都不多占 ——
+              // 让长的那块自己撑开，另一块会被压到只剩列头。
+              <div key={lane.join('+')} className={cn(
+                'flex flex-1 flex-col gap-3',
+                // 竖列的最小宽度得写死：不写的话它按里面卡片的最小内容宽算，
+                // 一条长 id 或长链接就能把某一条撑宽、把整块看板顶到横向滚动。
+                // 聊天开着时窄一档 —— 再窄下去，卡片标题就只剩两三个字。
+                chatOpen ? 'min-w-[180px]' : 'min-w-[220px]',
+              )}>
+                {lane.map((column, row) => (
+                  <Column
+                    key={column}
+                    column={column}
+                    // 入场按"先左后右、同一条竖列里先上后下"依次落位。
+                    index={laneIndex + row}
+                    tasks={byColumn[column]}
+                    now={now}
+                    selectedId={selectedId}
+                    live={live}
+                    attachments={attachments}
+                    prs={prs}
+                    failures={failures}
+                    rounds={rounds}
+                    pending={pending}
+                    skips={skipsByTask}
+                    // 点一张卡就是把它交给右边那块面板 —— 面板收着的话先叫出来，
+                    // 否则点下去只有一圈选中框，人不知道内容去了哪儿。
+                    onSelect={(task) => { setSelectedId(task.id); setChatOpen(true) }}
+                    // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
+                    projectName={view.kind === 'overview'
+                      ? (id: string) => projectById.get(id)?.name
+                      : undefined}
+                    onCreate={column === 'backlog' && activeProject !== null ? createTask : undefined}
+                  />
+                ))}
+              </div>
             ))}
+          </div>
+
+          {chatOpen ? (
+            <ChatPanel
+              task={selected}
+              project={selected === null
+                ? activeProject
+                : projectById.get(selected.projectId) ?? null}
+              projects={projects}
+              // 只给同项目的卡：关联跨不了项目 —— 任务在这个项目派生的 worktree
+              // 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
+              siblings={selected === null
+                ? []
+                : tasks.filter((t) => t.projectId === selected.projectId && t.id !== selected.id)}
+              agents={agents}
+              index={lanes.length + 1}
+              // 上限拦住超宽屏：再宽下去，面板就成了空白多过内容的一大片。
+              className="flex-[2] min-w-[300px] max-w-[560px]"
+              onChanged={() => {
+                // 动过一次（建卡、留言、存规格、挪动）就不再是"没写过的新卡"，
+                // 取消选中时不该再把它当空白草稿收走。看板状态是异步刷的，
+                // 这个标记不能等它。
+                draftId.current = null
+                void refresh()
+              }}
+              onCreated={(made) => {
+                // 从聊天里建出来的卡自带描述，不是空白草稿 —— 取消选中时留着它。
+                draftId.current = null
+                setSelectedId(made.id)
+              }}
+              onDeselect={() => { closeTask(selected) }}
+              onOpenDetails={(file) => {
+                if (selected === null) return
+                setDetails({ taskId: selected.id, ...(file === undefined ? {} : { file }) })
+              }}
+              onCollapse={() => { setChatOpen(false) }}
+            />
+          ) : null}
           </div>
 
           {/* 拖动时跟手的浮层；没有它，卡片在跨列时会显得原地消失。 */}
@@ -564,23 +684,26 @@ export default function App(): React.JSX.Element {
         </DndContext>
         )}
 
-        {/* ── 任务详情：弹窗 ─────────────────────────────────── */}
-        {selected === null ? null : (
+        {/* ── 任务详情：弹窗 ───────────────────────────────────
+            日常在右边那块面板里过，这张弹窗只管宽屏才装得下的东西：
+            diff、事件流、PR、测试环境、权限审批。 */}
+        {detailed === null ? null : (
           <RunPanel
-            task={selected}
-            project={projectById.get(selected.projectId) ?? null}
+            // 带着文档开的话，换一份就整个重挂 —— 初值只在挂载那一刻读一次。
+            key={`${detailed.id}:${details?.file ?? ''}`}
+            task={detailed}
+            project={projectById.get(detailed.projectId) ?? null}
             // 只给同项目的卡：关联跨不了项目 —— 任务在这个项目派生的 worktree
             // 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
-            siblings={tasks.filter((t) => t.projectId === selected.projectId && t.id !== selected.id)}
+            siblings={tasks.filter((t) => t.projectId === detailed.projectId && t.id !== detailed.id)}
             agents={agents}
+            initialPreview={details?.file}
             onChanged={() => {
-              // 动过一次（保存、派活、留言、归档……）就不再是"没写过的新卡"，
-              // 之后叉掉弹窗就只是叉掉弹窗。看板状态是异步刷的，这个标记不能
-              // 等它 —— 否则刚保存的卡会被当成空白草稿收走。
               draftId.current = null
               void refresh()
             }}
-            onClose={() => { closeTask(selected) }}
+            // 关弹窗只是关弹窗：卡还选着，面板上接着过日子。
+            onClose={() => { setDetails(null) }}
           />
         )}
 

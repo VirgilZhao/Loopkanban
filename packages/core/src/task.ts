@@ -501,3 +501,19 @@ export function reclaimIfExpired(task: Task, now: number): Task | null {
   if (task.column !== 'running' || !isLeaseExpired(task, now)) return null
   return bump(task, { column: 'ready', lease: undefined }, now)
 }
+
+/**
+ * 回收：把执行进程**已经确知不在了**的任务放回 ready。
+ *
+ * 与 {@link reclaimIfExpired} 的差别只在租约：那条路要等租约到期（默认 90 秒）
+ * 才敢断定一次执行死了，因为它面对的是"这一轮是不是卡住了"这种猜测。而看板
+ * 重启后的对账不必猜 —— 上一次的子进程随着上一个进程一起没了，是查明的事实。
+ * 让卡在 Running 上再空转一个租期，只会让人对着一张什么都不会发生的卡等着。
+ *
+ * 调用方必须**确知**那一轮已经死了（例如启动对账刚把它标成 aborted）。
+ * @returns 回收后的任务；不在 running 时返回 null。
+ */
+export function reclaimAbandoned(task: Task, now: number): Task | null {
+  if (task.column !== 'running') return null
+  return bump(task, { column: 'ready', lease: undefined }, now)
+}

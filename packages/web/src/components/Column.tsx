@@ -65,7 +65,11 @@ export function Column({
       ref={setNodeRef}
       className={cn(
         // 列是一块卡片面板：xl 圆角、发丝边、一层浅影，列头与内容之间一条通栏分隔线。
-        'settle flex min-w-[220px] flex-1 flex-col overflow-hidden rounded-xl border border-hairline',
+        // `min-h-0`：一竖条里上下叠着两列时，卡多的那个不许把另一个挤没 ——
+        // 它自己内部本来就会滚。
+        'settle flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-hairline',
+        // 宽度由外面那条竖列定（见 App 的 LANES）：一条竖列里上下两块得一样宽，
+        // 各自定各自的宽只会让它们对不齐。
         'bg-panel shadow-sm transition-colors duration-150',
         isOver && 'border-sodium-deep/60 shadow-md',
       )}

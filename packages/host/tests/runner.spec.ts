@@ -747,6 +747,63 @@ describe('崩溃恢复', () => {
     expect(store.getTask(asTaskId('t1'))?.column).toBe('ready')
   })
 
+  it('重启对账把上一个进程留下的 running 卡片立刻放回 ready —— 不等租约到期', () => {
+    store.createTask(task({
+      id: 't1', column: 'running',
+      // 租约还有一分钟才到期：上一个进程死在了续租之后。以前这张卡要在
+      // Running 列上空转到租约过期才会被收，而那一分钟里没有任何进程在为它干活。
+      lease: { runId: asRunId('dead'), provider: 'scripted', acquiredAt: T0, expiresAt: T0 + 60_000 },
+    }))
+    const r = runner(scriptedProvider([]), { now: () => T0 })
+
+    expect(r.reclaimExpired()).toEqual([])
+    expect(r.reclaimAbandoned()).toEqual(['t1'])
+    const recovered = store.getTask(asTaskId('t1'))
+    expect(recovered?.column).toBe('ready')
+    // 租约得跟着放掉，否则下一次派活会撞上一个死人的租约。
+    expect(recovered?.lease).toBeUndefined()
+  })
+
+  it('reclaimAbandoned 不碰本进程正在跑的卡 —— 收掉它等于把干到一半的 Agent 丢在原地', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'text', text: 'ready' }),
+    ], 0, 'setInterval(() => {}, 1000)'), { leaseTtlMs: 60_000 })
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    expect(r.reclaimAbandoned()).toEqual([])
+    expect(store.getTask(asTaskId('t1'))?.column).toBe('running')
+
+    await r.cancel(started.run.id)
+    await settle(started.run.id)
+  })
+
+  it('会话 id 一到就落库 —— 进程半路被杀，下一轮还接得上这次会话', async () => {
+    store.createTask(task({ id: 't1' }))
+    const r = runner(scriptedProvider([
+      JSON.stringify({ kind: 'session', sessionId: 'ses_live' }),
+      JSON.stringify({ kind: 'text', text: '干着' }),
+      // 之后不退出：模拟"这一轮还没收尾，看板进程先没了"。
+    ], 0, 'setInterval(() => {}, 1000)'), { leaseTtlMs: 60_000 })
+
+    const started = await r.start(asTaskId('t1'))
+    if (!started.ok) throw new Error(started.detail)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    // 关键：**这一轮还在跑**，会话 id 就已经在库里了。以前它只在收尾时才写，
+    // 于是最需要它的那种收场（进程被杀）恰恰留不下它。
+    expect(store.getRun(started.run.id)?.status).toBe('running')
+    expect(store.getRun(started.run.id)?.agentSessionId).toBe('ses_live')
+
+    await r.cancel(started.run.id)
+    await settle(started.run.id)
+    // 收尾之后也还在，续跑找的就是它。
+    expect(store.getRun(started.run.id)?.agentSessionId).toBe('ses_live')
+  })
+
   it('本进程正在跑的 Run 不会被误当成过期回收', async () => {
     store.createTask(task({ id: 't1' }))
     // 租期极短，但只要 Run 还在 active 里就不该被收走。

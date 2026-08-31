@@ -21,7 +21,7 @@ import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import {
-  acquireLease, asRunId, isLeaseExpired, moveTask, reclaimIfExpired, renewLease,
+  acquireLease, asRunId, isLeaseExpired, moveTask, reclaimAbandoned, reclaimIfExpired, renewLease,
   taskTitle, type RunId, type Task, type TaskId,
 } from '@loopkanban/core'
 import { humanSize, stageAttachments, type StagedAttachment } from '../attachments/index.ts'
@@ -381,6 +381,8 @@ export class Runner {
     const { storage } = this.options
     const rawLines: string[] = []
     let sessionId = run.agentSessionId
+    /** 已经落库的那个会话 id。只有变了才写，免得每条 session 事件都打一次库。 */
+    let persisted = run.agentSessionId
     /** 上一条已广播的 session 事件负载，用来压掉重复上报。 */
     let lastSessionKey: string | undefined
     let finishedOk: boolean | undefined
@@ -419,6 +421,16 @@ export class Runner {
             if (key === lastSessionKey) continue
             lastSessionKey = key
             sessionId = event.sessionId
+            // **拿到就落库**，不等这一轮收尾。
+            //
+            // 会话 id 是"能不能接着上次继续"的唯一凭据，而它以前只在结束时
+            // 才写进 Run —— 于是最需要它的那种收场（看板进程被杀、机器重启）
+            // 恰恰留不下它：卡回到队列重新派活时，Agent 只能从头再来一遍。
+            // 一次写一行，比重跑一整轮便宜太多。
+            if (sessionId !== undefined && sessionId !== persisted) {
+              persisted = sessionId
+              storage.updateRun({ ...run, agentSessionId: sessionId })
+            }
           }
           if (event.kind === 'text' || event.kind === 'tool') produced = true
           if (event.kind === 'text' && event.text.trim().length > 0) lastText = event.text
@@ -543,8 +555,11 @@ export class Runner {
   }
 
   /**
-   * 启动时对账：上次进程崩溃留下的 Run 标记为 aborted，
-   * 卡片交给租约回收机制放回 ready。
+   * 启动时对账：上次进程崩溃留下的 Run 标记为 aborted。
+   *
+   * 卡片本身由 {@link reclaimAbandoned} 收回 —— 两件事分开，是因为一张卡的
+   * 租约未必指着一条还写着 running 的 Run（写 Run 与写卡不是一次原子操作，
+   * 中间被杀就会对不上）。
    * @returns 被清理的 Run 数量。
    */
   reconcile(): number {
@@ -563,6 +578,32 @@ export class Runner {
       this.options.decisions?.revokeRun(asRunId(run.id))
     }
     return orphans.length
+  }
+
+  /**
+   * 启动对账的另一半：把**本进程没有在跑**的 running 卡片立刻放回 ready。
+   *
+   * 只在启动时调用，此刻 active 必然是空的 —— 所以"卡还在 Running"意味着
+   * 它属于上一个进程，而那个进程已经没了。以前这些卡要等租约到期（90 秒）
+   * 才被 {@link reclaimExpired} 收走：那段时间里看板上的它还在 Running 列
+   * 转着圈，而实际上没有任何进程在为它工作。重启之后不必猜，直接收。
+   *
+   * 工作区不动：worktree 属于任务，重新派活时接着在里面干，上一轮的成果
+   * 一点不丢。会话也接得上 —— 会话 id 在拿到的那一刻就落了库。
+   * @returns 被放回队列的任务。
+   */
+  reclaimAbandoned(): TaskId[] {
+    const { storage } = this.options
+    const reclaimed: TaskId[] = []
+    for (const task of storage.listTasks()) {
+      if (task.column !== 'running') continue
+      // 防御：本进程真在跑的不能收。启动时不会走到这里，但这个方法万一被
+      // 别处调用，收掉一张正在跑的卡就是把活干到一半的 Agent 丢在原地。
+      if (task.lease !== undefined && this.active.has(task.lease.runId)) continue
+      const recovered = reclaimAbandoned(task, this.now)
+      if (recovered !== null && storage.commitTask(recovered)) reclaimed.push(task.id)
+    }
+    return reclaimed
   }
 
   /** 把租约过期却卡在 running 的任务放回 ready。 */

@@ -465,7 +465,12 @@ export default function App(): React.JSX.Element {
         activity={activity}
         total={tasks.filter((t) => t.archivedAt === undefined).length}
         view={view}
-        onView={setView}
+        onView={(next) => {
+          setView(next)
+          // 执行器页整块占着内容区，点侧边栏切到看板视图时必须一并
+          // 退回看板页，否则 ExecutorsPage 会把看板挡在下面。
+          setPage((now) => (now === 'executors' ? 'tasks' : now))
+        }}
         onNewProject={() => { setNewProject(true) }}
         onDeleteProject={setDeleting}
         onRenameProject={(project, name) => {
@@ -483,7 +488,10 @@ export default function App(): React.JSX.Element {
         canCreate={view.kind === 'project' ? activeProject !== null : projects.length > 0}
         archivedCount={archivedCount}
         showArchived={showArchived}
-        onToggleArchived={() => { setShowArchived((on) => !on) }}
+        onToggleArchived={() => {
+          setShowArchived((on) => !on)
+          setPage((now) => (now === 'executors' ? 'tasks' : now))
+        }}
         executorCount={executors.length}
         onExecutors={() => { setPage((now) => (now === 'executors' ? 'tasks' : 'executors')) }}
         executorsOpen={page === 'executors'}

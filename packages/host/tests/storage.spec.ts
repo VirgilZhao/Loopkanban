@@ -688,6 +688,17 @@ describe('迁移', () => {
   })
 })
 
+describe('deleteProject 与聊天记录', () => {
+  it('项目聊过天后照常能删，聊天记录跟项目一起清掉', () => {
+    store.addChatMessage({
+      id: 'chat-1', projectId: PROJECT, role: 'human', body: '帮我看看这个仓库', at: T0,
+    })
+    expect(store.listChat(PROJECT)).toHaveLength(1)
+    expect(store.deleteProject(PROJECT)).toBe(true)
+    expect(store.listChat(PROJECT)).toEqual([])
+  })
+})
+
 describe('Pull Request', () => {
   beforeEach(() => { store.createTask(task({ id: 't1', column: 'review' })) })
 

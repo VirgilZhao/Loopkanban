@@ -15,16 +15,22 @@ import type { AddressInfo, Socket } from 'node:net'
 import { basename, extname, isAbsolute, join, normalize, relative, resolve as resolvePath } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  archiveTask, asProjectId, asRunId, asTaskId, deleteTask, dropReferences, editTask, moveTask,
-  unarchiveTask, PERMISSION_TIERS, type Column, type Task, type TaskEdit, type TaskId,
+  archiveTask, asExecutorId, asProjectId, asRunId, asTaskId, deleteTask, dropReferences, editTask,
+  mentionedExecutors, moveTask, referencedTasks, unarchiveTask, PERMISSION_TIERS,
+  type Column, type Executor, type Task, type TaskEdit, type TaskId,
 } from '@loopkanban/core'
 import { AgentPool, type DetectedAgent } from '../agents/index.ts'
 import {
   canInline, mimeOf, safeFilename, AttachmentStore,
   MAX_ATTACHMENTS_PER_COMMENT, MAX_ATTACHMENTS_PER_TASK, MAX_ATTACHMENT_BYTES,
 } from '../attachments/index.ts'
+import type { ChatService } from '../chat/index.ts'
 import type { DecisionHub } from '../decisions/index.ts'
 import { DecisionInputError } from '../decisions/index.ts'
+import {
+  createExecutor, defaultExecutor, setDefaultExecutor, updateExecutor,
+  type CreateProblem,
+} from '../executors/index.ts'
 import type { Review } from '../review/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Scheduler } from '../scheduler/index.ts'
@@ -79,6 +85,11 @@ export interface ServerOptions {
   readonly attachments?: AttachmentStore
   /** 自动认领调度器。不给则界面上没有自动驾驶开关。 */
   readonly scheduler?: Scheduler
+  /**
+   * 建卡之前那段对话。不给则那几条接口一律 503 —— 界面据此退回从前
+   * 「写一句话就是一张卡」的样子，而不是给一个说了话没人应的输入框。
+   */
+  readonly chat?: ChatService
   /**
    * 一键测试环境。不给则那几条接口一律 503 —— 界面据此把按钮收起来，
    * 而不是给一个按下去永远失败的按钮。
@@ -166,6 +177,25 @@ function describeAgent({ provider, caps }: DetectedAgent): Record<string, unknow
 type RelatedResult =
   | { readonly ok: true; readonly ids: TaskId[] }
   | { readonly ok: false; readonly error: string; readonly detail: string }
+
+/**
+ * 把执行器的校验问题翻译成 HTTP。
+ *
+ * 名字重了是 409（"这个名字已经有人用了"是一次冲突，不是一个格式错误），
+ * 要改的那个不在了是 404，其余都是 422 —— 请求本身读得懂，只是内容不合规矩。
+ */
+function sendExecutorProblem(res: ServerResponse, problem: CreateProblem): void {
+  const status = problem === 'duplicate' ? 409 : problem === 'not-found' ? 404 : 422
+  const detail = {
+    empty: '执行器要有名字',
+    'too-long': '名字太长了',
+    'illegal-chars': '名字里不能有空格、@ 或 #',
+    duplicate: '已经有同名的执行器了',
+    'unknown-provider': '本机没有探测到这个 CLI',
+    'not-found': '这个执行器已经不在了',
+  }[problem]
+  sendJson(res, status, { error: `executor-${problem}`, detail })
+}
 
 /**
  * 校验一批关联卡片 id。
@@ -398,6 +428,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const runner = options.runner
   const review = options.review
   const scheduler = options.scheduler
+  const chat = options.chat
   const testEnvs = options.testEnvs
   const decisions = options.decisions
   const attachmentStore = options.attachments
@@ -505,8 +536,12 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       for (const [taskId, list] of decisions?.pendingByTask() ?? []) {
         pending[taskId] = list.map((item) => ({ id: item.id, kind: item.kind }))
       }
+      // 执行器跟着看板一起来：卡面、聊天、@ 补全都要按 id 说出名字，
+      // 而它们数量很少、又几乎不变 —— 单开一轮请求只是多一次往返。
       sendJson(res, 200, {
         projects: storage.listProjects(), tasks, live, attachments, prs, failures, rounds, pending,
+        executors: storage.listExecutors(),
+        defaultExecutorId: defaultExecutor(storage)?.id ?? null,
       }, extraHeaders)
       return
     }
@@ -897,6 +932,207 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       }
     }
 
+    /*
+     * ── 执行器：一个起了名字的「哪个 CLI + 哪个模型」────────
+     *
+     * 名字是给人用的（`@大壮`），provider 必须是本机探测得到的那几个之一 ——
+     * 手打一个 CLI 不认的名字只会在派活那一刻才炸，而那时人早不在这页了。
+     */
+    if (pathname === '/api/executors') {
+      if (method === 'GET') {
+        sendJson(res, 200, {
+          executors: storage.listExecutors(),
+          defaultId: defaultExecutor(storage)?.id ?? null,
+          // 能选哪些 CLI 也一并给：新建那个表单要照着它渲染下拉。
+          providers: agents.list().map((agent) => ({
+            id: agent.provider.id,
+            version: agent.caps.version,
+            models: agent.caps.models,
+            canPickModel: agent.caps.canPickModel,
+          })),
+        }, extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req) as Partial<{ name: string; provider: string; model: string }> | undefined
+        const made = createExecutor(
+          storage,
+          {
+            name: body?.name ?? '',
+            provider: body?.provider ?? '',
+            ...(body?.model === undefined ? {} : { model: body.model }),
+          },
+          agents.list().map((agent) => agent.provider.id),
+        )
+        if (!made.ok) { sendExecutorProblem(res, made.problem); return }
+        sendJson(res, 201, { executor: made.executor }, extraHeaders)
+        return
+      }
+    }
+
+    const executorId = matchPath(pathname, /^\/api\/executors\/([^/]+)$/)
+    if (executorId !== null) {
+      const id = asExecutorId(decodeURIComponent(executorId))
+      if (storage.getExecutor(id) === null) {
+        sendJson(res, 404, { error: 'executor-not-found' })
+        return
+      }
+      if (method === 'PATCH') {
+        const body = await readJsonBody(req) as Partial<{ name: string; provider: string; model: string | null }> | undefined
+        const patch: Partial<{ name: string; provider: string; model: string }> = {
+          ...(body?.name === undefined ? {} : { name: body.name }),
+          ...(body?.provider === undefined ? {} : { provider: body.provider }),
+          // null 与空串都表示"用这个 CLI 自己的默认模型"。
+          ...(body !== undefined && 'model' in body ? { model: body.model ?? '' } : {}),
+        }
+        const saved = updateExecutor(storage, id, patch, agents.list().map((agent) => agent.provider.id))
+        if (!saved.ok) { sendExecutorProblem(res, saved.problem); return }
+        sendJson(res, 200, { executor: saved.executor }, extraHeaders)
+        return
+      }
+      if (method === 'DELETE') {
+        // 引用它的卡就地解绑（见 storage.deleteExecutor），不连带删卡。
+        storage.deleteExecutor(id)
+        sendJson(res, 200, {
+          executors: storage.listExecutors(),
+          defaultId: defaultExecutor(storage)?.id ?? null,
+        }, extraHeaders)
+        return
+      }
+    }
+
+    const makeDefault = matchPath(pathname, /^\/api\/executors\/([^/]+)\/default$/)
+    if (method === 'POST' && makeDefault !== null) {
+      const id = asExecutorId(decodeURIComponent(makeDefault))
+      if (!setDefaultExecutor(storage, id)) {
+        sendJson(res, 404, { error: 'executor-not-found' })
+        return
+      }
+      sendJson(res, 200, { defaultId: id }, extraHeaders)
+      return
+    }
+
+    /*
+     * ── 建卡之前的那段对话 ──────────────────────────────────
+     *
+     * 挂在项目上：聊的是某个仓库里的事，执行器也要在那个仓库里才看得懂
+     * 「这块面板」指的是什么。
+     */
+    const chatOf = matchPath(pathname, /^\/api\/projects\/([^/]+)\/chat$/)
+    if (chatOf !== null) {
+      const project = storage.listProjects().find((p) => p.id === decodeURIComponent(chatOf))
+      if (project === undefined) { sendJson(res, 404, { error: 'project-not-found' }); return }
+      if (chat === undefined) {
+        sendJson(res, 503, { error: 'chat-unavailable', detail: '这个看板没有装对话服务' })
+        return
+      }
+      if (method === 'GET') {
+        sendJson(res, 200, chat.state(project), extraHeaders)
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req) as Partial<{ body: string }> | undefined
+        const text = body?.body?.trim() ?? ''
+        if (text.length === 0) {
+          sendJson(res, 400, { error: 'bad-request', detail: '说点什么' })
+          return
+        }
+        sendJson(res, 201, chat.say(project, text), extraHeaders)
+        return
+      }
+      if (method === 'DELETE') {
+        chat.clear(project)
+        sendJson(res, 200, chat.state(project), extraHeaders)
+        return
+      }
+    }
+
+    /*
+     * 采纳一份草案：把它变成一张真的卡。
+     *
+     * 落在哪一列由人当场决定 —— `backlog` 是"记下来，回头再说"，`ready` 是
+     * "现在就开工"。**建卡这一步永远经过人**，所以它是一个显式的接口，而不是
+     * 执行器自己能调的工具。
+     */
+    const adopt = matchPath(pathname, /^\/api\/chat\/([^/]+)\/adopt$/)
+    if (method === 'POST' && adopt !== null) {
+      const messageId = decodeURIComponent(adopt)
+      const body = await readJsonBody(req) as Partial<{ column: string }> | undefined
+      const column = body?.column === 'ready' ? 'ready' : 'backlog'
+
+      const projects = storage.listProjects()
+      const message = projects
+        .flatMap((project) => storage.listChat(project.id))
+        .find((item) => item.id === messageId)
+      if (message === undefined || message.proposal === undefined) {
+        sendJson(res, 404, { error: 'proposal-not-found' })
+        return
+      }
+      if (message.taskId !== undefined) {
+        sendJson(res, 409, { error: 'already-adopted', detail: '这份草案已经建成卡片了' })
+        return
+      }
+      const project = projects.find((p) => p.id === message.projectId)
+      if (project === undefined) { sendJson(res, 404, { error: 'project-not-found' }); return }
+
+      const siblings = storage.listTasks(project.id)
+      /*
+       * 草案里的关联卡要过一遍，但**滤掉而不是整批拒绝**。
+       *
+       * 这和人手填的那条路不一样：那儿写错一个 id 是打错字，当场说一声让他
+       * 改；这儿的 id 是执行器写下的，它可能顺手编了一个不存在的卡号 ——
+       * 为此把整份谈了半天的草案挡回去，代价完全不成比例。真实存在的那几条
+       * 留下，其余当没写过。
+       */
+      const known = new Set(siblings.map((task) => String(task.id)))
+      const related = resolveRelated(
+        message.proposal.relatedTo.filter((id) => known.has(id)), siblings, null,
+      )
+      const now = Date.now()
+      const created: Task = {
+        id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
+        projectId: project.id,
+        revision: 1,
+        column: 'backlog',
+        position: Math.max(0, ...siblings.map((task) => task.position)) + 1,
+        description: message.proposal.description,
+        acceptance: [...message.proposal.acceptance],
+        repoPath: project.repoPath,
+        baseBranch: project.baseBranch,
+        // 谈这件事的那个执行器就是它的第一任负责人 —— 上下文在它那儿。
+        ...(message.executorId === undefined ? {} : { executorId: message.executorId }),
+        blockedBy: [],
+        relatedTo: related.ok ? related.ids : [],
+        createdAt: now,
+        updatedAt: now,
+      }
+      /*
+       * **先认领这份草案，再建卡。**
+       *
+       * `linkChatProposal` 那条 UPDATE 带着 `task_id IS NULL`，所以它就是这份
+       * 草案的唯一一次机会：两个标签页同时点"建卡"，只有一个能命中。反过来
+       * （先建卡再认领）的话，两边都会先建出一张一模一样的卡，而认领失败的
+       * 那一张没有任何人再回头把它收走。
+       *
+       * 代价是万一建卡本身炸了（数据库写不进去），草案会被标成已采纳却没有卡。
+       * 那是一次硬故障，看得见；而无声多出一张重复的卡不是。
+       */
+      if (!storage.linkChatProposal(messageId, created.id)) {
+        sendJson(res, 409, { error: 'already-adopted', detail: '这份草案已经建成卡片了' })
+        return
+      }
+      storage.createTask(created)
+      // 先落 backlog 再走一次正常的流转，而不是直接建在 ready 上：
+      // "新卡一律从想法池起步"是领域层的规则，绕过它就等于有两条建卡的路。
+      let task = created
+      if (column === 'ready') {
+        const moved = moveTask(created, { expectedRevision: created.revision, to: 'ready', now })
+        if (moved.ok && storage.commitTask(moved.value)) task = moved.value
+      }
+      sendJson(res, 201, { task, chat: chat?.state(project) ?? null }, extraHeaders)
+      return
+    }
+
     // ── 已探测到的 Agent ────────────────────────────────────
     if (method === 'GET' && pathname === '/api/agents') {
       sendJson(res, 200, { agents: agents.list().map(describeAgent) }, extraHeaders)
@@ -1040,7 +1276,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     if (method === 'POST' && pathname === '/api/tasks') {
       const body = await readJsonBody(req) as Partial<{
         projectId: string; description: string; acceptance: string[]
-        preferredProvider: string; model: string; relatedTo: string[]; blockedBy: string[]
+        preferredProvider: string; model: string; executorId: string
+        relatedTo: string[]; blockedBy: string[]
       }> | undefined
       // 仓库与基线跟着项目走，不由建卡方指定 —— 任务干活的地方是这个项目
       // 派生出来的 worktree，两者对不上就没有意义。
@@ -1068,6 +1305,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         })
         return
       }
+      const asked = body?.executorId
+      const pinnedExecutor: Executor | null = asked === undefined || asked === ''
+        ? null
+        : storage.getExecutor(asExecutorId(asked))
+      if (asked !== undefined && asked !== '' && pinnedExecutor === null) {
+        sendJson(res, 422, { error: 'executor-not-found', detail: `没有 ${asked} 这个执行器` })
+        return
+      }
       const created: Task = {
         id: asTaskId(`t-${randomUUID().slice(0, 8)}`),
         projectId: project.id,
@@ -1082,6 +1327,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         baseBranch: project.baseBranch,
         ...(body?.preferredProvider === undefined ? {} : { preferredProvider: body.preferredProvider }),
         ...(body?.model === undefined ? {} : { model: body.model }),
+        // 建卡时**不必**指定执行器 —— 不指定就是默认那位，第一次派活时才
+        // 写到卡上（见 runner）。给了就得是真的存在的那个。
+        ...(pinnedExecutor === null ? {} : { executorId: pinnedExecutor.id }),
         blockedBy: blocked.ids,
         relatedTo: related.ids,
         createdAt: now,
@@ -1134,16 +1382,46 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           return
         }
 
-        // 留言可以顺带改「下一轮交给谁、用哪个模型」—— 说"再改一版"和"这次换个人干"
-        // 本来就是同一句话，不该逼人先去规格里存一遍再回来发言。
-        // 同 PATCH：字段缺席只意味着"这次没提到"，显式 null 才是"清空"。
+        /*
+         * 一句话里可以顺带交代两件事，都是从**话本身**读出来的：
+         *
+         *   `@大壮`      下一轮换他干。说"再改一版"和"这次换个人干"本来就是
+         *                同一句话，逼人先去规格里存一遍再回来发言是多一道手续；
+         *                而一个下拉框还会出现"改了下拉却忘了发言"。
+         *   `#t-1a2b3c4d` 参考那张卡。落到卡上就是 relatedTo，派活时那张卡的
+         *                内容会被展开写进规格里 —— 于是执行器"通过 #任务id
+         *                拿到该任务的详情"这件事，就是既有的关联机制。
+         *
+         * 不点名就不换人：卡上记着第一次派活时用的那个执行器，后面几轮都归他。
+         */
+        const executors = storage.listExecutors()
+        const mentioned = mentionedExecutors(text, executors)[0]
+        // 只认同项目、真实存在的卡；`#` 后面打错一个字符不该变成一次报错，
+        // 更不该变成一条指向查无此卡的关联。
+        const siblings = storage.listTasks(task.projectId)
+        const known = new Set(siblings.map((other) => String(other.id)))
+        const referenced = referencedTasks(text)
+          .filter((id) => known.has(String(id)) && String(id) !== String(task.id))
+        const merged = [...new Set([...task.relatedTo.map(String), ...referenced.map(String)])] as TaskId[]
+
+        /*
+         * 卡在**执行中**（或已归档）时改不动 —— `editTask` 会拒。两件事在这里
+         * 分道扬镳：
+         *
+         * - `@` 点名是一次明确的意图，改不了就得**当场说**（422，那句话也不
+         *   留下）。悄悄咽掉的话，人以为下一轮换了人，其实没换。
+         * - `#` 引用只是顺手提一句"参考那张卡"。为它把整条留言退回去太重了
+         *   —— 卡正跑着的时候留一句话本来是允许的，加一个 `#` 不该让它 422。
+         *   这一轮就不记那条关联了，那个卡号仍然原样留在话里，跟着讨论走。
+         */
+        const editable = task.column !== 'running' && task.archivedAt === undefined
         const edit: TaskEdit = {
-          ...(body !== undefined && 'preferredProvider' in body
-            ? { preferredProvider: (body['preferredProvider'] as string | null) ?? undefined }
-            : {}),
-          ...(body !== undefined && 'model' in body
-            ? { model: (body['model'] as string | null) ?? undefined }
-            : {}),
+          // 点的正是眼下这一位就什么都不改 —— 白白 +1 一次 revision 会让
+          // 别处正拿着旧 revision 的请求平白撞上一次冲突。
+          ...(mentioned === undefined || String(mentioned.id) === String(task.executorId)
+            ? {}
+            : { executorId: mentioned.id }),
+          ...(!editable || merged.length === task.relatedTo.length ? {} : { relatedTo: merged }),
         }
         // 改在留言落库之前：被拒的换人不该留下一条已经发出去的话。
         let current = task
@@ -1440,6 +1718,18 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           return
         }
         if (asked === null || asked === '') rest['permission'] = null
+      }
+      // 执行器也在这儿把关：指着一个不存在的执行器，那张卡会在派活时静悄悄
+      // 退回默认执行器 —— 存下去比当场拒绝更难查。空串同 null，都是"不再指定"。
+      if ('executorId' in rest) {
+        const asked = rest['executorId']
+        if (asked !== null && asked !== '') {
+          if (typeof asked !== 'string' || storage.getExecutor(asExecutorId(asked)) === null) {
+            sendJson(res, 422, { error: 'executor-not-found', detail: `没有 ${String(asked)} 这个执行器` })
+            return
+          }
+        }
+        if (asked === null || asked === '') rest['executorId'] = null
       }
       // null 意为"清空这个字段"。字段缺席只意味着"这次没提到它"，两者不能混为
       // 一谈 —— JSON 里没有 undefined，客户端要清空只能显式送 null。

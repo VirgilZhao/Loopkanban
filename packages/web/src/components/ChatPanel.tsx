@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react'
-import { ArrowRight, MessageSquare, Maximize2, PanelRightClose, Send, X } from 'lucide-react'
+import { ArrowRight, MessageSquare, Maximize2, PanelRightClose, X } from 'lucide-react'
 import { api, ApiError, subscribeRun } from '@/api.ts'
+import { ChatThread } from '@/components/ChatThread.tsx'
 import { DecisionBar } from '@/components/DecisionBar.tsx'
 import { Discussion } from '@/components/Discussion.tsx'
 import { RunStream } from '@/components/RunStream.tsx'
 import { TaskEditor } from '@/components/TaskEditor.tsx'
 import { Button } from '@/components/ui/button.tsx'
-import { Textarea } from '@/components/ui/textarea.tsx'
 import { explain, useT } from '@/lib/i18n.tsx'
 import { isUntouchedDraft, taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMN_META, type Agent, type Project, type Run, type RunDecision, type StreamEvent,
-  type Task, type TaskComment, type TaskEdit,
+  COLUMN_META, type Agent, type Executor, type Project, type Run, type RunDecision,
+  type StreamEvent, type Task, type TaskComment, type TaskEdit,
 } from '@/types.ts'
 
 /** 选中一张卡之后，这块面板里的两页。聊天在前 —— 它是这块面板的本业。 */
@@ -29,6 +29,10 @@ interface Props {
   /** 同项目的其它卡，配置里挑关联与依赖用。 */
   siblings: Task[]
   agents: Agent[]
+  /** 全部执行器：聊天、@ 补全、配置里那一栏都靠它。 */
+  executors: Executor[]
+  /** 谁是默认执行器。 */
+  defaultExecutorId: string | null
   /** 卡被动过（建卡、留言、存规格、移动）—— 看板得重新拉一遍。 */
   onChanged: () => void
   /** 刚建出来的卡。外面把它选中，面板随即切到这张卡上。 */
@@ -46,7 +50,9 @@ interface Props {
 /**
  * 看板右侧的那块面板：**一张卡的全部日常都在这儿**。
  *
- * 没选卡时它是建卡的入口 —— 写一句话就是一张卡，不必先开弹窗、再填表单。
+ * 没选卡时它是**跟默认执行器聊天**的地方：把想做的事说清楚，它来出卡（见
+ * ChatThread）。从前这儿是个"写一句话就是一张卡"的输入框，毛病是一句话直接
+ * 变成需求，中间没有任何人帮你想清楚。
  * 选中一张卡之后它变成这张卡的对话：Agent 的回复与人的留言排在一起，Review
  * 时说一句就是"再改一版"（那正是过去要点开弹窗、切到讨论页才能干的事）；
  * 另一页是这张卡的配置，需求、验收标准、交给谁、权限都在里面就地改。
@@ -58,7 +64,7 @@ interface Props {
  * 里，面板右上角那颗按钮叫得出来 —— 550px 宽的地方摆 diff，是把它摆成一条缝。
  */
 export function ChatPanel({
-  task, project, projects, siblings, agents,
+  task, project, projects, siblings, agents, executors, defaultExecutorId,
   onChanged, onCreated, onDeselect, onOpenDetails, onCollapse, className, index = 0,
 }: Props): React.JSX.Element {
   const t = useT()
@@ -67,8 +73,6 @@ export function ChatPanel({
   const [busy, setBusy] = useState(false)
   /** 这块面板上出的岔子，就说在这块面板上 —— 看板顶上那条横幅在很远的地方。 */
   const [failure, setFailure] = useState<string | null>(null)
-  /** 建卡模式下手上这句话。 */
-  const [draft, setDraft] = useState('')
   /** 新卡落到哪个项目；没挑过就跟着当前视角走。 */
   const [target, setTarget] = useState<string | null>(null)
   /** 刚从这儿建出来的那张卡。回执只对它显示，别的卡不摆。 */
@@ -91,6 +95,8 @@ export function ChatPanel({
   const [decisions, setDecisions] = useState<RunDecision[]>([])
 
   const targetProject = projects.find((p) => p.id === target) ?? project ?? projects[0] ?? null
+  /** 眼下由谁在聊 —— 默认执行器。头上那句说明要说出他的名字。 */
+  const chatting = executors.find((executor) => executor.id === defaultExecutorId) ?? executors[0]
   const latest = runs[0]
   /** 这一轮还在跑。跑着的时候对话是活的，输入框按住。 */
   const live = latest?.status === 'running'
@@ -230,23 +236,6 @@ export function ChatPanel({
     setFailure(error instanceof ApiError ? explain(t, error.code, error.message) : fallback)
   }
 
-  /** 把手上这句话变成一张卡。它落在想法池里 —— 新卡一律从那儿起步。 */
-  const create = (): void => {
-    const body = draft.trim()
-    if (body === '' || targetProject === null || busy) return
-    setBusy(true)
-    setFailure(null)
-    void api.createTask({ projectId: targetProject.id, description: body })
-      .then(({ task: made }) => {
-        setDraft('')
-        setFresh(made.id)
-        onCreated(made)
-        onChanged()
-      })
-      .catch((error: unknown) => { report(error, t('chat.createFailed')) })
-      .finally(() => { setBusy(false) })
-  }
-
   /** 刚建的卡推进队列。位置交给服务端 —— 排在队尾就是它该在的地方。 */
   const toReady = (): void => {
     if (task === null || busy) return
@@ -275,7 +264,11 @@ export function ChatPanel({
           <MessageSquare className="mt-px size-4 flex-none text-sodium" />
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-sm font-semibold leading-none text-ink">{t('chat.title')}</h2>
-            <p className="mt-1.5 truncate text-xs text-ink-faint">{t('chat.hint')}</p>
+            <p className="mt-1.5 truncate text-xs text-ink-faint">
+              {chatting === undefined
+                ? t('chat.hintNobody')
+                : t('chat.hint', { name: chatting.name })}
+            </p>
           </div>
           <Button
             variant="outline"
@@ -374,21 +367,20 @@ export function ChatPanel({
       )}
 
       {task === null ? (
-        /* ── 建卡：一句话就是一张卡 ─────────────────────────── */
-        <div className="flex min-h-0 flex-1 flex-col">
+        /* ── 聊出一张卡 ─────────────────────────────────────── */
+        targetProject === null ? (
           <div className="flex min-h-0 flex-1 items-center justify-center border-t border-hairline p-6">
-            <p className="cjk-label max-w-64 text-center leading-relaxed">
-              {projects.length === 0 ? t('chat.noProject') : t('chat.createHint')}
-            </p>
+            <p className="cjk-label max-w-64 text-center leading-relaxed">{t('chat.noProject')}</p>
           </div>
-
-          <div className="flex-none space-y-2 border-t border-hairline px-3 py-3">
-            {/* 落点只在"不止一个项目"时问 —— 只有一个仓库时问它等于白问一句。 */}
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col border-t border-hairline">
+            {/* 落点只在"不止一个项目"时问 —— 只有一个仓库时问它等于白问一句。
+                它得摆在对话**上面**：换了项目就是换了一段对话。 */}
             {projects.length > 1 ? (
-              <label className="flex items-center gap-2 text-[11px] text-ink-faint">
+              <label className="flex flex-none items-center gap-2 border-b border-hairline px-3 py-2 text-[11px] text-ink-faint">
                 {t('chat.project')}
                 <select
-                  value={targetProject?.id ?? ''}
+                  value={targetProject.id}
                   onChange={(event) => { setTarget(event.target.value) }}
                   className={cn(
                     'border-input h-7 min-w-0 flex-1 rounded-md border bg-transparent px-1.5 text-[11px] shadow-xs',
@@ -400,33 +392,23 @@ export function ChatPanel({
                 </select>
               </label>
             ) : null}
-
-            <Textarea
-              value={draft}
-              disabled={busy || targetProject === null}
-              placeholder={t('chat.createPlaceholder')}
-              onChange={(event) => { setDraft(event.target.value) }}
-              onKeyDown={(event) => {
-                // 一句话的东西，回车就发；写长了用 shift 换行。
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  create()
-                }
+            <ChatThread
+              // 换项目就整个重挂：上一个仓库聊到哪儿，跟这个仓库没关系。
+              key={targetProject.id}
+              project={targetProject}
+              executors={executors}
+              onCreated={(made) => {
+                setFresh(made.id)
+                onCreated(made)
               }}
-              // 固定高度：贴着面板底，跟着内容长会把上面的提示挤没了。
-              className="field-sizing-fixed h-20"
+              onChanged={onChanged}
             />
-            <div className="flex items-center justify-end">
-              <Button size="sm" disabled={busy || draft.trim() === '' || targetProject === null} onClick={create}>
-                <Send />{t('chat.create')}
-              </Button>
-            </div>
           </div>
-        </div>
+        )
       ) : tab === 'talk' ? (
         <Discussion
           task={task}
-          agents={agents}
+          executors={executors}
           comments={comments}
           busy={busy}
           // Review 与 Done 里留言都会把卡送回队列，按钮上得先说清楚。
@@ -452,10 +434,10 @@ export function ChatPanel({
           mute={live ? t('chat.runningLock') : undefined}
           // 文档要摊开来读，这块面板太窄 —— 交给详情弹窗，它会先摆出这一份。
           onOpenFile={(path) => { onOpenDetails(path) }}
-          onSend={async (body, next, attachmentIds) => {
+          onSend={async (body, attachmentIds) => {
             setBusy(true)
             try {
-              const { comments: after } = await api.comment(task.id, body, next, attachmentIds)
+              const { comments: after } = await api.comment(task.id, body, attachmentIds)
               setComments(after)
               // **不关面板**：说完这句话，人多半还要看着这张卡往下走 ——
               // 这正是把讨论从弹窗搬出来的理由。
@@ -474,6 +456,8 @@ export function ChatPanel({
           task={task}
           siblings={siblings}
           agents={agents}
+          executors={executors}
+          defaultExecutorId={defaultExecutorId}
           busy={busy}
           onError={(code, detail) => { setFailure(explain(t, code, detail)) }}
           // 附件是即时生效的：传完 / 删完要让看板知道，卡片上那枚回形针的

@@ -6,10 +6,11 @@ import { Input } from '@/components/ui/input.tsx'
 import { Label } from '@/components/ui/label.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { useT } from '@/lib/i18n.tsx'
-import { modelOptions, taskTitle } from '@/lib/task.ts'
+import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import {
-  COLUMN_META, PERMISSION_TIERS, type Agent, type PermissionTier, type Task, type TaskEdit,
+  COLUMN_META, PERMISSION_TIERS, type Agent, type Executor, type PermissionTier, type Task,
+  type TaskEdit,
 } from '@/types.ts'
 
 interface Props {
@@ -19,7 +20,12 @@ interface Props {
    * worktree 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
    */
   siblings: Task[]
+  /** 本机探测到的 CLI。这儿只用来说清楚某个档位那个 CLI 支不支持。 */
   agents: Agent[]
+  /** 全部执行器；「交给谁」这一栏从它渲染。 */
+  executors: Executor[]
+  /** 谁是默认执行器 —— 这一栏留空时就是他。 */
+  defaultExecutorId: string | null
   busy: boolean
   onSave: (edit: TaskEdit) => void
   /** 附件是即时生效的，不进草稿，所以它自己要能报错、能通知外面刷新。 */
@@ -27,12 +33,11 @@ interface Props {
   onChanged: () => void
 }
 
-/** 表单里持有的草稿。`preferredProvider` 显式允许 undefined —— 「任意」就是它。 */
+/** 表单里持有的草稿。`executorId` 显式允许 undefined —— 「默认执行器」就是它。 */
 interface Draft {
   description: string
   acceptance: string[]
-  preferredProvider: string | undefined
-  model: string | undefined
+  executorId: string | undefined
   permission: PermissionTier | undefined
   relatedTo: string[]
   blockedBy: string[]
@@ -43,8 +48,7 @@ function draftOf(task: Task): Draft {
   return {
     description: task.description,
     acceptance: task.acceptance.length > 0 ? task.acceptance : [''],
-    preferredProvider: task.preferredProvider,
-    model: task.model,
+    executorId: task.executorId,
     permission: task.permission,
     relatedTo: [...task.relatedTo],
     blockedBy: [...task.blockedBy],
@@ -52,7 +56,7 @@ function draftOf(task: Task): Draft {
 }
 
 export function TaskEditor({
-  task, siblings, agents, busy, onSave, onError, onChanged,
+  task, siblings, agents, executors, defaultExecutorId, busy, onSave, onError, onChanged,
 }: Props): React.JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState(() => draftOf(task))
@@ -64,23 +68,21 @@ export function TaskEditor({
   useEffect(() => { setDraft(draftOf(task)) }, [task.id, task.revision])
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(draftOf(task))
-  /** 选定的执行器；没选就没有模型这一说。 */
-  const picked = agents.find((agent) => agent.id === draft.preferredProvider)
-  /** 下拉里的选项；卡上原有的模型即使不在探测清单里也留着。 */
-  const options = picked === undefined ? [] : modelOptions(picked, draft.model)
-  /** 模型这一栏眼下能不能选：没挑执行器、CLI 不认 --model、清单没探出来，都算不能。 */
-  const pickable = picked !== undefined && picked.canPickModel && options.length > 0
-  const modelHint = picked === undefined
-    ? t('editor.modelNeedProvider')
-    : !picked.canPickModel
-      ? t('editor.modelUnsupported', { provider: picked.id })
-      : options.length === 0
-        ? t('editor.modelUnknown', { provider: picked.id })
-        : t('editor.modelHint', { count: picked.models.length, provider: picked.id })
-  /** 选了指定执行器不支持的档位，就说清楚"执行时会退回 standard" —— 不许诺做不到的事。 */
-  const permissionHint = draft.permission !== undefined && picked !== undefined
-    && !picked.permissionTiers.includes(draft.permission)
-    ? t('editor.permissionUnsupported', { provider: picked.id, tier: draft.permission })
+  /**
+   * 这一栏留空时**实际**是谁在干 —— 默认执行器。
+   *
+   * 提示语里要说出他的名字：一个写着"默认"的下拉，不告诉人默认是谁，
+   * 等于让他去别处查一遍。
+   */
+  const fallback = executors.find((executor) => executor.id === defaultExecutorId)
+  /** 这张卡实际交给谁。挑过就是挑的那位，没挑就是默认那位。 */
+  const picked = executors.find((executor) => executor.id === draft.executorId) ?? fallback
+  /** 他背后是哪个 CLI —— 档位支不支持要问它。 */
+  const cli = agents.find((agent) => agent.id === picked?.provider)
+  /** 选了那个 CLI 不支持的档位，就说清楚"执行时会退回 standard" —— 不许诺做不到的事。 */
+  const permissionHint = draft.permission !== undefined && cli !== undefined
+    && !cli.permissionTiers.includes(draft.permission)
+    ? t('editor.permissionUnsupported', { provider: cli.id, tier: draft.permission })
     : t('editor.permissionHint')
 
   /** 还能关联的卡：同项目、不是自己、也还没关联上。 */
@@ -320,64 +322,44 @@ export function TaskEditor({
           />
         </Field>
 
-        {/* 执行器与模型并排一行。都是只可选、不可填 —— 能选的都是探测出来的，
-            手打一个 CLI 不认的名字只会在派活那一刻才炸。 */}
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t('editor.provider')} hint={t('editor.providerHint')}>
-            <select
-              value={draft.preferredProvider ?? ''}
-              disabled={locked}
-              onChange={(e) => {
-                const next = e.target.value
-                setDraft((d) => ({
-                  ...d,
-                  // 不指定执行器时模型也跟着清掉：模型名是各家 CLI 自己的说法，
-                  // 留着一个别人不认识的名字只会在派活时炸。
-                  preferredProvider: next.length === 0 ? undefined : next,
-                  model: next === d.preferredProvider ? d.model : undefined,
-                }))
-              }}
-              className={cn(
-                'border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
-                'transition-[color,box-shadow] outline-none dark:bg-input/30',
-                'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
-                'disabled:cursor-not-allowed disabled:opacity-50',
-              )}
-            >
-              <option value="">{t('editor.providerAny')}</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.permissionCaveat === undefined ? agent.id : `${agent.id} · ${agent.permissionCaveat.label}`}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field label={t('editor.model')} hint={modelHint}>
-            {/* 没选定执行器、那个 CLI 不认 --model、或者模型清单没探出来：
-                三种情况都只给"默认模型"并且按住不动 —— 不是能选的状态就别
-                装成能选的。卡上原有的模型即使不在清单里也留着，免得打开一张
-                老卡就把它的选择悄悄抹掉。 */}
-            <select
-              value={draft.model ?? ''}
-              disabled={locked || picked === undefined || !pickable}
-              title={modelHint}
-              onChange={(e) => {
-                const next = e.target.value
-                setDraft((d) => ({ ...d, model: next.length === 0 ? undefined : next }))
-              }}
-              className={cn(
-                'mono border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
-                'transition-[color,box-shadow] outline-none dark:bg-input/30',
-                'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
-                'disabled:cursor-not-allowed disabled:opacity-50',
-              )}
-            >
-              <option value="">{t('editor.modelDefault')}</option>
-              {options.map((model) => <option key={model} value={model}>{model}</option>)}
-            </select>
-          </Field>
-        </div>
+        {/* 交给谁。**一栏就够** —— 执行器本身就是「哪个 CLI + 哪个模型」的
+            组合，从前那两个下拉（执行器 + 模型）是同一件事拆成的两半。
+            留空就是默认那位；换人更常见的说法是在对话里 `@` 他一句。 */}
+        <Field
+          label={t('editor.executor')}
+          hint={picked === undefined
+            ? t('editor.executorNone')
+            : draft.executorId === undefined
+              ? t('editor.executorDefault', { name: picked.name })
+              : t('editor.executorHint')}
+        >
+          <select
+            value={draft.executorId ?? ''}
+            disabled={locked || executors.length === 0}
+            onChange={(e) => {
+              const next = e.target.value
+              setDraft((d) => ({ ...d, executorId: next.length === 0 ? undefined : next }))
+            }}
+            className={cn(
+              'border-input h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs',
+              'transition-[color,box-shadow] outline-none dark:bg-input/30',
+              'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+              'disabled:cursor-not-allowed disabled:opacity-50',
+            )}
+          >
+            <option value="">
+              {fallback === undefined
+                ? t('editor.executorAny')
+                : t('editor.executorFallback', { name: fallback.name })}
+            </option>
+            {executors.map((executor) => (
+              <option key={executor.id} value={executor.id}>
+                {executor.name} · {executor.provider}
+                {executor.model === undefined ? '' : ` · ${executor.model}`}
+              </option>
+            ))}
+          </select>
+        </Field>
 
         {/* 权限档位。执行时的边界画在哪儿 —— 是"只许看"还是"要权限先问人"
             还是"放开跑"，是需求的一部分，跟执行器、模型放在一起。 */}

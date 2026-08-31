@@ -11,8 +11,10 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { Column, Lease, PermissionTier, ProjectId, RunId, Task, TaskId } from '@loopkanban/core'
-import { asProjectId, asRunId, asTaskId } from '@loopkanban/core'
+import type {
+  Column, Executor, ExecutorId, Lease, PermissionTier, ProjectId, RunId, Task, TaskId,
+} from '@loopkanban/core'
+import { asExecutorId, asProjectId, asRunId, asTaskId } from '@loopkanban/core'
 import { migrate } from './schema.ts'
 
 /** 一个项目：一个 git 仓库目录 + 一条基线分支。任务挂在它下面。 */
@@ -158,6 +160,35 @@ export interface RunEvent {
   readonly at: number
 }
 
+/**
+ * 建卡之前那段对话里的一条消息。
+ *
+ * 三种角色，`proposal` 是特别的那个：它是执行器谈拢之后提出的**任务草案**，
+ * 人点头才会变成一张卡。草案不是卡 —— 中间这一步是刻意的，"聊着聊着就
+ * 无声地建出一堆卡"比不建更糟。
+ */
+export interface ChatMessage {
+  readonly id: string
+  readonly projectId: ProjectId
+  readonly role: 'human' | 'agent' | 'proposal'
+  readonly body: string
+  /** 这句话归哪个执行器。人说的话记的是当时的默认执行器。 */
+  readonly executorId?: ExecutorId | undefined
+  /** `proposal` 专有：草案的内容。 */
+  readonly proposal?: TaskProposal | undefined
+  /** 草案被采纳后建出的那张卡。没采纳（或还没决定）时没有。 */
+  readonly taskId?: TaskId | undefined
+  readonly at: number
+}
+
+/** 执行器提出的任务草案。字段与建卡接口一一对应 —— 采纳就是原样建出来。 */
+export interface TaskProposal {
+  readonly description: string
+  readonly acceptance: readonly string[]
+  /** 谈话里提到的参考卡片（`#t-xxxx`）。 */
+  readonly relatedTo: readonly string[]
+}
+
 /** 一次执行里等人拍板的事：权限审批，或向人提的一个问题。 */
 export type DecisionKind = 'permission' | 'question'
 
@@ -218,6 +249,7 @@ interface TaskRow {
   base_branch: string
   preferred_provider: string | null
   model: string | null
+  executor_id: string | null
   permission: string | null
   blocked_by_json: string
   related_json: string
@@ -226,6 +258,50 @@ interface TaskRow {
   done_at: number | null
   created_at: number
   updated_at: number
+}
+
+interface ExecutorRow {
+  id: string
+  name: string
+  provider: string
+  model: string | null
+  created_at: number
+  updated_at: number
+}
+
+interface ChatRow {
+  id: string
+  project_id: string
+  role: string
+  body: string
+  executor_id: string | null
+  proposal_json: string | null
+  task_id: string | null
+  at: number
+}
+
+function toExecutor(row: ExecutorRow): Executor {
+  return {
+    id: asExecutorId(row.id),
+    name: row.name,
+    provider: row.provider,
+    ...(row.model === null ? {} : { model: row.model }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function toChatMessage(row: ChatRow): ChatMessage {
+  return {
+    id: row.id,
+    projectId: asProjectId(row.project_id),
+    role: row.role as ChatMessage['role'],
+    body: row.body,
+    ...(row.executor_id === null ? {} : { executorId: asExecutorId(row.executor_id) }),
+    ...(row.proposal_json === null ? {} : { proposal: JSON.parse(row.proposal_json) as TaskProposal }),
+    ...(row.task_id === null ? {} : { taskId: asTaskId(row.task_id) }),
+    at: row.at,
+  }
 }
 
 interface AttachmentRow {
@@ -269,6 +345,7 @@ function toTask(row: TaskRow): Task {
     baseBranch: row.base_branch,
     ...(preferred === null ? {} : { preferredProvider: preferred }),
     ...(row.model === null ? {} : { model: row.model }),
+    ...(row.executor_id === null ? {} : { executorId: asExecutorId(row.executor_id) }),
     ...(row.permission === null ? {} : { permission: row.permission as PermissionTier }),
     blockedBy: (JSON.parse(row.blocked_by_json) as string[]).map(asTaskId),
     relatedTo: (JSON.parse(row.related_json) as string[]).map(asTaskId),
@@ -675,20 +752,103 @@ export class Storage {
     return rows.map(toPullRequest)
   }
 
+  // ── 执行器 ─────────────────────────────────────────────────────
+
+  listExecutors(): Executor[] {
+    const rows = this.db.prepare('SELECT * FROM executors ORDER BY created_at').all() as unknown as ExecutorRow[]
+    return rows.map(toExecutor)
+  }
+
+  getExecutor(id: ExecutorId): Executor | null {
+    const row = this.db.prepare('SELECT * FROM executors WHERE id = ?').get(id) as unknown as ExecutorRow | undefined
+    return row === undefined ? null : toExecutor(row)
+  }
+
+  createExecutor(executor: Executor): void {
+    this.db.prepare(`
+      INSERT INTO executors (id, name, provider, model, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      executor.id, executor.name, executor.provider, executor.model ?? null,
+      executor.createdAt, executor.updatedAt,
+    )
+  }
+
+  updateExecutor(executor: Executor): void {
+    this.db.prepare(`
+      UPDATE executors SET name = ?, provider = ?, model = ?, updated_at = ? WHERE id = ?
+    `).run(executor.name, executor.provider, executor.model ?? null, executor.updatedAt, executor.id)
+  }
+
+  /**
+   * 删掉一个执行器。
+   *
+   * 引用它的卡片就地解绑（executor_id 置空）而**不是连带删卡**：执行器是
+   * "交给谁干"，删掉它只是这条选择作废了，那些活还在。解绑之后它们回到
+   * "用默认执行器"，与从没指定过的卡一样。
+   *
+   * 同一个事务里做完 —— 中途失败留下一批指向不存在的执行器的卡，会让派活
+   * 那一刻才炸，而那时人早就不在这个页面了。
+   */
+  deleteExecutor(id: ExecutorId): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('UPDATE tasks SET executor_id = NULL WHERE executor_id = ?').run(id)
+      this.db.prepare('DELETE FROM executors WHERE id = ?').run(id)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  // ── 建卡之前的对话 ─────────────────────────────────────────────
+
+  listChat(projectId: ProjectId): ChatMessage[] {
+    const rows = this.db.prepare('SELECT * FROM chat_messages WHERE project_id = ? ORDER BY at, id')
+      .all(projectId) as unknown as ChatRow[]
+    return rows.map(toChatMessage)
+  }
+
+  addChatMessage(message: ChatMessage): void {
+    this.db.prepare(`
+      INSERT INTO chat_messages (id, project_id, role, body, executor_id, proposal_json, task_id, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      message.id, message.projectId, message.role, message.body,
+      message.executorId ?? null,
+      message.proposal === undefined ? null : JSON.stringify(message.proposal),
+      message.taskId ?? null, message.at,
+    )
+  }
+
+  /** 草案被采纳：记下它变成了哪张卡。再点一次不该再建一张。 */
+  linkChatProposal(messageId: string, taskId: TaskId): boolean {
+    const result = this.db.prepare('UPDATE chat_messages SET task_id = ? WHERE id = ? AND task_id IS NULL')
+      .run(taskId, messageId)
+    return result.changes === 1
+  }
+
+  /** 清空一个项目的对话。**已经建出来的卡不受影响** —— 它们早已是卡了。 */
+  clearChat(projectId: ProjectId): void {
+    this.db.prepare('DELETE FROM chat_messages WHERE project_id = ?').run(projectId)
+  }
+
   // ── Task ───────────────────────────────────────────────────────
 
   createTask(task: Task): void {
     this.db.prepare(`
       INSERT INTO tasks (
         id, project_id, revision, column_name, position, description,
-        acceptance_json, repo_path, base_branch, preferred_provider, model, permission,
+        acceptance_json, repo_path, base_branch, preferred_provider, model, executor_id, permission,
         blocked_by_json, related_json, lease_json, archived_at, done_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.projectId, task.revision, task.column, task.position,
       task.description, JSON.stringify(task.acceptance),
       task.repoPath, task.baseBranch, task.preferredProvider ?? null, task.model ?? null,
+      task.executorId ?? null,
       task.permission ?? null,
       JSON.stringify(task.blockedBy), JSON.stringify(task.relatedTo),
       task.lease === undefined ? null : JSON.stringify(task.lease),
@@ -724,13 +884,14 @@ export class Storage {
       UPDATE tasks SET
         revision = ?, column_name = ?, position = ?, description = ?,
         acceptance_json = ?, repo_path = ?, base_branch = ?, preferred_provider = ?, model = ?,
-        permission = ?, blocked_by_json = ?, related_json = ?, lease_json = ?,
+        executor_id = ?, permission = ?, blocked_by_json = ?, related_json = ?, lease_json = ?,
         archived_at = ?, done_at = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(
       next.revision, next.column, next.position, next.description,
       JSON.stringify(next.acceptance), next.repoPath, next.baseBranch,
-      next.preferredProvider ?? null, next.model ?? null, next.permission ?? null,
+      next.preferredProvider ?? null, next.model ?? null,
+      next.executorId ?? null, next.permission ?? null,
       JSON.stringify(next.blockedBy), JSON.stringify(next.relatedTo),
       next.lease === undefined ? null : JSON.stringify(next.lease),
       next.archivedAt ?? null, next.doneAt ?? null,

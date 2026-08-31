@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  DndContext, DragOverlay, PointerSensor, useSensor, useSensors,
-  type DragEndEvent, type DragStartEvent,
+  DndContext, DragOverlay, PointerSensor, pointerWithin, rectIntersection, useSensor, useSensors,
+  type CollisionDetection, type DragEndEvent, type DragStartEvent,
 } from '@dnd-kit/core'
 import { api, ApiError } from '@/api.ts'
-import { PanelRightOpen, Settings } from 'lucide-react'
+import { PanelRightOpen, RefreshCw, Settings } from 'lucide-react'
 import { AppSidebar, type View } from '@/components/AppSidebar.tsx'
 import { BaseBranchPicker } from '@/components/BaseBranchPicker.tsx'
 import { ChatPanel } from '@/components/ChatPanel.tsx'
-import { Column } from '@/components/Column.tsx'
+import { Column, TAB_DROP, type PanelSpec } from '@/components/Column.tsx'
 import { DeleteProjectDialog } from '@/components/DeleteProjectDialog.tsx'
+import { ExecutorsPage } from '@/components/ExecutorsPage.tsx'
 import { FileBrowser } from '@/components/FileBrowser.tsx'
 import { NewProjectDialog } from '@/components/NewProjectDialog.tsx'
 import { ProjectSettingsDialog } from '@/components/ProjectSettingsDialog.tsx'
@@ -22,20 +23,24 @@ import { insertPosition } from '@/lib/position.ts'
 import { doneOrder, isUntouchedDraft, projectActivity, taskTitle } from '@/lib/task.ts'
 import { cn, shortVersion } from '@/lib/utils.ts'
 import {
-  COLUMNS, type Agent, type Column as ColumnKey, type LiveLine, type PendingDecision,
-  type Project, type PullRequest, type RunFailure, type RunStats, type SchedulerState,
-  type Skip, type Task,
+  COLUMNS, type Agent, type Column as ColumnKey, type Executor, type LiveLine,
+  type PendingDecision, type Project, type PullRequest, type RunFailure, type RunStats,
+  type SchedulerState, type Skip, type Task,
 } from '@/types.ts'
 
 /** 卡片上的时长要走字，但每秒重渲染整块看板没必要，5 秒一次足够。 */
 const CLOCK_MS = 5_000
 
 /**
- * 顶栏上那对页签：看板，还是这个项目的文件。
+ * 眼下这块地方在看什么。
  *
- * 文件浏览挂在**项目**上而不是全局：它要逛的是某个仓库，概览里没有"某个"。
+ * 前两个是顶栏那对页签：看板，还是这个项目的文件 —— 文件浏览挂在**项目**上
+ * 而不是全局，它要逛的是某个仓库，概览里没有"某个"。
+ *
+ * `executors` 不在那对页签里，它从侧边栏进：执行器是**跨项目**的东西
+ * （同一位大壮给所有仓库干活），摆进项目页签里会让人以为它归某个仓库。
  */
-type Page = 'tasks' | 'files'
+type Page = 'tasks' | 'files' | 'executors'
 
 /** 页签的顺序与文案。任务在前 —— 那是这个工具的本业。 */
 const PAGES: readonly { key: Page; label: MessageKey }[] = [
@@ -44,17 +49,38 @@ const PAGES: readonly { key: Page; label: MessageKey }[] = [
 ]
 
 /**
- * 看板的版面：从左到右几条竖列，每条里从上往下摆哪几列，上下平分高度。
+ * 看板的版面：从左到右几块面板，每块装哪几列。
  *
- * 只有 Ready 和 Running 叠在一起 —— 排队与正在跑本来就是同一条队的前后脚，
- * 上下摞着看，"排了几张、跑着几张"是一眼的事。别的列各占一条。
+ * 领域层的五列一列都没少，但**五列不等于五块板** —— 有两组本来就是一件事
+ * 的两半，分成两块只会逼人来回对照：
+ *
+ * - **Loop**：ready 与 running 是同一条队的前后脚。合成一张表，排着的在上、
+ *   在跑的在下，卡面上各自标出自己停在哪一步（见 TaskCard 的 `stage`），
+ *   "排了几张、跑着几张"是一眼的事。
+ * - **Backlog / Done**：一进一出，都是不在流水线上的卡 —— 一个还没开工，
+ *   一个已经收工。做成一块板的两页，一次只看一头，省下的宽度留给中间那两块
+ *   真正要盯的。
  */
-const LANES: readonly (readonly ColumnKey[])[] = [
-  ['backlog'],
-  ['ready', 'running'],
-  ['review'],
-  ['done'],
+const PANELS: readonly PanelSpec[] = [
+  { key: 'pool', columns: ['backlog', 'done'], layout: 'tabs' },
+  { key: 'loop', columns: ['ready', 'running'], layout: 'merge', label: 'Loop', hint: 'column.loop.hint', icon: RefreshCw },
+  { key: 'review', columns: ['review'], layout: 'single' },
 ]
+
+/**
+ * 落点判定：先看指针正落在谁身上，指针悬空时才退回按重叠面积算。
+ *
+ * dnd-kit 默认按面积挑落点，而列头上那两个页签是套在整块面板里的小落点 ——
+ * 按面积算永远是面板赢，页签一辈子轮不到，把 Review 的卡拖进 Done 就没了
+ * 入口（见 Column 的 BoardTab）。按指针算时小的那个近，页签才碰得到。
+ *
+ * 对卡片之间的落点判定没有影响：一张卡也是"小的那个"，指针落在它身上时
+ * 它一样排在面板前面。
+ */
+const collisionDetection: CollisionDetection = (args) => {
+  const under = pointerWithin(args)
+  return under.length > 0 ? under : rectIntersection(args)
+}
 
 /** 推一条桌面通知。没授权就安静地跳过 —— 不该为此打断用户。 */
 function notify(title: string, body: string): void {
@@ -78,6 +104,9 @@ export default function App(): React.JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [deleting, setDeleting] = useState<Project | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
+  // 执行器跟着看板轮询一起来：卡面、@ 补全、配置里那一栏都要按 id 说出名字。
+  const [executors, setExecutors] = useState<Executor[]>([])
+  const [defaultExecutorId, setDefaultExecutorId] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // 运行中卡片的最后一条事件，跟着看板轮询一起来 —— 详情弹窗关着也看得见。
   const [live, setLive] = useState<Record<string, LiveLine>>({})
@@ -128,7 +157,11 @@ export default function App(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     const [
-      { tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls, failures: broken, rounds: laps, pending: waiting },
+      {
+        tasks: loaded, projects: known, live: lines, attachments: clips, prs: pulls,
+        failures: broken, rounds: laps, pending: waiting,
+        executors: crew, defaultExecutorId: boss,
+      },
       state, summary,
     ] = await Promise.all([
       api.state(),
@@ -143,6 +176,8 @@ export default function App(): React.JSX.Element {
     setFailures(broken)
     setRounds(laps)
     setPending(waiting)
+    setExecutors(crew)
+    setDefaultExecutorId(boss)
     if (state !== null) setScheduler(state)
     if (summary !== null) setStats(summary)
   }, [])
@@ -228,21 +263,6 @@ export default function App(): React.JSX.Element {
   }, [dialogOpen])
 
   const archivedCount = useMemo(() => tasks.filter((t) => t.archivedAt !== undefined).length, [tasks])
-
-  /**
-   * 摆在看板上的列。
-   *
-   * 聊天占掉右边两列的宽度，剩下的地方摆不下五列 —— 收起 Done：它装的是
-   * 已经结束的事，是五列里最不需要一直看着的那个（要翻旧账，把聊天收回去
-   * 它就回来）。**卡本身一张不动**，只是这会儿不摆在版面上。
-   */
-  const lanes = useMemo<readonly (readonly ColumnKey[])[]>(
-    () => LANES
-      .map((lane) => lane.filter((column) => !(chatOpen && column === 'done')))
-      // 滤空了的竖列不留 —— 一条空竖条会在版面上占着宽度，什么都不显示。
-      .filter((lane) => lane.length > 0),
-    [chatOpen],
-  )
 
   const byColumn = useMemo(() => {
     const grouped = Object.fromEntries(COLUMNS.map((c) => [c, [] as Task[]])) as Record<ColumnKey, Task[]>
@@ -399,12 +419,20 @@ export default function App(): React.JSX.Element {
     // 归档的卡是冻结的。让它乐观地飞过去再被服务端弹回来只会让人以为是 bug。
     if (task.archivedAt !== undefined) return
 
-    // 落点可能是一张卡（列内插到它前面）或一整列（放到列尾）。
+    // 落点可能是一张卡（列内插到它前面）、一块面板（放到那一列的列尾），
+    // 或者面板列头上的一个页签（那一页的列尾 —— 见 Column 的 BoardTab）。
     const overTask = tasks.find((t) => t.id === overId)
-    const targetColumn = overTask?.column ?? (overId as ColumnKey)
+    const targetColumn = overTask === undefined
+      ? ((overId.startsWith(TAB_DROP) ? overId.slice(TAB_DROP.length) : overId) as ColumnKey)
+      // 落在一张正在跑的卡上：running 只有调度器进得去，所以归到它上面那一段
+      // （Loop 里排队的 ready）的队尾 —— 那一段就摆在运行段上面，"拖到最下面"
+      // 本来就是"排到队尾"的意思。
+      : overTask.column === 'running' ? 'ready' : overTask.column
     if (!COLUMNS.includes(targetColumn)) return
 
-    const position = insertPosition(tasks, task, targetColumn, overTask ?? null)
+    // 锚点只在落点确实是同一列的那张卡时才算数；被改写过列的（running）按列尾处理。
+    const anchor = overTask !== undefined && overTask.column === targetColumn ? overTask : null
+    const position = insertPosition(tasks, task, targetColumn, anchor)
     if (targetColumn === task.column && position === task.position) return
 
     // 乐观更新，失败时用服务端的真相覆盖回来。
@@ -456,6 +484,9 @@ export default function App(): React.JSX.Element {
         archivedCount={archivedCount}
         showArchived={showArchived}
         onToggleArchived={() => { setShowArchived((on) => !on) }}
+        executorCount={executors.length}
+        onExecutors={() => { setPage((now) => (now === 'executors' ? 'tasks' : 'executors')) }}
+        executorsOpen={page === 'executors'}
         scheduler={scheduler}
         schedulerBusy={schedulerBusy}
         running={runningCount}
@@ -567,6 +598,15 @@ export default function App(): React.JSX.Element {
           </div>
         )}
 
+        {/* ── 执行器 ─────────────────────────────────────────── */}
+        {page !== 'executors' ? null : (
+          <ExecutorsPage
+            tasks={tasks}
+            // 增删改、换默认都会影响看板上那些卡显示的名字，重新拉一遍。
+            onChanged={() => { void refresh() }}
+          />
+        )}
+
         {/* ── 文件浏览 ───────────────────────────────────────── */}
         {page !== 'files' ? null : activeProject === null ? (
           <p className="flex flex-1 items-center justify-center px-6 text-center text-ink-faint">
@@ -579,57 +619,54 @@ export default function App(): React.JSX.Element {
         )}
 
         {/* ── 看板 ───────────────────────────────────────────── */}
-        {page === 'files' ? null : (
+        {page !== 'tasks' ? null : (
         <DndContext
           sensors={sensors}
+          collisionDetection={collisionDetection}
           onDragStart={(e: DragStartEvent) => { setDraggingId(String(e.active.id)) }}
           onDragCancel={() => { setDraggingId(null) }}
           onDragEnd={(e) => { void handleDragEnd(e) }}
         >
           {/* 看板与聊天并排，3 : 2 —— 右边空出来的正好是两列的宽度。
-              看板这边是几条竖列（见 LANES），装不下就在自己这块里横向滚动：
+              看板这边是几块面板（见 PANELS），装不下就在自己这块里横向滚动：
               把列硬挤扁，卡片会先失去可读性。 */}
           <div className="flex min-h-0 flex-1 gap-3 p-3">
           <div className={cn(
             'flex min-w-0 gap-3 overflow-x-auto',
             chatOpen ? 'flex-[3]' : 'flex-1',
           )}>
-            {lanes.map((lane, laneIndex) => (
-              // 一条竖列里的两块上下平分：各自 flex-1，谁的卡多都不多占 ——
-              // 让长的那块自己撑开，另一块会被压到只剩列头。
-              <div key={lane.join('+')} className={cn(
-                'flex flex-1 flex-col gap-3',
+            {PANELS.map((panel, index) => (
+              <div key={panel.key} className={cn(
+                'flex flex-1 flex-col',
                 // 竖列的最小宽度得写死：不写的话它按里面卡片的最小内容宽算，
                 // 一条长 id 或长链接就能把某一条撑宽、把整块看板顶到横向滚动。
                 // 聊天开着时窄一档 —— 再窄下去，卡片标题就只剩两三个字。
                 chatOpen ? 'min-w-[180px]' : 'min-w-[220px]',
               )}>
-                {lane.map((column, row) => (
-                  <Column
-                    key={column}
-                    column={column}
-                    // 入场按"先左后右、同一条竖列里先上后下"依次落位。
-                    index={laneIndex + row}
-                    tasks={byColumn[column]}
-                    now={now}
-                    selectedId={selectedId}
-                    live={live}
-                    attachments={attachments}
-                    prs={prs}
-                    failures={failures}
-                    rounds={rounds}
-                    pending={pending}
-                    skips={skipsByTask}
-                    // 点一张卡就是把它交给右边那块面板 —— 面板收着的话先叫出来，
-                    // 否则点下去只有一圈选中框，人不知道内容去了哪儿。
-                    onSelect={(task) => { setSelectedId(task.id); setChatOpen(true) }}
-                    // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
-                    projectName={view.kind === 'overview'
-                      ? (id: string) => projectById.get(id)?.name
-                      : undefined}
-                    onCreate={column === 'backlog' && activeProject !== null ? createTask : undefined}
-                  />
-                ))}
+                <Column
+                  panel={panel}
+                  // 入场从左往右依次落位。
+                  index={index}
+                  byColumn={byColumn}
+                  now={now}
+                  selectedId={selectedId}
+                  live={live}
+                  attachments={attachments}
+                  prs={prs}
+                  failures={failures}
+                  rounds={rounds}
+                  pending={pending}
+                  skips={skipsByTask}
+                  executors={executors}
+                  // 点一张卡就是把它交给右边那块面板 —— 面板收着的话先叫出来，
+                  // 否则点下去只有一圈选中框，人不知道内容去了哪儿。
+                  onSelect={(task) => { setSelectedId(task.id); setChatOpen(true) }}
+                  // 概览里同一列会来自不同仓库，卡上得写清楚它是谁的。
+                  projectName={view.kind === 'overview'
+                    ? (id: string) => projectById.get(id)?.name
+                    : undefined}
+                  onCreate={activeProject === null ? undefined : createTask}
+                />
               </div>
             ))}
           </div>
@@ -647,7 +684,9 @@ export default function App(): React.JSX.Element {
                 ? []
                 : tasks.filter((t) => t.projectId === selected.projectId && t.id !== selected.id)}
               agents={agents}
-              index={lanes.length + 1}
+              executors={executors}
+              defaultExecutorId={defaultExecutorId}
+              index={PANELS.length + 1}
               // 上限拦住超宽屏：再宽下去，面板就成了空白多过内容的一大片。
               className="flex-[2] min-w-[300px] max-w-[560px]"
               onChanged={() => {
@@ -697,6 +736,8 @@ export default function App(): React.JSX.Element {
             // 里干活，指向别的仓库里的卡，Agent 既读不到也用不上。
             siblings={tasks.filter((t) => t.projectId === detailed.projectId && t.id !== detailed.id)}
             agents={agents}
+            executors={executors}
+            defaultExecutorId={defaultExecutorId}
             initialPreview={details?.file}
             onChanged={() => {
               draftId.current = null
@@ -746,7 +787,7 @@ export default function App(): React.JSX.Element {
 
         {/* 统计条只在看板下面。文件页的底边归命令行 —— 两条都贴着，
             界面下沿会变成一层叠一层的东西。 */}
-        {stats === null || page === 'files' ? null : <StatsBar stats={stats} />}
+        {stats === null || page !== 'tasks' ? null : <StatsBar stats={stats} />}
       </SidebarInset>
     </SidebarProvider>
   )

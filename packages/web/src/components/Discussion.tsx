@@ -1,48 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, Paperclip, Send, Upload, User } from 'lucide-react'
-import { api, ApiError, type NextRound } from '@/api.ts'
+import { AtSign, Bot, Paperclip, Send, Upload, User } from 'lucide-react'
+import { api, ApiError } from '@/api.ts'
 import { AttachmentChip } from '@/components/Attachments.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { explain, useT } from '@/lib/i18n.tsx'
 import { renderMarkdown } from '@/lib/markdown.tsx'
-import { modelOptions } from '@/lib/task.ts'
+import { mentioned } from '@/lib/mention.ts'
 import { cn } from '@/lib/utils.ts'
-import type { Agent, Attachment, Task, TaskComment } from '@/types.ts'
+import type { Attachment, Executor, Task, TaskComment } from '@/types.ts'
 
 /** 与服务端 `MAX_ATTACHMENTS_PER_COMMENT` 对齐。超了服务端也会拒，这里只是先说一声。 */
 const MAX_PER_COMMENT = 10
-
-/**
- * 讨论区那两个小下拉。
- *
- * 只可选、不可填 —— 能选的都是探测出来的，手打一个 CLI 不认的名字
- * 只会在派活那一刻才炸。
- */
-function Picker({ value, label, disabled, onChange, children }: {
-  value: string
-  label: string
-  disabled: boolean
-  onChange: (value: string) => void
-  children: React.ReactNode
-}): React.JSX.Element {
-  return (
-    <select
-      value={value}
-      aria-label={label}
-      disabled={disabled}
-      onChange={(event) => { onChange(event.target.value) }}
-      className={cn(
-        'mono border-input h-7 max-w-[180px] rounded-md border bg-transparent px-1.5 text-[11px] shadow-xs',
-        'transition-[color,box-shadow] outline-none dark:bg-input/30',
-        'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
-        'disabled:cursor-not-allowed disabled:opacity-50',
-      )}
-    >
-      {children}
-    </select>
-  )
-}
 
 /**
  * 讨论线程：Agent 的回复与人的留言按时间排开，底下是输入框。
@@ -50,9 +19,10 @@ function Picker({ value, label, disabled, onChange, children }: {
  * 这条线程不只是给人看的记录 —— 下一次执行会把它整段交给 Agent，所以
  * 「说了什么」和「什么时候说的」都要能对上号。
  *
- * 输入框上还带着「下一轮交给谁、用哪个模型」：说"再改一版"和"这次换个人干"
- * 本来就是同一句话，不该逼人先去规格里存一遍再回来发言。改动跟着这条留言
- * 一起发出去 —— 光换个下拉不发言，等于什么都没说。
+ * 「下一轮交给谁」就写在话里：`@大壮` 是换人，`#t-1a2b3c4d` 是"参考那张卡"。
+ * 从前那儿摆着两个下拉（执行器 + 模型），毛病是它和那句话是**两件事** ——
+ * 换了下拉却忘了发言，等于什么都没说；而人本来想说的就是一句"这版让大壮来看看"。
+ * 现在这两件事是同一句话，服务端从话本身读出来（见 host 的留言接口）。
  *
  * 也能带附件。贴一张截图问"这儿为什么长这样"，比用文字描述一个界面快得多，
  * 而这种材料十有八九是在往来当中才出现的 —— 逼人回规格表单去传，等于让它
@@ -60,10 +30,11 @@ function Picker({ value, label, disabled, onChange, children }: {
  * 意外），发送时才认领给这条留言。
  */
 export function Discussion({
-  task, agents, comments, busy, requeues, after, before, scrollKey, mute, onOpenFile, onSend,
+  task, executors, comments, busy, requeues, after, before, scrollKey, mute, onOpenFile, onSend,
 }: {
   task: Task
-  agents: Agent[]
+  /** 全部执行器：`@` 认得出谁、底下那行才说得出"这一轮交给谁"。 */
+  executors: Executor[]
   comments: TaskComment[]
   busy: boolean
   requeues: boolean
@@ -90,35 +61,30 @@ export function Discussion({
   /** 点开回复里的一条文档链接。 */
   onOpenFile: (path: string) => void
   /** 发出去；成功回 null，失败回一句能显示给人看的话（草稿会原样留着）。 */
-  onSend: (body: string, next: NextRound, attachmentIds: string[]) => Promise<string | null>
+  onSend: (body: string, attachmentIds: string[]) => Promise<string | null>
 }): React.JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState('')
   const [failure, setFailure] = useState<string | null>(null)
-  const [provider, setProvider] = useState(task.preferredProvider)
-  const [model, setModel] = useState(task.model)
   /** 已经传上去、还没跟着留言发出去的文件。 */
   const [files, setFiles] = useState<Attachment[]>([])
   /** 正在上传的文件名。一个一个传，进度就是"轮到谁了"。 */
   const [uploading, setUploading] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const pickRef = useRef<HTMLInputElement>(null)
+  const boxRef = useRef<HTMLTextAreaElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  // 同规格表单的两种冻结：执行中的卡改了也存不进去，归档的卡内容是冻的。
-  // **这只管"下一轮交给谁"那两个下拉**：留言和它带的文件不受这条约束，
-  // 它们本来就是留给下一轮的。
-  const locked = task.column === 'running' || task.archivedAt !== undefined
   /** 这会儿还能不能再挂一个文件。 */
   const attaching = busy || mute !== undefined || uploading !== null || files.length >= MAX_PER_COMMENT
-  const lockReason = task.column === 'running' ? t('editor.lockedRunning') : t('editor.lockedArchived')
-  /** 选定的执行器；没选（"任意"）或本机没探测到，就没有模型这一说。 */
-  const picked = agents.find((agent) => agent.id === provider)
-  const models = picked === undefined ? [] : modelOptions(picked, model)
-  // 卡上指定的执行器本机没探测到时也要能选回来 —— 下拉里少了它，
-  // 一打开就等于把这张卡的选择改成了别人。
-  const providers = provider !== undefined && picked === undefined
-    ? [provider, ...agents.map((agent) => agent.id)]
-    : agents.map((agent) => agent.id)
+  /** 这张卡眼下归谁 —— 卡上写了就是他，没写就是默认那位（列表里的第一个）。 */
+  const owner = executors.find((executor) => executor.id === task.executorId)
+  /**
+   * 这一句发出去之后归谁干。
+   *
+   * 跟着字一起变：手打 `@小壮` 的那一刻底下就该改口，而不是等发出去了
+   * 才从卡上看出来换了人。没点名就还是原来那位 —— "接着上次那个人干"。
+   */
+  const next = mentioned(draft, executors) ?? owner
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: 'end' }) }, [comments.length, scrollKey])
 
@@ -131,12 +97,6 @@ export function Discussion({
       .catch(() => { if (!cancelled) setFiles([]) })
     return () => { cancelled = true }
   }, [task.id])
-
-  // 卡被外部改动（跑完一轮、别处改了规格）后跟上，别拿着旧值去覆盖新状态。
-  useEffect(() => {
-    setProvider(task.preferredProvider)
-    setModel(task.model)
-  }, [task.id, task.revision])
 
   const upload = (picked: FileList | null): void => {
     if (picked === null || picked.length === 0) return
@@ -184,15 +144,28 @@ export function Discussion({
    */
   const sendable = !busy && mute === undefined && uploading === null && draft.trim().length > 0
 
+  /** 把 `@名字 ` 插到光标处。点一下比打字快，也顺带教会了这个写法。 */
+  const insertMention = (name: string): void => {
+    const box = boxRef.current
+    const at = box?.selectionStart ?? draft.length
+    const before = draft.slice(0, at)
+    const after = draft.slice(at)
+    // 前后各补一个空格，但不重复补 —— 连着两个空格是打字时最烦人的小事。
+    const lead = before.length === 0 || before.endsWith(' ') || before.endsWith('\n') ? '' : ' '
+    setDraft(`${before}${lead}@${name} ${after}`)
+    // 插完把光标放到名字后面，人接着往下写。
+    const cursor = before.length + lead.length + name.length + 2
+    requestAnimationFrame(() => {
+      box?.focus()
+      box?.setSelectionRange(cursor, cursor)
+    })
+  }
+
   const send = (): void => {
     if (!sendable) return
     const body = draft.trim()
     setFailure(null)
-    // 只送真正变了的字段：没动过就别提它，免得白白顶掉一个 revision。
-    void onSend(body, {
-      ...(provider === task.preferredProvider ? {} : { preferredProvider: provider }),
-      ...(model === task.model ? {} : { model }),
-    }, files.map((file) => file.id)).then((error) => {
+    void onSend(body, files.map((file) => file.id)).then((error) => {
       // 发不出去就把话留在框里。这一段是人一个字一个字敲的，
       // 而"卡刚被人认领了"这种拒绝重试一次就过去了 —— 不该让他重打一遍。
       // 附件同理：它们还是草稿，重试时照样跟着走。
@@ -285,6 +258,7 @@ export function Discussion({
           }}
         >
           <Textarea
+            ref={boxRef}
             value={draft}
             disabled={busy || mute !== undefined}
             placeholder={mute ?? (requeues ? t('talk.placeholderRequeue') : t('talk.placeholder'))}
@@ -337,45 +311,41 @@ export function Discussion({
           >
             <Paperclip className="size-3.5" />{t('talk.attach')}
           </button>
-          {/* 一台 Agent 都没探测到、卡上也没指定过谁：这儿没有可选的，不摆空下拉。 */}
-          {providers.length === 0 ? null : (
-            <span className="flex items-center gap-1.5" {...(locked ? { title: lockReason } : {})}>
-              <span className="flex-none text-xs text-ink-faint">{t('talk.nextRound')}</span>
-              <Picker
-                value={provider ?? ''}
-                disabled={busy || locked}
-                label={t('editor.provider')}
-                onChange={(next) => {
-                  // 换人就把模型清掉：模型名是各家 CLI 自己的说法，
-                  // 留着一个别人不认识的名字只会在派活时炸。（同规格表单）
-                  setProvider(next.length === 0 ? undefined : next)
-                  setModel(undefined)
-                }}
-              >
-                <option value="">{t('editor.providerAny')}</option>
-                {providers.map((id) => <option key={id} value={id}>{id}</option>)}
-              </Picker>
-              {/* 能不能指定模型是**探测**出来的：不认 --model 的 CLI 这儿就没有这一栏。 */}
-              {picked === undefined || !picked.canPickModel || models.length === 0 ? null : (
-                <Picker
-                  value={model ?? ''}
-                  disabled={busy || locked}
-                  label={t('editor.model')}
-                  onChange={(next) => { setModel(next.length === 0 ? undefined : next) }}
+          {/* 一个执行器都没建：不摆这排按钮，那儿没有谁可点。 */}
+          {executors.length === 0 ? null : (
+            <span className="flex min-w-0 flex-wrap items-center gap-1">
+              <AtSign className="size-3 flex-none text-ink-faint" />
+              {executors.map((executor) => (
+                <button
+                  key={executor.id}
+                  type="button"
+                  disabled={busy || mute !== undefined}
+                  title={t('talk.mentionHint', { name: executor.name })}
+                  onClick={() => { insertMention(executor.name) }}
+                  className={cn(
+                    'rounded-md border px-1.5 py-0.5 text-[11px] transition-colors',
+                    'disabled:cursor-not-allowed disabled:opacity-50',
+                    next?.id === executor.id
+                      ? 'border-sodium-deep/50 bg-sodium/[0.10] text-ink'
+                      : 'border-hairline text-ink-faint hover:border-hairline-bright hover:text-ink',
+                  )}
                 >
-                  <option value="">{t('editor.modelDefault')}</option>
-                  {models.map((id) => <option key={id} value={id}>{id}</option>)}
-                </Picker>
-              )}
+                  {executor.name}
+                </button>
+              ))}
             </span>
           )}
           <span className="flex-1" />
           {failure === null ? (
             <p
               className="min-w-0 truncate text-xs text-ink-faint"
-              title={mute ?? (requeues ? t('talk.noteRequeue') : t('talk.note'))}
+              title={mute ?? (next === undefined
+                ? (requeues ? t('talk.noteRequeue') : t('talk.note'))
+                : t('talk.nextRoundBy', { name: next.name }))}
             >
-              {mute ?? (requeues ? t('talk.noteRequeue') : t('talk.note'))}
+              {mute ?? (next === undefined
+                ? (requeues ? t('talk.noteRequeue') : t('talk.note'))
+                : t('talk.nextRoundBy', { name: next.name }))}
             </p>
           ) : (
             <p className="min-w-0 max-w-full truncate text-xs text-lamp-fail" title={failure}>{failure}</p>

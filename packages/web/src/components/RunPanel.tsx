@@ -19,7 +19,7 @@ import { explain, useT } from '@/lib/i18n.tsx'
 import { taskTitle } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
 import type {
-  Agent, DiffView as Diff, PrCapability, Project, PullRequest, Run, RunDecision,
+  Agent, DiffView as Diff, Executor, PrCapability, Project, PullRequest, Run, RunDecision,
   StreamEvent, Task, TaskComment, TaskEdit,
 } from '@/types.ts'
 
@@ -48,6 +48,10 @@ interface Props {
   /** 同项目的其它卡片，规格里挑关联用。 */
   siblings: Task[]
   agents: Agent[]
+  /** 全部执行器：讨论里 @ 认得出谁，配置里那一栏也从它渲染。 */
+  executors: Executor[]
+  /** 谁是默认执行器。 */
+  defaultExecutorId: string | null
   /**
    * 打开时先摆出这份文档（右边那一栏）。
    *
@@ -60,7 +64,7 @@ interface Props {
 }
 
 export function RunPanel({
-  task, project, siblings, agents, initialPreview, onChanged, onClose,
+  task, project, siblings, agents, executors, defaultExecutorId, initialPreview, onChanged, onClose,
 }: Props): React.JSX.Element {
   const t = useT()
   const [runs, setRuns] = useState<Run[]>([])
@@ -824,6 +828,8 @@ export function RunPanel({
                 task={task}
                 siblings={siblings}
                 agents={agents}
+                executors={executors}
+                defaultExecutorId={defaultExecutorId}
                 busy={busy}
                 onError={reportCode}
                 // 附件是即时生效的：传完 / 删完要让看板知道，卡片上那枚回形针
@@ -840,16 +846,16 @@ export function RunPanel({
               <TabsContent value="talk" className="mt-0 flex min-h-0 flex-1 flex-col">
                 <Discussion
                   task={task}
-                  agents={agents}
+                  executors={executors}
                   comments={comments}
                   busy={busy}
                   onOpenFile={setPreview}
                   /** Review 与 Done 里留言都会把卡送回队列，按钮上得先说清楚。 */
                   requeues={canTalk}
-                  onSend={async (body, edit, attachmentIds) => {
+                  onSend={async (body, attachmentIds) => {
                     setBusy(true)
                     try {
-                      const { comments: next } = await api.comment(task.id, body, edit, attachmentIds)
+                      const { comments: next } = await api.comment(task.id, body, attachmentIds)
                       setComments(next)
                       onChanged()
                       // 说完就收工，回到看板 —— 话已经带给下一轮了，留在这儿没事可做。

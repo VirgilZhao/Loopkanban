@@ -28,6 +28,7 @@ import { humanSize, stageAttachments, type StagedAttachment } from '../attachmen
 import type { AgentEvent, GateConfig, RunContext } from '../agents/types.ts'
 import type { AgentPool, DetectedAgent } from '../agents/index.ts'
 import type { DecisionHub } from '../decisions/index.ts'
+import { assignmentFor } from '../executors/index.ts'
 import { writeGateConfig } from '../mcp/gate.ts'
 import type { RunBus } from '../server/bus.ts'
 import type { Run, Storage, TaskComment } from '../storage/index.ts'
@@ -130,7 +131,11 @@ export class Runner {
     const task = storage.getTask(taskId)
     if (task === null) return { ok: false, reason: 'task-not-found', detail: String(taskId) }
 
-    const wanted = providerId ?? task.preferredProvider
+    // 交给谁干：调度器点名的优先（它已经按并发上限算过），否则问执行器 ——
+    // 卡上写了执行器就是它，没写就是默认执行器，两条都不成立才回到从前
+    // 「卡上的 preferredProvider / 第一个可用的」。一次解完，两个答案同源。
+    const { executor, binding } = assignmentFor(storage, task)
+    const wanted = providerId ?? binding.provider
     const agent = wanted === undefined
       ? agents[0]
       : agents.find((a) => a.provider.id === wanted)
@@ -155,14 +160,28 @@ export class Runner {
       completed: new Set(storage.listTasks(task.projectId).filter((t) => t.column === 'done').map((t) => t.id)),
     })
     if (!claimed.ok) return { ok: false, reason: claimed.reason, detail: claimed.detail }
-    if (!storage.commitTask(claimed.value)) {
+    /*
+     * 第一次派活时把执行器写到卡上。
+     *
+     * "后面几轮接着上次那个人干"是这里的默认 —— 讨论里不点名就不换人。
+     * 不写下来的话，默认执行器一改，一张跑到一半的卡下一轮就会换成另一个
+     * 模型接手，而那张卡的会话、worktree、讨论都是上一个人的。
+     *
+     * 跟着认领那一次 CAS 一起提交：多写一次等于多一次 revision 冲突的机会。
+     */
+    // `executor` 为 null 的那两种（一个执行器都没有、卡上钉过 CLI）本来就
+    // 不该认领，assignmentFor 已经替这儿判过了。
+    const claimedTask = executor === null || claimed.value.executorId !== undefined
+      ? claimed.value
+      : { ...claimed.value, executorId: executor.id }
+    if (!storage.commitTask(claimedTask)) {
       return { ok: false, reason: 'revision-conflict', detail: '这张卡刚被他人改动，请重读后重试' }
     }
 
     // ── 到这里这张卡确定归我们了，可以建 worktree、起进程。 ────
     try {
-      const prior = await this.resumableRun(claimed.value, agent)
-      return { ok: true, run: await this.launch(claimed.value, runId, agent, prior) }
+      const prior = await this.resumableRun(claimedTask, agent)
+      return { ok: true, run: await this.launch(claimedTask, runId, agent, prior, binding.model) }
     } catch (error) {
       const detail = describeError(error)
       /*
@@ -221,7 +240,9 @@ export class Runner {
   }
 
   /** 真正建（或复用）worktree、写 TASK.md、起进程并接管输出。 */
-  private async launch(task: Task, runId: RunId, agent: DetectedAgent, prior?: Run): Promise<Run> {
+  private async launch(
+    task: Task, runId: RunId, agent: DetectedAgent, prior?: Run, model?: string,
+  ): Promise<Run> {
     const { storage, artifactsRoot } = this.options
     const { provider, caps } = agent
 
@@ -265,6 +286,7 @@ export class Runner {
     const requested = task.permission ?? 'standard'
     const permission = caps.permissionTiers.includes(requested) ? requested : 'standard'
 
+    const picked = model ?? task.model
     const context: RunContext = {
       runId,
       worktreePath: worktree.path,
@@ -273,7 +295,8 @@ export class Runner {
       permission,
       ...(gate === undefined ? {} : { gate }),
       // 指定了模型就带上；留空由 CLI 自己做主 —— 我们不替它选。
-      ...(task.model === undefined ? {} : { model: task.model }),
+      // 模型来自执行器（解析在 start 里做完），退回卡上的老字段。
+      ...(picked === undefined ? {} : { model: picked }),
       // 能不能钉住会话 id 是探测出来的事实，不按 CLI 的名字分支：
       // 有的支持我们预先指定，有的只能事后从它自己的输出里捞。
       ...(caps.canPinSessionId ? { sessionId: randomUUID() } : {}),

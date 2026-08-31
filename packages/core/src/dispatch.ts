@@ -31,6 +31,15 @@ export interface DispatchInput {
   readonly tasks: readonly Task[]
   /** 本机探测到、当前可用的 provider id。 */
   readonly availableProviders: readonly string[]
+  /**
+   * 卡片 → 它归哪个 CLI 跑，由宿主把执行器解开之后给出（见 host 的
+   * `providerPins`）。**盖过卡上的 `preferredProvider`。**
+   *
+   * 做成一张现成的表而不是让这一层去查执行器：执行器存在库里，而这个函数
+   * 的全部价值就在于它不读库 —— 一旦它开始查，"并发上限、依赖阻塞、租约
+   * 回收"这些分支就没法再用普通单测覆盖了。
+   */
+  readonly pinned?: ReadonlyMap<TaskId, string>
   readonly limits: DispatchLimits
   readonly now: number
 }
@@ -81,9 +90,11 @@ function pickProvider(
   task: Task,
   available: readonly string[],
   running: ReadonlyMap<string, number>,
+  pinned?: ReadonlyMap<TaskId, string>,
 ): string | null {
-  if (task.preferredProvider !== undefined) {
-    return available.includes(task.preferredProvider) ? task.preferredProvider : null
+  const wanted = pinned?.get(task.id) ?? task.preferredProvider
+  if (wanted !== undefined) {
+    return available.includes(wanted) ? wanted : null
   }
   let best: string | null = null
   let least = Number.POSITIVE_INFINITY
@@ -100,7 +111,7 @@ function pickProvider(
  * @returns 该派发的、该跳过的、以及该回收的。
  */
 export function planDispatch(input: DispatchInput): DispatchPlan {
-  const { tasks, availableProviders, limits, now } = input
+  const { tasks, availableProviders, pinned, limits, now } = input
 
   // 归档的 done 卡照样算"依赖已完成"：把做完的东西收进架子，不该让它的
   // 下游重新被卡住。
@@ -148,15 +159,18 @@ export function planDispatch(input: DispatchInput): DispatchPlan {
       continue
     }
 
-    const provider = pickProvider(task, availableProviders, runningPerProvider)
+    const provider = pickProvider(task, availableProviders, runningPerProvider, pinned)
     if (provider === null) {
+      // 说不出来的时候要说清楚是**谁**没探测到：卡上指定的那个，还是它所属
+      // 执行器背后的那个 CLI —— 两者在界面上是同一句话的两种原因。
+      const wanted = pinned?.get(task.id) ?? task.preferredProvider
       skipped.push({
         taskId: task.id,
         reason: 'provider-unavailable',
-        detail: task.preferredProvider === undefined
+        detail: wanted === undefined
           ? '本机没有探测到任何可用的 Agent CLI'
-          : `指定的 ${task.preferredProvider} 未探测到`,
-        params: task.preferredProvider === undefined ? [] : [task.preferredProvider],
+          : `指定的 ${wanted} 未探测到`,
+        params: wanted === undefined ? [] : [wanted],
       })
       continue
     }

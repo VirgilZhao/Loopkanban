@@ -15,7 +15,9 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { asProjectId, asTaskId, type Task } from '@loopkanban/core'
 import { AttachmentStore } from '../attachments/index.ts'
+import { ChatService } from '../chat/index.ts'
 import { DecisionHub } from '../decisions/index.ts'
+import { seedExecutors } from '../executors/index.ts'
 import { discoverBoard, serveMcp } from '../mcp/index.ts'
 import { createToken } from '../server/auth.ts'
 import { clearEndpoint, writeEndpoint } from '../server/endpoint.ts'
@@ -342,6 +344,20 @@ async function main(): Promise<void> {
   // 附件的字节落在数据目录里，跟数据库同处一个信任级别。
   const attachments = new AttachmentStore(join(dir, 'attachments'))
   const scheduler = new Scheduler({ storage, runner, agents: pool })
+  /*
+   * 执行器：一个起了名字的「哪个 CLI + 哪个模型」。
+   *
+   * 库里一个都没有时照探测结果各建一个兜底 —— 默认执行器是聊天与派活的
+   * 前提，而"先去建一个执行器"对一个刚装好的看板是一道空手的门槛。
+   * 名字就用 CLI 自己的 id，改名随时可以（见 executors/seedExecutors）。
+   */
+  const seeded = seedExecutors(storage, agents)
+  if (seeded.length > 0) {
+    console.log(C.dim(`\n  执行器：新建 ${seeded.map((executor) => executor.name).join(' / ')}`))
+  }
+  // 建卡之前的那段对话。跟 runner 共用 runs/ 作副产物的落脚处 ——
+  // 它起的也是同一批 CLI，产出的也是同一类临时文件。
+  const chat = new ChatService({ storage, agents: pool, artifactsRoot: join(dir, 'runs') })
 
   // 启动对账：上次进程崩溃时留下的 Run 与卡片在这里被收拾干净。
   //
@@ -389,6 +405,7 @@ async function main(): Promise<void> {
     review,
     attachments,
     scheduler,
+    chat,
     testEnvs,
     decisions,
     bus,

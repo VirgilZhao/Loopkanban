@@ -228,6 +228,59 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX idx_decisions_run ON run_decisions(run_id, created_at);
   `,
+  // 执行器：一个**起了名字**的「哪个 CLI + 哪个模型」。
+  //
+  // 在这之前"交给谁干"是卡上的两个字符串，每张卡各填一遍，填的还是
+  // `claude` / `claude-opus-4-6-20260101` 这种只有机器认得的东西。人脑子里
+  // 想的其实是"这活交给大壮"——一个稳定的、有名字的干活的人。建一次处处引用，
+  // 改了大壮用的模型，往后交给大壮的活都跟着变。
+  //
+  // 名字唯一（不分大小写，靠 NOCASE 归置）：`@大壮` 得有唯一的答案。
+  // 卡上的 preferred_provider / model 不动 —— 旧卡的选择不该因为多了一个
+  // 概念就被改写，executor_id 有值时盖过它们。
+  `
+  CREATE TABLE executors (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL COLLATE NOCASE,
+    provider   TEXT NOT NULL,
+    -- 留空表示用那个 CLI 自己的默认模型。
+    model      TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX idx_executors_name ON executors(name);
+  ALTER TABLE tasks ADD COLUMN executor_id TEXT;
+  `,
+  // 建卡之前的那段对话。
+  //
+  // 过去右侧那块面板在没选卡时是个"写一句话就建一张卡"的输入框 —— 一句话
+  // 直接变成需求，中间没有任何人帮你想清楚。现在它是**真的聊天**：默认执行器
+  // 跟人来回确认要做什么，范围谈拢了它提一份任务草案，人点头才落成卡片。
+  //
+  // 挂在项目上而不是全局：聊的是某个仓库里的事，执行器也要在那个仓库里
+  // 才看得懂"这块面板"指的是什么。role 三种：
+  //
+  //   human     人说的话
+  //   agent     执行器的回复
+  //   proposal  执行器提的任务草案（proposal_json 里是它的结构），
+  //             人采纳之后 task_id 指向建出来的那张卡
+  `
+  CREATE TABLE chat_messages (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT    NOT NULL REFERENCES projects(id),
+    -- 'human' | 'agent' | 'proposal'
+    role          TEXT    NOT NULL,
+    body          TEXT    NOT NULL,
+    -- 这句话由哪个执行器说的 / 是回应谁说的；人说的话记的是当时的默认执行器。
+    executor_id   TEXT,
+    -- role='proposal' 专有：{ description, acceptance, relatedTo }
+    proposal_json TEXT,
+    -- 草案被采纳后建出的那张卡。没采纳（或还没决定）时为空。
+    task_id       TEXT,
+    at            INTEGER NOT NULL
+  );
+  CREATE INDEX idx_chat_project ON chat_messages(project_id, at);
+  `,
 ]
 
 /** 当前代码期望的结构版本。 */

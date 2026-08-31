@@ -75,6 +75,65 @@ export interface FilePreview {
   doc?: RichDoc
 }
 
+/**
+ * 执行器：一个**起了名字**的「哪个 CLI + 哪个模型」。
+ *
+ * 人脑子里想的是"这活交给大壮"，不是"claude 加 opus-5"。建一次处处引用，
+ * 在对话里 `@大壮` 就是把这一轮交给他。
+ */
+export interface Executor {
+  id: string
+  name: string
+  /** 哪个 CLI。只能是本机探测得到的那几个。 */
+  provider: string
+  /** 哪个模型；留空用那个 CLI 自己的默认。 */
+  model?: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 执行器能选的 CLI，以及它支不支持指定模型、有哪些可选。 */
+export interface ExecutorProvider {
+  id: string
+  version: string
+  models: string[]
+  canPickModel: boolean
+}
+
+/** 执行器在对话里提出的任务草案。人点头才会变成一张卡。 */
+export interface TaskProposal {
+  description: string
+  acceptance: string[]
+  /** 谈话里提到的参考卡片（`#t-xxxx`）。 */
+  relatedTo: string[]
+}
+
+/** 建卡之前那段对话里的一条消息。 */
+export interface ChatMessage {
+  id: string
+  projectId: string
+  role: 'human' | 'agent' | 'proposal'
+  body: string
+  /** 这句话归哪个执行器。 */
+  executorId?: string
+  /** `proposal` 专有。 */
+  proposal?: TaskProposal
+  /** 草案被采纳后建出的那张卡。 */
+  taskId?: string
+  at: number
+}
+
+/** 一个项目的对话现状。 */
+export interface ChatState {
+  messages: ChatMessage[]
+  /** 执行器正在想。界面据此摆一个"正在输入"并按住输入框。 */
+  pending: boolean
+  /** 上一轮没跑成的原因。 */
+  failure?: string
+  /** 眼下由谁在聊；一个执行器都没有时缺席。 */
+  executor?: { id: string; name: string }
+}
+
 export interface Task {
   id: string
   projectId: string
@@ -90,6 +149,11 @@ export interface Task {
   preferredProvider?: string
   /** 指定模型；留空用该 CLI 自己的默认。 */
   model?: string
+  /**
+   * 这张卡交给哪个执行器。缺席表示"用默认那位"——第一次派活时会写上，
+   * 之后几轮都归他，除非在对话里 `@` 了别人。**盖过上面那两个老字段。**
+   */
+  executorId?: string
   /** 这张卡的权限档位；缺席等于 standard。 */
   permission?: PermissionTier
   blockedBy: string[]
@@ -167,6 +231,8 @@ export interface Attachment {
 export interface TaskEdit {
   description?: string
   acceptance?: string[]
+  /** 交给谁。`undefined` 是"不再指定"，即回到默认执行器。 */
+  executorId?: string | undefined
   preferredProvider?: string | undefined
   model?: string | undefined
   permission?: PermissionTier | undefined

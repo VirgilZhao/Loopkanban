@@ -7,14 +7,12 @@
  */
 
 import type {
-  Agent, Attachment, BranchListing, DiffView, DirListing, FileContent, FileListing,
-  FilePreview, LiveLine, PendingDecision, PrCapability, Project, PullRequest, Run, RunDecision,
-  RunFailure, RunStats, SchedulerSettings, SchedulerState, ShellEvent, ShellSession, StreamEvent,
-  Task, TaskComment, TaskEdit, TestEnv, TestEnvEvent, Workspace,
+  Agent, Attachment, BranchListing, ChatState, Column, DiffView, DirListing, Executor,
+  ExecutorProvider, FileContent, FileListing, FilePreview, LiveLine, PendingDecision,
+  PrCapability, Project, PullRequest, Run, RunDecision, RunFailure, RunStats, SchedulerSettings,
+  SchedulerState, ShellEvent, ShellSession, StreamEvent, Task, TaskComment, TaskEdit, TestEnv,
+  TestEnvEvent, Workspace,
 } from './types.ts'
-
-/** 留言时能顺带改的东西：下一轮交给谁、用哪个模型。 */
-export type NextRound = Pick<TaskEdit, 'preferredProvider' | 'model'>
 
 export class ApiError extends Error {
   /**
@@ -55,7 +53,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
  * 「清空指定执行器」在服务端看起来和「这次没提到它」一模一样，永远存不下去。
  * null 是"请把它清空"的显式说法。
  */
-function clearable(edit: TaskEdit | NextRound): Record<string, unknown> {
+function clearable(edit: TaskEdit): Record<string, unknown> {
   return Object.fromEntries(Object.entries(edit).map(([key, value]) => [key, value ?? null]))
 }
 
@@ -72,6 +70,10 @@ export const api = {
     failures: Record<string, RunFailure>
     /** 每张卡跑过几轮；一轮都没跑过的卡不在里面。 */
     rounds: Record<string, number>
+    /** 全部执行器；卡面与 @ 补全按 id 说出名字要靠它。 */
+    executors: Executor[]
+    /** 谁是默认执行器；一个都没有时为 null。 */
+    defaultExecutorId: string | null
     /** 等人拍板的决策挂在哪张卡上 —— 卡面徽标的数据源。 */
     pending: Record<string, PendingDecision[]>
   }>('/api/state'),
@@ -201,6 +203,8 @@ export const api = {
     projectId: string
     description?: string
     acceptance?: string[]
+    /** 建卡**不必**指定执行器：不给就是默认那位。 */
+    executorId?: string
     preferredProvider?: string
     model?: string
   }) =>
@@ -332,15 +336,72 @@ export const api = {
    * 没变就别提它，免得白白顶掉一个 revision。**这个口子只认这两个字段**，
    * 所以类型也只开这两个：写成整个 TaskEdit 的话，多送的描述会被静静吃掉。
    */
-  comment: (taskId: string, body: string, next: NextRound = {}, attachmentIds: readonly string[] = []) =>
+  /**
+   * 留一句话。
+   *
+   * 「下一轮交给谁」不再是这里的参数：话里 `@大壮` 就是换人，`#t-xxxx` 就是
+   * 参考那张卡，两者都由服务端从**话本身**读出来（见 host 的留言接口）。
+   */
+  comment: (taskId: string, body: string, attachmentIds: readonly string[] = []) =>
     call<{ comments: TaskComment[]; requeued: boolean }>(
       `/api/tasks/${encodeURIComponent(taskId)}/comments`,
       {
         method: 'POST',
         // 附件是先传好的（见 `upload` 的 `draft`），这里只把它们认领给这句话。
-        body: JSON.stringify({ body, ...clearable(next), ...(attachmentIds.length === 0 ? {} : { attachmentIds }) }),
+        body: JSON.stringify({ body, ...(attachmentIds.length === 0 ? {} : { attachmentIds }) }),
       },
     ),
+
+  // ── 执行器 ─────────────────────────────────────────────────────
+
+  executors: () => call<{
+    executors: Executor[]
+    defaultId: string | null
+    /** 能选哪些 CLI —— 新建表单照着它渲染。 */
+    providers: ExecutorProvider[]
+  }>('/api/executors'),
+
+  createExecutor: (input: { name: string; provider: string; model?: string }) =>
+    call<{ executor: Executor }>('/api/executors', { method: 'POST', body: JSON.stringify(input) }),
+
+  /** 改一个执行器。`model: null` 表示回到那个 CLI 自己的默认。 */
+  updateExecutor: (id: string, patch: { name?: string; provider?: string; model?: string | null }) =>
+    call<{ executor: Executor }>(`/api/executors/${encodeURIComponent(id)}`, {
+      method: 'PATCH', body: JSON.stringify(patch),
+    }),
+
+  deleteExecutor: (id: string) =>
+    call<{ executors: Executor[]; defaultId: string | null }>(`/api/executors/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  setDefaultExecutor: (id: string) =>
+    call<{ defaultId: string }>(`/api/executors/${encodeURIComponent(id)}/default`, { method: 'POST' }),
+
+  // ── 建卡之前的那段对话 ─────────────────────────────────────────
+
+  chat: (projectId: string) =>
+    call<ChatState>(`/api/projects/${encodeURIComponent(projectId)}/chat`),
+
+  /**
+   * 说一句话。
+   *
+   * **立刻返回**，执行器的回复由轮询取 —— 一轮 CLI 要跑几十秒，挂在一个
+   * 请求上，网络一抖这一轮就白跑了。
+   */
+  say: (projectId: string, body: string) =>
+    call<ChatState>(`/api/projects/${encodeURIComponent(projectId)}/chat`, {
+      method: 'POST', body: JSON.stringify({ body }),
+    }),
+
+  clearChat: (projectId: string) =>
+    call<ChatState>(`/api/projects/${encodeURIComponent(projectId)}/chat`, { method: 'DELETE' }),
+
+  /** 采纳一份草案：把它变成一张卡，落在想法池或直接进队列。 */
+  adopt: (messageId: string, column: Extract<Column, 'backlog' | 'ready'>) =>
+    call<{ task: Task; chat: ChatState | null }>(`/api/chat/${encodeURIComponent(messageId)}/adopt`, {
+      method: 'POST', body: JSON.stringify({ column }),
+    }),
 
   /**
    * 一张卡的附件，按上传顺序。

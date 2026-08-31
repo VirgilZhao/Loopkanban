@@ -6,6 +6,7 @@
  * 会有一方明确失败，而不是双方都以为自己成功了。
  */
 
+import type { ExecutorId } from './executor.ts'
 import type { ProjectId, RunId, TaskId } from './ids.ts'
 
 /** 看板的列。顺序即流转顺序。 */
@@ -60,6 +61,18 @@ export interface Task {
    * 只在指定了执行器时有意义：模型名是各家 CLI 自己的说法，不通用。
    */
   readonly model?: string | undefined
+  /**
+   * 这张卡交给哪个执行器（见 {@link Executor}）。
+   *
+   * **它盖过 {@link preferredProvider} 与 {@link model}** —— 那两个字段是
+   * 执行器出现之前的说法，留着是为了不丢旧卡的选择、以及给 MCP 那条口子
+   * 一个直接指定的办法。界面上现在只说执行器。
+   *
+   * 第一次派活时会写上：不指定就用默认执行器，写上之后这张卡的后续几轮
+   * 就都归它 —— "接着上次那个人干"是这里的默认，而不是每轮重新挑一个。
+   * 在对话里 `@别人` 会把它改掉。
+   */
+  readonly executorId?: ExecutorId | undefined
   /**
    * 这张卡的权限档位；`undefined` 等于 `standard`。
    *
@@ -367,6 +380,7 @@ export function moveTask(task: Task, request: MoveRequest): DomainResult<Task> {
 export interface TaskEdit {
   readonly description?: string
   readonly acceptance?: readonly string[]
+  readonly executorId?: ExecutorId | undefined
   readonly preferredProvider?: string | undefined
   readonly model?: string | undefined
   readonly permission?: PermissionTier | undefined
@@ -412,6 +426,7 @@ export function editTask(task: Task, request: EditRequest): DomainResult<Task> {
   return succeed(bump(task, {
     ...(edit.description === undefined ? {} : { description: edit.description }),
     ...(acceptance === undefined ? {} : { acceptance }),
+    ...('executorId' in edit ? { executorId: edit.executorId } : {}),
     ...('preferredProvider' in edit ? { preferredProvider: edit.preferredProvider } : {}),
     ...('model' in edit ? { model: edit.model } : {}),
     // permission 的合法值由调用方把关（要对着 PERMISSION_TIERS 拒绝），这一层

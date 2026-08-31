@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Archive, Bot, Eye, FolderGit2, LayoutGrid, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Archive, Bot, Eye, FolderGit2, LayoutGrid, Plus, RefreshCw, Trash2, Users } from 'lucide-react'
 import { Autopilot } from '@/components/Autopilot.tsx'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger,
@@ -48,6 +48,11 @@ interface Props {
   archivedCount: number
   showArchived: boolean
   onToggleArchived: () => void
+  /** 建了几个执行器。常驻计数 —— 一个都没有时那儿是空的，得看得出来。 */
+  executorCount: number
+  /** 执行器那一页开着没有。 */
+  executorsOpen: boolean
+  onExecutors: () => void
   scheduler: SchedulerState | null
   schedulerBusy: boolean
   running: number
@@ -57,6 +62,7 @@ interface Props {
 export function AppSidebar({
   agents, agentsBusy, onRefreshAgents, runningByAgent, projects, activity, total, view, onView, onNewProject, onDeleteProject, onRenameProject,
   onCreate, canCreate, archivedCount, showArchived, onToggleArchived,
+  executorCount, executorsOpen, onExecutors,
   scheduler, schedulerBusy, running, onScheduler,
 }: Props): React.JSX.Element {
   const t = useT()
@@ -227,7 +233,8 @@ export function AppSidebar({
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {/* 归档开关沉到底部。计数常驻 —— 不然被收走的卡就真的无迹可寻了。 */}
+        {/* 归档开关沉到底部。计数常驻 —— 不然被收走的卡就真的无迹可寻了。
+            执行器挨着它：两个都是"不在看板上、但随时要点开看一眼"的东西。 */}
         <SidebarGroup className="mt-auto">
           <SidebarGroupContent>
             <SidebarMenu>
@@ -240,6 +247,17 @@ export function AppSidebar({
                   <Archive />
                   <span>{t('sidebar.archive')}</span>
                   <SidebarMenuBadge>{archivedCount}</SidebarMenuBadge>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={executorsOpen}
+                  onClick={onExecutors}
+                  title={t('sidebar.executorsHint')}
+                >
+                  <Users />
+                  <span>{t('sidebar.executors')}</span>
+                  <SidebarMenuBadge>{executorCount}</SidebarMenuBadge>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>

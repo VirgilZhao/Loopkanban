@@ -16,6 +16,7 @@
 
 import { planDispatch, type Dispatch, type Skip, type TaskId } from '@loopkanban/core'
 import type { AgentPool } from '../agents/index.ts'
+import { providerPins } from '../executors/index.ts'
 import type { Runner } from '../runner/index.ts'
 import type { Storage } from '../storage/index.ts'
 
@@ -179,9 +180,13 @@ export class Scheduler {
       return report
     }
 
+    // 每张卡归哪个 CLI：卡上的执行器 → 默认执行器。**每一轮都重新解**，
+    // 这样改一次执行器用的模型，下一拍就生效。
+    const tasks = storage.listTasks()
     const plan = planDispatch({
-      tasks: storage.listTasks(),
+      tasks,
       availableProviders: agents.map((a) => a.provider.id),
+      pinned: providerPins(storage, tasks),
       limits: { maxPerProvider: settings.maxPerProvider, maxPerRepo: settings.maxPerRepo },
       now: this.now,
     })

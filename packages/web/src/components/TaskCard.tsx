@@ -8,7 +8,10 @@ import { summarize } from '@/lib/events.ts'
 import { skipMessage, useT } from '@/lib/i18n.tsx'
 import { taskClockFrom } from '@/lib/task.ts'
 import { cn } from '@/lib/utils.ts'
-import type { LiveLine, PendingDecision, PullRequest, RunFailure, Skip, Task } from '@/types.ts'
+import {
+  COLUMN_META, type Column as ColumnKey, type Executor, type LiveLine, type PendingDecision,
+  type PullRequest, type RunFailure, type Skip, type Task,
+} from '@/types.ts'
 
 /** 把毫秒时长压成人能扫一眼的形式。 */
 function since(from: number, now: number): string {
@@ -41,11 +44,21 @@ interface Props {
   rounds?: number | undefined
   /** 等人拍板的决策（权限审批 / 提问）。空就不显示。 */
   pending?: PendingDecision[] | undefined
+  /** 这张卡归哪个执行器。没指定过的卡（用默认那位）不给 —— 卡面不写默认值。 */
+  executor?: Executor | undefined
+  /**
+   * 这张卡停在哪一列 —— **只有把几列摆成一张表的面板才传**（见 Column 的 `merge`）。
+   *
+   * 一块板一列的时候，列头已经说了这一列是什么，卡上再写一遍是噪音；混着摆
+   * 的时候反过来，不写就分不出"排着队"和"正在跑"。
+   */
+  stage?: ColumnKey | undefined
   onSelect: (task: Task) => void
 }
 
 export function TaskCard({
-  task, now, selected, live, skip, failure, projectName, attachments, prs, rounds, pending, onSelect,
+  task, now, selected, live, skip, failure, projectName, attachments, prs, rounds, pending, stage,
+  executor, onSelect,
 }: Props): React.JSX.Element {
   const t = useT()
   // Done 的卡最该一眼看出"是怎么进主干的"：合过几条 PR。还开着的那些
@@ -96,18 +109,39 @@ export function TaskCard({
         <span className="tag">{task.id}</span>
         <span className="flex-1" />
         {archived ? <Archive className="size-3 text-ink-faint" /> : null}
-        {task.preferredProvider === undefined ? null : (
-          // 指定了模型就一并标出来：覆盖过默认值这件事，一眼看得见才有意义。
-          // 但 opencode 的模型 id 能长到 `opencode-go/deepseek-v4-flash`，
-          // 不截断就会把整张卡挤成三行 —— 截了，完整的挂在 title 上。
+        {/* 这张卡归谁。执行器优先 —— 那是人现在说话用的词；没有执行器的老卡
+            退回它当年填的 CLI + 模型。名字可能长，截断，完整的挂在 title 上。 */}
+        {executor === undefined ? (
+          task.preferredProvider === undefined ? null : (
+            <span
+              className="chrome-label min-w-0 truncate !text-[8px]"
+              title={`${task.preferredProvider}${task.model === undefined ? '' : ` · ${task.model}`}`}
+            >
+              {task.preferredProvider}{task.model === undefined ? '' : ` · ${task.model}`}
+            </span>
+          )
+        ) : (
           <span
             className="chrome-label min-w-0 truncate !text-[8px]"
-            title={`${task.preferredProvider}${task.model === undefined ? '' : ` · ${task.model}`}`}
+            title={t('card.executor', { name: executor.name })
+              + ` · ${executor.provider}${executor.model === undefined ? '' : ` · ${executor.model}`}`}
           >
-            {task.preferredProvider}{task.model === undefined ? '' : ` · ${task.model}`}
+            {executor.name}
           </span>
         )}
-        <span className="lamp" data-state={archived ? 'idle' : task.column} />
+        {stage === undefined ? (
+          <span className="lamp" data-state={archived ? 'idle' : task.column} />
+        ) : (
+          // 灯 + 一个词。`ready` 的灯借 `queued` 那一档：慢半拍、不发光 ——
+          // 一屏待命的卡要是全都亮着呼吸灯，"在跑"就不再是个信号了。
+          <span
+            className={cn('chrome-label flex items-center gap-1', running && 'text-sodium')}
+            title={t(`column.${stage}.hint`)}
+          >
+            <span className="lamp" data-state={archived ? 'idle' : stage === 'ready' ? 'queued' : stage} />
+            {COLUMN_META[stage].label}
+          </span>
+        )}
       </div>
 
       {/* 卡片正文就是描述本身：任务没有独立标题，两行放不下的用省略号收住。 */}

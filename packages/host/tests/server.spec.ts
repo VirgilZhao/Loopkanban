@@ -5,7 +5,7 @@ import { chmod, mkdtemp, mkdir, readFile, realpath, writeFile, rm } from 'node:f
 import { connect, type AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
+import { asExecutorId, asProjectId, asRunId, asTaskId, type Task } from '@loopkanban/core'
 import { AgentPool } from '../src/agents/index.ts'
 import { AttachmentStore, MAX_ATTACHMENTS_PER_COMMENT } from '../src/attachments/index.ts'
 import { DecisionHub } from '../src/decisions/index.ts'
@@ -1134,6 +1134,196 @@ describe('PATCH /api/tasks/:id', () => {
   })
 })
 
+describe('执行器', () => {
+  /** 一台探测到 claude 与 codex 的机器。执行器只能在这两个里面挑 CLI。 */
+  const fake = (id: string) => ({
+    provider: { id } as never,
+    caps: {
+      id, bin: `/fake/${id}`, version: '1.0.0',
+      streaming: true, canPinSessionId: false, canResume: true, canPickModel: true,
+      models: [`${id}-fast`],
+      permissionTiers: ['standard'],
+      help: {
+        flags: new Set<string>(),
+        choices: new Map<string, readonly string[]>(),
+        descriptions: new Map<string, string>(),
+      },
+    } as never,
+  })
+
+  let machine: RunningServer
+
+  /** 带 cookie 打这台"装了两个 CLI"的 server。 */
+  const call = (path: string, init: RequestInit = {}): Promise<Response> =>
+    fetch(`http://127.0.0.1:${String(machine.port)}${path}`, {
+      ...init,
+      headers: { cookie: `loopkanban_token=${TOKEN}`, ...init.headers },
+    })
+
+  const create = (body: unknown) =>
+    call('/api/executors', { method: 'POST', body: JSON.stringify(body) })
+
+  beforeEach(async () => {
+    machine = await startServer({
+      storage: store, token: TOKEN,
+      agents: AgentPool.of([fake('claude'), fake('codex')]),
+    })
+  })
+
+  afterEach(async () => { await machine.close() })
+
+  it('列出来的时候把"能选哪些 CLI"一起给 —— 新建表单照着它渲染', async () => {
+    const body = await (await call('/api/executors')).json() as
+      { executors: unknown[]; defaultId: string | null; providers: { id: string; models: string[] }[] }
+    expect(body.executors).toEqual([])
+    expect(body.defaultId).toBeNull()
+    expect(body.providers.map((p) => p.id)).toEqual(['claude', 'codex'])
+    expect(body.providers[0]?.models).toEqual(['claude-fast'])
+  })
+
+  it('建一个，它顺带成为默认', async () => {
+    const res = await create({ name: '大壮', provider: 'claude', model: 'opus' })
+    expect(res.status).toBe(201)
+    const listed = await (await call('/api/executors')).json() as { defaultId: string | null }
+    expect(listed.defaultId).toBe(store.listExecutors()[0]?.id)
+  })
+
+  it('重名是 409 —— 那是一次冲突，不是格式错误', async () => {
+    await create({ name: '大壮', provider: 'claude' })
+    const again = await create({ name: '大壮', provider: 'codex' })
+    expect(again.status).toBe(409)
+    expect(await again.json()).toMatchObject({ error: 'executor-duplicate' })
+  })
+
+  it('名字里有空格是 422，并说清楚为什么', async () => {
+    const res = await create({ name: '大 壮', provider: 'claude' })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'executor-illegal-chars' })
+  })
+
+  it('本机没探测到的 CLI 当场拒绝', async () => {
+    const res = await create({ name: '大壮', provider: 'gemini' })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'executor-unknown-provider' })
+  })
+
+  it('模型给 null 是"回到那个 CLI 自己的默认"', async () => {
+    const { executor } = await (await create({ name: '大壮', provider: 'claude', model: 'opus' })).json() as
+      { executor: { id: string } }
+    const res = await call(`/api/executors/${executor.id}`, {
+      method: 'PATCH', body: JSON.stringify({ model: null }),
+    })
+    expect(res.status).toBe(200)
+    expect(store.getExecutor(asExecutorId(executor.id))?.model).toBeUndefined()
+  })
+
+  it('换默认', async () => {
+    await create({ name: '大壮', provider: 'claude' })
+    const { executor } = await (await create({ name: '小壮', provider: 'codex' })).json() as
+      { executor: { id: string } }
+    expect((await call(`/api/executors/${executor.id}/default`, { method: 'POST' })).status).toBe(200)
+    const listed = await (await call('/api/executors')).json() as { defaultId: string | null }
+    expect(listed.defaultId).toBe(executor.id)
+  })
+
+  it('删掉之后，指着它的卡回到"用默认执行器"，卡本身还在', async () => {
+    const { executor } = await (await create({ name: '大壮', provider: 'claude' })).json() as
+      { executor: { id: string } }
+    store.createTask(task({ id: 't1', executorId: asExecutorId(executor.id) }))
+
+    expect((await call(`/api/executors/${executor.id}`, { method: 'DELETE' })).status).toBe(200)
+    const after = store.getTask(asTaskId('t1'))
+    expect(after).not.toBeNull()
+    expect(after?.executorId).toBeUndefined()
+  })
+
+  it('建卡时指一个不存在的执行器是 422，而不是存下去等派活时才炸', async () => {
+    const res = await call('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ projectId: String(PROJECT), description: 'x', executorId: 'e-nope' }),
+    })
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: 'executor-not-found' })
+  })
+
+  it('看板状态里带着执行器 —— 卡面要按 id 说出名字', async () => {
+    await create({ name: '大壮', provider: 'claude' })
+    const body = await (await call('/api/state')).json() as
+      { executors: { name: string }[]; defaultExecutorId: string | null }
+    expect(body.executors.map((e) => e.name)).toEqual(['大壮'])
+    expect(body.defaultExecutorId).not.toBeNull()
+  })
+})
+
+describe('聊出一张卡', () => {
+  it('没装对话服务时那几条接口一律 503 —— 界面据此不摆一个说了没人应的输入框', async () => {
+    const res = await api(`/api/projects/${String(PROJECT)}/chat`)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ error: 'chat-unavailable' })
+  })
+
+  it('采纳一份草案：原样建成卡，落在想法池', async () => {
+    store.addChatMessage({
+      id: 'm1', projectId: PROJECT, role: 'proposal', body: '把导出做成后台任务',
+      proposal: { description: '把导出做成后台任务', acceptance: ['有回执'], relatedTo: [] },
+      at: T0,
+    })
+    const res = await api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({ column: 'backlog' }) })
+    expect(res.status).toBe(201)
+    const { task: made } = await res.json() as { task: { id: string; column: string; acceptance: string[] } }
+    expect(made.column).toBe('backlog')
+    expect(made.acceptance).toEqual(['有回执'])
+    // 记下它变成了哪张卡：再点一次不该再建一张。
+    expect(store.listChat(PROJECT)[0]?.taskId).toBe(made.id)
+  })
+
+  it('选"直接进 Loop"就走一次正常流转到 ready，而不是绕过建卡的规矩', async () => {
+    store.addChatMessage({
+      id: 'm1', projectId: PROJECT, role: 'proposal', body: 'x',
+      proposal: { description: 'x', acceptance: [], relatedTo: [] }, at: T0,
+    })
+    const res = await api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({ column: 'ready' }) })
+    const { task: made } = await res.json() as { task: { column: string } }
+    expect(made.column).toBe('ready')
+  })
+
+  it('草案里的关联卡照旧要过一遍：查无此卡的一概不认', async () => {
+    store.createTask(task({ id: 't-f3ccd6cc', column: 'done' }))
+    store.addChatMessage({
+      id: 'm1', projectId: PROJECT, role: 'proposal', body: 'x',
+      proposal: { description: 'x', acceptance: [], relatedTo: ['t-f3ccd6cc', 't-nope'] }, at: T0,
+    })
+    const res = await api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({}) })
+    const { task: made } = await res.json() as { task: { relatedTo: string[] } }
+    expect(made.relatedTo).toEqual(['t-f3ccd6cc'])
+  })
+
+  it('同一份草案不会建出第二张卡', async () => {
+    store.addChatMessage({
+      id: 'm1', projectId: PROJECT, role: 'proposal', body: 'x',
+      proposal: { description: 'x', acceptance: [], relatedTo: [] }, at: T0,
+    })
+    await api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({}) })
+    const again = await api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({}) })
+    expect(again.status).toBe(409)
+    expect(store.listTasks()).toHaveLength(1)
+  })
+
+  it('两下同时点也只建一张 —— 认领那条 UPDATE 才是唯一的入场券', async () => {
+    store.addChatMessage({
+      id: 'm1', projectId: PROJECT, role: 'proposal', body: 'x',
+      proposal: { description: 'x', acceptance: [], relatedTo: [] }, at: T0,
+    })
+    // 并发发出去：两边都会读到 task_id 还是空的，靠 linkChatProposal 分胜负。
+    const both = await Promise.all([
+      api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({}) }),
+      api('/api/chat/m1/adopt', { method: 'POST', body: JSON.stringify({}) }),
+    ])
+    expect(both.map((res) => res.status).sort()).toEqual([201, 409])
+    expect(store.listTasks()).toHaveLength(1)
+  })
+})
+
 describe('讨论', () => {
   const say = (id: string, body: unknown) =>
     api(`/api/tasks/${id}/comments`, { method: 'POST', body: JSON.stringify(body) })
@@ -1172,34 +1362,65 @@ describe('讨论', () => {
     expect(body.comments.map((c) => c.author)).toEqual(['human', 'agent'])
   })
 
-  it('留言可以顺带换下一轮的执行器与模型', async () => {
-    store.createTask(task({ id: 't1', column: 'review', preferredProvider: 'claude', model: 'opus' }))
-    const res = await say('t1', { body: '换个人再来一版', preferredProvider: 'codex', model: 'gpt-5' })
+  /** 造两个执行器，`@` 点名要有对象。 */
+  const twoExecutors = (): void => {
+    store.createExecutor({
+      id: asExecutorId('e-big'), name: '大壮', provider: 'claude', model: 'opus', createdAt: T0, updatedAt: T0,
+    })
+    store.createExecutor({
+      id: asExecutorId('e-small'), name: '小壮', provider: 'claude', model: 'sonnet', createdAt: T0, updatedAt: T0,
+    })
+  }
+
+  it('话里 @ 谁，下一轮就归谁', async () => {
+    twoExecutors()
+    store.createTask(task({ id: 't1', column: 'review', executorId: asExecutorId('e-big') }))
+    const res = await say('t1', { body: '@小壮 换个人再来一版' })
     expect(res.status).toBe(201)
     // 换人与回队列是同一次留言的两半，两边都得落地。
     expect(await res.json()).toMatchObject({ requeued: true })
     const after = store.getTask(asTaskId('t1'))
-    expect(after?.preferredProvider).toBe('codex')
-    expect(after?.model).toBe('gpt-5')
+    expect(after?.executorId).toBe('e-small')
     expect(after?.column).toBe('ready')
   })
 
-  it('字段缺席只是"这次没提到"，显式 null 才是"清空"', async () => {
-    store.createTask(task({ id: 't1', column: 'backlog', preferredProvider: 'claude', model: 'opus' }))
+  it('不点名就不换人 —— 接着上次那位干', async () => {
+    twoExecutors()
+    store.createTask(task({ id: 't1', column: 'review', executorId: asExecutorId('e-big') }))
     await say('t1', { body: '只是留个话' })
-    expect(store.getTask(asTaskId('t1'))?.model).toBe('opus')
+    expect(store.getTask(asTaskId('t1'))?.executorId).toBe('e-big')
+  })
 
-    await say('t1', { body: '这次谁都行', preferredProvider: null, model: null })
-    const cleared = store.getTask(asTaskId('t1'))
-    expect(cleared?.preferredProvider).toBeUndefined()
-    expect(cleared?.model).toBeUndefined()
+  it('#任务id 就是"参考那张卡"，落成关联', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    store.createTask(task({ id: 't-f3ccd6cc', column: 'done' }))
+    await say('t1', { body: '照着 #t-f3ccd6cc 的做法来' })
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual(['t-f3ccd6cc'])
+  })
+
+  it('#后面是查无此卡时当没写过，而不是留下一条指向空的关联', async () => {
+    store.createTask(task({ id: 't1', column: 'review' }))
+    const res = await say('t1', { body: '参考 #t-nope 那张' })
+    expect(res.status).toBe(201)
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual([])
+  })
+
+  it('执行中的卡上带个 #引用，那句话照样发得出去 —— 只是这轮不记那条关联', async () => {
+    store.createTask(task({ id: 't1', column: 'running' }))
+    store.createTask(task({ id: 't-f3ccd6cc', column: 'done' }))
+    const res = await say('t1', { body: '跑完看看 #t-f3ccd6cc 那张' })
+    expect(res.status).toBe(201)
+    expect(store.listComments(asTaskId('t1'))).toHaveLength(1)
+    // 卡正跑着，改不动 —— 关联没记上，但那句话（连同卡号）留下来了。
+    expect(store.getTask(asTaskId('t1'))?.relatedTo).toEqual([])
   })
 
   it('执行中的卡换不了人，那条话也不该留下', async () => {
-    store.createTask(task({ id: 't1', column: 'running', preferredProvider: 'claude' }))
-    const res = await say('t1', { body: '换 codex', preferredProvider: 'codex' })
+    twoExecutors()
+    store.createTask(task({ id: 't1', column: 'running', executorId: asExecutorId('e-big') }))
+    const res = await say('t1', { body: '@小壮 接手' })
     expect(res.status).toBe(422)
-    expect(store.getTask(asTaskId('t1'))?.preferredProvider).toBe('claude')
+    expect(store.getTask(asTaskId('t1'))?.executorId).toBe('e-big')
     expect(store.listComments(asTaskId('t1'))).toHaveLength(0)
   })
 

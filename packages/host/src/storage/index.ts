@@ -548,7 +548,7 @@ export class Storage {
   deleteProject(id: ProjectId): boolean {
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      // 顺序是外键定的：事件 → Run → 卡片 → 项目。
+      // 顺序是外键定的：事件 → Run → 卡片 → 对话 → 项目。
       this.db.prepare(`
         DELETE FROM run_events WHERE run_id IN (
           SELECT id FROM runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
@@ -564,6 +564,7 @@ export class Storage {
       this.db.prepare('DELETE FROM task_attachments WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM task_prs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)').run(id)
       this.db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id)
+      this.db.prepare('DELETE FROM chat_messages WHERE project_id = ?').run(id)
       const removed = this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
       if (removed.changes !== 1) {
         this.db.exec('ROLLBACK')
